@@ -1,0 +1,16 @@
+# Local build outputs.
+/bin/
+
+# Agent scratch space and isolated Git workspaces.
+/.tmp/
+/.workspaces/
+
+# Go test binaries, coverage output, and profiling data.
+*.test
+*.out
+*.prof
+
+# Operating system and editor metadata.
+.DS_Store
+.idea/
+.vscode/
