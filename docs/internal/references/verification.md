@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 20:10
-last_modified: 2026-10-01 22:24
+last_modified: 2026-10-02 15:17
 status: current
 ---
 
@@ -12,6 +12,50 @@ cross-build/linkage checks. Raw logs and temporary mutation copies are local
 ignored artifacts; the source tests linked here are retained in the repository.
 
 ## Whole-repository checks
+
+### Repaint performance
+
+The repaint checks use the pinned native archive and the macOS Go toolchain.
+`go test -race ./...`, `go vet ./...`, and `go mod tidy -diff` pass in the
+`fix/repaint-performance` worktree. Logs are retained locally under `.tmp/` as
+`repaint-full-tests.log`, `repaint-vet.log`, and `repaint-tidy.log`.
+
+[Repaint tests](../../../repaint_test.go) exercise fragmented output through a
+real child PTY, a fixed first repaint deadline, flushing while idle and before
+exit, immediate protocol replies, region metadata invalidation, negotiated
+outer synchronized output, and restoration of an observed entry hold.
+[Damage tests](../../../internal/emulator/damage_test.go)
+exercise consumed native dirty flags, owned snapshots, clean-row retention,
+scrolling, default-color changes, and resize.
+
+The compiler overlay in `.tmp/repaint-disabled.json` disables chunk batching,
+metadata comparison, synchronized output, and native damage consumption without
+editing the maintained source files. The corresponding regressions fail with
+those changes disabled; the restored source passes. `.tmp/repaint-disabled.log`
+records the behavioral failures.
+
+The separate exit-flush overlay in `.tmp/repaint-exit-disabled.json` leaves
+batching enabled and removes the final flush. Its regression fails because the
+pending final text is absent; `.tmp/repaint-exit-disabled.log` records that check.
+
+`BenchmarkStateCapture` measures a 120×40 native viewport, including owned state
+copies, over a 300 ms benchmark interval on an Apple M4 Pro:
+
+| Capture | Full capture | Dirty-row capture |
+| :--- | ---: | ---: |
+| Unchanged viewport | 1.993 ms/op, 43,325 allocations/op | 0.145 ms/op, 84 allocations/op |
+| One-row update | 1.973 ms/op, 43,327 allocations/op | 0.202 ms/op, 1,168 allocations/op |
+
+These component measurements come from `.tmp/repaint-benchmark-before.log` and
+`.tmp/repaint-benchmark-after.log`; they do not measure end-to-end physical
+terminal latency. Snapshot ownership still requires copying viewport arrays.
+
+A separate diagnostic against the original capture source observes a native
+foreground of `#123456` after OSC 10 while captured and painted foregrounds
+remain white when background defaults are unset. `.tmp/color-probe.log` records
+that pre-existing observation issue; the repaint changes do not address it.
+
+### Packaging and drawing checks
 
 The coordinator's `just check` exits successfully after the live-border,
 control-digit, measured-pixel and drawing-interface changes. It executes module hygiene,

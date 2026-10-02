@@ -135,15 +135,27 @@ func (t *Terminal) captureVisual() error {
 	if err != nil {
 		return fmt.Errorf("reading native render colors: %w", err)
 	}
-	visual := visualState{
-		cells:       make([]uv.Cell, t.size.Cols*t.size.Rows),
-		nativeCells: make([]NativeCell, t.size.Cols*t.size.Rows),
-		cursor:      *cursor, colors: *colors,
+	visual := t.visual
+	count := t.size.Cols * t.size.Rows
+	if len(visual.cells) != count || visual.colors != *colors {
+		// Colors are resolved into each UV cell; palette/default-color changes
+		// therefore invalidate cached styles even without any text damage.
+		if err := t.render.SetDirty(ghostty.RenderStateDirtyFull); err != nil {
+			return fmt.Errorf("invalidating native render styles: %w", err)
+		}
 	}
+	if len(visual.cells) != count {
+		visual.cells = make([]uv.Cell, count)
+		visual.nativeCells = make([]NativeCell, count)
+	}
+	visual.cursor, visual.colors = *cursor, *colors
 	if err := t.render.RowIterator(t.rows); err != nil {
 		return fmt.Errorf("reading native render rows: %w", err)
 	}
-	for t.rows.Next() {
+	for {
+		if _, ok := t.rows.NextDirty(); !ok {
+			break
+		}
 		y, err := t.rows.ViewportY()
 		if err != nil {
 			return fmt.Errorf("reading native row position: %w", err)
@@ -157,6 +169,9 @@ func (t *Terminal) captureVisual() error {
 		if err := t.copyRow(int(y), &visual); err != nil {
 			return err
 		}
+	}
+	if err := t.render.Clean(); err != nil {
+		return fmt.Errorf("consuming native render damage: %w", err)
 	}
 	t.visual = visual
 	return nil

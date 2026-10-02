@@ -26,7 +26,7 @@ var consoleOwners = struct {
 
 // Only modes with an observed entry value are changed. The alternate screen is
 // required because its prior contents cannot be reconstructed from a TTY.
-var consoleModes = []ansi.DECMode{1, 5, 7, 9, 12, 25, 66, 67, 1000, 1001, 1002, 1003, 1004, 1005, 1006, 1015, 1016, 1035, 1036, 1039, 1049, 2004, 2027, 2031}
+var consoleModes = []ansi.DECMode{1, 5, 7, 9, 12, 25, 66, 67, 1000, 1001, 1002, 1003, 1004, 1005, 1006, 1015, 1016, 1035, 1036, 1039, 1049, 2004, synchronizedOutputMode, 2027, 2031}
 
 type console struct {
 	inherit                                              bool
@@ -244,6 +244,11 @@ func (c *console) enter() error {
 	if err := c.writeEntryModes(); err != nil {
 		return err
 	}
+	// Each outer frame owns its synchronized update and must release it before
+	// waiting for input. Restore an observed entry hold only when leaving.
+	if err := c.setMode(synchronizedOutputMode, false); err != nil {
+		return err
+	}
 	if c.kittySupported {
 		if _, err := c.renderer.WriteString(ansi.PushKittyKeyboard(0)); err != nil {
 			return err
@@ -270,6 +275,11 @@ func (c *console) enter() error {
 
 func (c *console) supports(m ansi.DECMode) bool {
 	v, ok := c.entry[m]
+	if m == synchronizedOutputMode {
+		// Synchronized output needs both transitions; a permanently set or
+		// reset mode cannot delimit frames.
+		return ok && (v == ansi.ModeSet || v == ansi.ModeReset)
+	}
 	return ok && (v.IsSet() || v.IsReset())
 }
 

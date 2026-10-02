@@ -22,7 +22,7 @@
 
 1. **The child has a separate terminal display.** Its erase, cursor, reset, and alternate-screen operations stay inside its viewport. That display is combined with your regions before writing to the outer terminal.
 2. **Input follows the child's protocol.** Keyboard bytes stay unchanged when outer and child protocols agree; negotiated differences are converted. Mouse coordinates become child-local coordinates. Input over the frame is not mapped to an invented child position.
-3. **Updates are event-driven.** Initial drawing, application invalidation, relevant child changes, and resize trigger rendering. Normal rendering emits only changed cells. There is no periodic frame redraw or metadata polling timer.
+3. **Updates are event-driven.** Initial drawing, application invalidation, relevant child changes, and resize trigger rendering. Child-output bursts share a repaint deadline of about 17 ms. Normal rendering emits only changed cells, with synchronized output when the outer terminal reports support. Idle sessions have no periodic redraw or metadata polling timer.
 4. **One session owns terminal I/O.** Construction has no terminal side effects; `Run` blocks. Draw into the supplied canvases and submit updates through the controller. Concurrent terminal writes interfere with the composed display.
 5. **Metadata has limits.** Snapshots own their data, and OS fields report availability and errors. Terminal output reveals the child's display and protocol requests; it cannot reveal an arbitrary application's widget tree or editor buffers.
 
@@ -148,6 +148,12 @@ type DrawContext[T any] struct {
 ```
 
 `Term` is an owned child snapshot. `Data` is the selected region's application payload. `View` is a cleared, region-sized `uv.Screen` backed by a native screen buffer. `View.Bounds().Dx()` and `.Dy()` give its width and height in terminal cells. Coordinates start at the region's own origin.
+
+Regions redraw for title, directory, size, terminal-mode, alternate-screen, or
+scroll metadata changes, and for application invalidation. Text changes, cursor
+movement, cursor visibility, and synchronized-update holds update the child
+display without invalidating region canvases. Use region invalidation when your
+application needs to redraw a region from those display details.
 
 The drawing contract requires synchronous drawing into `View`; filling the region and using Lip Gloss styles are optional. You can call `SetCell` directly or draw any `uv.Drawable`. Lip Gloss layers implement that interface: `lipgloss.NewLayer(text).Draw(ctx.View, ctx.View.Bounds())`. For positioned or overlapping layers, use `lipgloss.NewCompositor(layers...).Draw(ctx.View, ctx.View.Bounds())`. The library clips the completed region with wide-cell boundaries preserved. [Screen and drawable interfaces](https://github.com/charmbracelet/ultraviolet/blob/006e29f97886/uv.go), [Lip Gloss layers](https://github.com/charmbracelet/lipgloss/blob/v2.0.6/layer.go).
 

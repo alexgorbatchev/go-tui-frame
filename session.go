@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -148,6 +147,7 @@ type session[T any] struct {
 	screen                                                    uv.ScreenBuffer
 	snapshot                                                  Snapshot
 	state                                                     emulator.State
+	metadataDirty                                             bool
 	master                                                    *os.File
 	fd                                                        int
 	wakeRead, wakeWrite                                       *os.File
@@ -163,6 +163,7 @@ type session[T any] struct {
 	queuedBytes                                               int
 	framer                                                    *input.Framer
 	escapeDeadline, holdDeadline, killDeadline, drainDeadline time.Time
+	renderDeadline                                            time.Time
 }
 
 func childEnvironment(env []string) []string {
@@ -196,11 +197,18 @@ func (c *console) childWinsize(g geometry) *pty.Winsize {
 }
 
 func (s *session[T]) refresh(force bool) error {
+	if err := s.refreshState(); err != nil {
+		return err
+	}
+	return s.render(force)
+}
+
+func (s *session[T]) refreshState() error {
 	state, err := s.terminal.State()
 	if err != nil {
 		return err
 	}
-	metadataChanged := !reflect.DeepEqual(state, s.state)
+	s.metadataDirty = s.metadataDirty || regionMetadataChanged(s.state, state)
 	s.state = state
 	s.snapshot.ObservedAt = time.Now()
 	s.snapshot.Terminal = TerminalSnapshot{Title: state.Title, Directory: state.Directory, Size: Size{Cols: state.Size.Cols, Rows: state.Size.Rows}, Cells: state.Cells, Cursor: Cursor{X: int(state.Cursor.ViewportX), Y: int(state.Cursor.ViewportY), Visible: state.Cursor.Visible && state.Cursor.ViewportHasValue}, Alternate: state.Alternate, Native: state}
@@ -213,15 +221,19 @@ func (s *session[T]) refresh(force bool) error {
 	if !state.Held {
 		s.holdDeadline = time.Time{}
 	}
-	return s.render(force || metadataChanged)
+	return nil
 }
 
 func (s *session[T]) render(force bool) error {
+	force = force || s.metadataDirty
 	if force || s.frame.regionsDirty() {
 		s.collectMetadata()
 	}
 	s.frame.compose(s.screen, s.geometry, s.snapshot, force)
 	c := s.console
+	if err := c.setMode(synchronizedOutputMode, true); err != nil {
+		return err
+	}
 	if err := c.syncCursor(s.snapshot.Terminal.Native); err != nil {
 		return fmt.Errorf("render child cursor: %w", err)
 	}
@@ -233,9 +245,14 @@ func (s *session[T]) render(force bool) error {
 	if err := c.setMode(25, cursor.Visible); err != nil {
 		return err
 	}
+	if err := c.setMode(synchronizedOutputMode, false); err != nil {
+		return err
+	}
 	if err := c.renderer.Flush(); err != nil {
 		return fmt.Errorf("render outer terminal: %w", err)
 	}
+	s.metadataDirty = false
+	s.renderDeadline = time.Time{}
 	return nil
 }
 
@@ -347,8 +364,13 @@ func (s *session[T]) readChild(buf []byte) error {
 		if e := s.effects(); e != nil {
 			return e
 		}
-		if e := s.refresh(false); e != nil {
+		if e := s.refreshState(); e != nil {
 			return e
+		}
+		// Keep the first deadline so a continuously writing child cannot postpone
+		// display indefinitely. Protocol replies and observations remain immediate.
+		if s.renderDeadline.IsZero() {
+			s.renderDeadline = time.Now().Add(renderInterval)
 		}
 		if e := s.events.emit(Event{Kind: StateChanged, Snapshot: &s.snapshot}); e != nil {
 			return e
@@ -630,7 +652,8 @@ func (s *session[T]) loop(ctx context.Context) error {
 			failure = context.Cause(ctx)
 		}
 		if s.waited && s.ptyEOF {
-			return failure
+			// EOF may precede the last frame's deadline.
+			return errors.Join(failure, s.render(false))
 		}
 		if err := s.frame.configurationError(); err != nil && failure == nil {
 			failure = err
@@ -732,6 +755,11 @@ func (s *session[T]) handleWake(buf []byte, resizes <-chan struct{}) error {
 
 func (s *session[T]) deadlines() error {
 	now := time.Now()
+	if !s.renderDeadline.IsZero() && !now.Before(s.renderDeadline) {
+		if err := s.render(false); err != nil {
+			return err
+		}
+	}
 	if !s.escapeDeadline.IsZero() && !now.Before(s.escapeDeadline) {
 		s.escapeDeadline = time.Time{}
 		if p, ok := s.framer.Flush(); ok {
@@ -767,7 +795,7 @@ func (s *session[T]) deadlines() error {
 
 func (s *session[T]) pollTimeout() int {
 	timeout := -1
-	for _, d := range []time.Time{s.escapeDeadline, s.holdDeadline, s.killDeadline, s.drainDeadline} {
+	for _, d := range []time.Time{s.escapeDeadline, s.holdDeadline, s.killDeadline, s.drainDeadline, s.renderDeadline} {
 		if !d.IsZero() {
 			ms := max(0, int(time.Until(d).Milliseconds()+1))
 			if timeout < 0 || ms < timeout {
