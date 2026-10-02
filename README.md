@@ -24,13 +24,18 @@
 3. **Mouse delivery requires geometry.** Mouse input targeting the child uses child-local coordinates while retaining its button, modifiers, and action. Pixel reports require actual pixel geometry. A frame position has no corresponding child cell, so the library does not fabricate an edge coordinate. Byte-identical forwarding of every mouse report would give the child incorrect coordinates. [mouse protocols](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html).
 4. **Queries describe the child endpoint.** Cursor, size, mode, and capability queries receive answers consistent with the virtual terminal. Generated replies are distinguishable from user input. The child must not inherit capability claims that the library cannot deliver. [terminfo](https://invisible-island.net/ncurses/man/terminfo.5.html), [terminal queries](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html).
 5. **The session owns terminal I/O.** `Run` blocks for one session. Construction and chained declarations have no terminal side effects. Frame callbacks draw into region-local buffers instead of writing to the terminal. Snapshots contain owned data, and consumer mutation cannot alter the live emulator. Only one session owns a particular outer terminal at a time.
-6. **Observation has explicit costs.** Raw recording preserves bytes observed at the terminal transport, not application write boundaries. A shared child terminal merges stdout, stderr, and other writers. Owned snapshots and retained history require bounded memory; optional process sampling adds platform-specific work. Linux process metadata has permission and identity limits. [stream reads](https://man7.org/linux/man-pages/man2/read.2.html), [process metadata](https://man7.org/linux/man-pages/man5/proc_pid_stat.5.html).
+6. **Observation has explicit costs.** Byte observations preserve the terminal transport, not application write boundaries. A shared child terminal merges stdout, stderr, and other writers. The active viewport is copied for owned snapshots; scrollback counts do not expose the complete retained history. Process observations have platform, permission, and identity limits. [stream reads](https://man7.org/linux/man-pages/man2/read.2.html), [process metadata](https://man7.org/linux/man-pages/man5/proc_pid_stat.5.html).
 
 # Prerequisites
 
 - Go 1.27.1 or newer, as declared in [go.mod](go.mod).
-- A Unix-like system or macOS with an interactive outer terminal.
+- Linux or macOS with an interactive outer terminal.
 - The executable child TUI you want to wrap.
+- For building a consumer: CGO enabled, a C compiler, `pkg-config`, and the pinned libghostty headers/static archive. Building that native archive requires Zig 0.16.0.
+
+The terminal emulator links into the consumer binary statically. Running the binary needs no separate libghostty installation, Ghostty application, or multiplexer server; the operating system, outer terminal, and child executable remain required. The binding selects `libghostty-vt-static` through `pkg-config`, so its archive must be available at build time. [Static binding](https://github.com/mitchellh/go-libghostty/blob/76867c77a212/cgo_static.go), [native build requirement](https://github.com/ghostty-org/ghostty/blob/33da6848d63b3bba2b4f31ab1531d618f2795192/build.zig.zon).
+
+Follow the [native build setup](docs/internal/references/native-build.md) when building a consumer executable. macOS executables use OS-provided system libraries; Linux builds use a static musl link.
 
 # Installation
 
@@ -95,6 +100,7 @@ Supply a standard `exec.Cmd` to configure `Dir`, `Env`, and other compatible lau
 | `Header`, `Footer` | `(rows int, draw func(DrawContext[T])) *Frame[T]` | Reserve rows; receive one typed drawing context. |
 | `Left`, `Right` | `(cols int, draw func(DrawContext[T])) *Frame[T]` | Reserve columns with the same callback contract. |
 | `Border` | `(enabled bool) *Frame[T]` | Declare a border around the child viewport. |
+| `Terminal` | `(input, output *os.File) *Frame[T]` | Borrow outer terminal files; default to `os.Stdin` and `os.Stdout`. |
 | `InvalidateHeader`, `InvalidateFooter` | `(data T) error` | Replace the selected region's data and schedule drawing. |
 | `InvalidateLeft`, `InvalidateRight` | `(data T) error` | Replace the selected side region's data and schedule drawing. |
 | `Observe` | `(handler func(Event)) *Frame[T]` | Receive owned input/output, terminal, and process observations without consuming input. |
@@ -131,9 +137,11 @@ Use offscreen styling and composition in callbacks. Direct Lip Gloss `Print`/`Pr
 
 `Frame[T]` records configuration and acts as the live controller. Chained declarations have no terminal side effects; configuration methods are not safe to mutate concurrently and freeze when `Run` begins. Each configured region initially receives a by-value copy of the data supplied to `New`. An invalidation replaces only the named region's data: updating the header does not change the footer's payload. The same `T` is used by all regions, while each retains its own latest value.
 
-Before terminal mutation, `Run` validates static requirements: non-nil/unstarted command, positive region dimensions, non-nil drawing callbacks, positive initial child viewport, compatible command I/O and process attributes, terminal ownership, and the configured capability profile. It then acquires the terminal reversibly and performs any required capability probes before starting the child. Active query responses can require noncanonical input, so probing cannot always precede every mode change. Failed acquisition or capability verification restores acquired terminal state and returns an error. A frame executes one session and is not reusable after `Run`. [query replies](https://sw.kovidgoyal.net/kitty/keyboard-protocol/#progressive-enhancement), [canonical input](https://man7.org/linux/man-pages/man3/termios.3.html).
+Before terminal mutation, `Run` validates static requirements: non-nil/unstarted command, positive region dimensions, non-nil drawing callbacks, positive initial child viewport, and compatible command I/O and process attributes. Input and output must refer to the same interactive terminal, which can have only one frame owner in the process. The session then acquires raw input reversibly and probes capabilities before starting the child. Active query responses can require noncanonical input, so probing cannot always precede every mode change. Failed acquisition or capability verification restores acquired terminal state and returns an error. A frame executes one session and is not reusable after `Run`. [query replies](https://sw.kovidgoyal.net/kitty/keyboard-protocol/#progressive-enhancement), [canonical input](https://man7.org/linux/man-pages/man3/termios.3.html).
 
 The session owns command start/wait, child terminal descriptors, and its I/O workers. Callers must not concurrently start, wait on, or modify an accepted command. Preassigned stdio or lifecycle settings that conflict with terminal/session ownership are rejected rather than silently replaced. The controller remains available to event handlers during execution; `Result` becomes available after the session ends. [Go `Cmd` ownership](https://pkg.go.dev/os/exec#Cmd).
+
+`Terminal(input, output)` selects the outer terminal files before `Run`; both must be non-nil. The session borrows them, restores the terminal state it acquires, and leaves the caller's files open. The default files are `os.Stdin` and `os.Stdout`.
 
 `InvalidateHeader`, `InvalidateFooter`, `InvalidateLeft`, and `InvalidateRight` are safe for concurrent submission before and during `Run`. Before execution, a successful call replaces that configured region's initial payload. During execution, it atomically publishes a complete payload and dirty revision; a callback receives one stable by-value payload. Pending submissions coalesce, retaining the latest accepted value for that region. An update racing startup or a drawing callback schedules the needed drawing pass without losing its wakeup. While the session remains active, the latest settled submission reaches the region.
 
@@ -147,7 +155,7 @@ Drawing callbacks use the canvas in the session's serialized rendering path, out
 
 Initial drawing, explicit region invalidation, relevant child-state changes, and resize schedule rendering. Each invalidation requests drawing even if its arbitrary `T` payload appears unchanged; the library does not require comparability or perform a promised deep-equality check. Normal output uses a cell diff, so identical rendered content does not repaint. Frame content has no default polling or periodic resnapshot timer; animation requires explicit consumer scheduling.
 
-Passive `Observe` callbacks run on a separate ordered dispatcher and receive durable copies. Queue overflow is reported as a session error rather than silent byte loss. Live screen snapshots can coalesce with recorded sequence gaps. Callbacks must return promptly and honor session cancellation through the caller's context; a Go function that never returns cannot be forcibly canceled.
+Passive `Observe` callbacks run on a separate ordered dispatcher and receive durable copies. The queue holds up to 64 waiting events plus one executing callback, with a 16 MiB weighted metadata budget covering both. Overflow reports `ErrObservationOverflow` as a session error rather than silently dropping bytes or waiting for a slow callback. These limits cover library admissions; consumers remain responsible for memory they retain or allocate. Shutdown restores the terminal, drains admitted events, and joins the dispatcher. Callbacks must return promptly and honor session cancellation through the caller's context; a Go function that never returns cannot be forcibly canceled.
 
 ## Optional keyboard capture
 
@@ -163,6 +171,8 @@ type Input struct {
 `Raw` is an owned copy of the event's original input bytes. `Key` supplies native Ultraviolet key information without replacing those bytes. Use `input.Key.Key().MatchString(...)` for matching: the pinned native `KeyEvent` interface exposes `Key()`, and the returned `uv.Key` has `MatchString`. [Native events](https://github.com/charmbracelet/ultraviolet/blob/006e29f97886/event.go), [key matching](https://github.com/charmbracelet/ultraviolet/blob/006e29f97886/key.go).
 
 `Pass` declines host capture and continues ordinary protocol-aware routing; original bytes remain unchanged when the outer and child protocols agree. `Consume` withholds that event from the child and records that the host handled it. Mutating the callback's byte copy does not rewrite routed input. Capture runs inline before delivery and must return promptly.
+
+When the negotiated protocol reports releases, the press determines ownership of its final release. A consumed press keeps its repeats and release out of the child, even if the handler would subsequently return `Pass`; a passed press keeps its release on the child path. The handler still receives these phases. Legacy protocols without release reports do not latch capture ownership across later keys.
 
 To add an explicit Ctrl-Q quit binding, replace the Quick Start's `Run` call with the following. Import the standard-library `context` package and Ultraviolet as `uv`.
 
@@ -183,7 +193,7 @@ result, err := app.Capture(func(input frame.Input) frame.Disposition {
 
 This handler consumes matching Ctrl-Q events and requests cancellation on press, including reported repeats; a matching release is consumed without an action. Other events pass through. Press/repeat/release information depends on the negotiated input protocol; legacy input cannot report every distinction. The binding is entirely opt-in. [Key phases](https://github.com/charmbracelet/ultraviolet/blob/006e29f97886/key.go), [context cancellation](https://pkg.go.dev/context#WithCancel).
 
-Recognized bracketed-paste payloads stay opaque to shortcut matching and retain their controls/newlines. Unmarked paste is indistinguishable from typing, so an optional keyboard capture cannot guarantee exclusion of those bytes. The default without capture preserves paste through the ordinary forwarding path. [paste boundaries](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-Bracketed-Paste-Mode).
+The session requests outer bracketed paste when that capability is verified, independently of the child's mode. Recognized paste payloads stay opaque to shortcut matching and retain their controls/newlines; only the bracketed envelope follows the child's requested mode. A mode change during a paste does not orphan its closing marker. If the outer terminal sends unmarked paste, those bytes are indistinguishable from typing, so optional keyboard capture cannot guarantee their exclusion. [paste boundaries](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-Bracketed-Paste-Mode).
 
 Semantic key data supplements original bytes instead of replacing them. Legacy terminal encodings cannot distinguish every physical key combination. Multi-key bindings require an explicit buffering timeout and replay policy; they cannot introduce an undocumented prefix delay. [keyboard ambiguities](https://sw.kovidgoyal.net/kitty/keyboard-protocol/).
 
@@ -194,20 +204,47 @@ Observation separates three exact byte streams: outer input before classificatio
 | Observation family | Information | Boundary |
 | :--- | :--- | :--- |
 | Launch and lifecycle | Executable, argv, configured cwd/env, PID, start/exit, native process state, drain and cleanup events | Launch configuration is distinct from current runtime state. |
-| Virtual terminal | Cells/graphemes, styles/colors, hyperlinks, both screens, cursor, modes, margins, scrollback, damage, viewport, capability state | Derived from terminal output under the selected protocol profile. |
-| Protocol events | Title/cwd hints, bells, clipboard/graphics requests, replies, unsupported controls, capture/translation decisions | Child-reported metadata is labeled as such; observation does not imply raw passthrough. |
-| OS/TTY inspection | Foreground process group, discovered descendants, current cwd, state, CPU/memory accounting, current slave settings where available | Platform, permission, sampling time, identity races, and collection errors remain visible. |
+| Virtual terminal | Active viewport cells/graphemes, styles/colors, hyperlink URLs, cursor, alternate-screen selection, named modes and getter errors, Kitty/modifyOtherKeys state, scrollback counts/limits, parser and native memory state | `Terminal.Native` owns the native observations; it does not expose both screen buffers, full scrollback contents, margins, or damage records. |
+| Protocol events | Title/cwd hints, bells, clipboard requests, replies, progress, notifications, semantic shell marks, native unknown-sequence observations, capture/translation decisions | Child-reported metadata is distinct from OS inspection; unknown-sequence callbacks are not an exhaustive parser audit. Raw `ChildOutput` preserves admitted transport bytes. |
+| OS/TTY inspection | Launch leader's native process fields, current session members, parent/session/group IDs, runtime cwd/executable, kernel argv/env views, CPU/memory/threads, native counters, actual PTY winsize/termios/foreground group | Fields expose availability, source, acquisition time, and collection errors. Session membership excludes descendants that create a different session. |
+
+Use `snapshot.Child.OperatingSystem`, `SessionProcesses`, `SessionError`, and `PTY` for these OS/TTY observations. A native field uses `Observation[T]{Value, Available, Source, Error}`; check `Available` before treating a zero or empty value as observed. The launch configuration in `Child.Args`, `Environment`, and `Directory` remains separate. Process and PTY reads are sequential samples collected at initial/relevant-child drawing or explicit region invalidation, with no periodic metadata ticker. An idle process can change after its last sample; invalidate a region when your application needs another sample.
+
+After the launch leader is reaped, `OperatingSystem` retains its last running sample and its own `ObservedAt`. Session members and PTY state continue to be sampled during output drain and immediately before the exit observation; their acquisition times can differ from the retained leader sample.
+
+Linux uses procfs/native syscalls, and macOS uses libproc/sysctl. Kernel argv is a mutable memory view; Linux environment describes the exec image rather than later libc environment changes. macOS can omit environment, so an empty/omitted result is marked unavailable. RSS accounting is approximate. Start identity detects observed PID reuse without making all field reads atomic. Snapshot slices, maps, cells, and PTY structures are independently copied; retain error values and `ProcessState` as read-only values. [Linux argv](https://man7.org/linux/man-pages/man5/proc_pid_cmdline.5.html), [environment](https://man7.org/linux/man-pages/man5/proc_pid_environ.5.html), [Darwin process interface](https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/wrappers/libproc/libproc.h).
 
 A terminal stream cannot reveal an arbitrary child's widget tree, editor buffers, selected domain objects, or application intent. Cooperative child integration can provide additional semantic data through an explicit protocol. It cannot identify the writer PID or separate stdout from stderr after they share the same terminal stream. Sampling current slave settings does not establish a complete history of termios changes. OS inspection reports availability and collection errors instead of substituting guessed metadata. [PTY behavior](https://man7.org/linux/man-pages/man7/pty.7.html), [Linux cwd access](https://man7.org/linux/man-pages/man5/proc_pid_cwd.5.html), [packet-mode limits](https://man7.org/linux/man-pages/man2/TIOCPKT.2const.html).
 
 # Compatibility
 
-The child connects to the library's virtual terminal, whose advertised capabilities agree with its parsing, input/replies, rendering, observation, and cleanup. Capability responses describe that endpoint rather than claiming every extension of the physical terminal. Unsupported controls remain observable. Images require viewport-aware placement and clipping; opaque passthrough does not guarantee confinement. Clipboard and other outer-terminal side effects are distinct from ordinary screen output. [terminfo](https://invisible-island.net/ncurses/man/terminfo.5.html), [graphics state](https://sw.kovidgoyal.net/kitty/graphics-protocol/).
+The supported runtime platforms are Linux and macOS. The child receives `TERM=xterm-256color` and `COLORTERM=truecolor`; physical-terminal vendor and graphics hints are removed. The outer terminal must answer DEC mode queries and report mode 1049 reset before startup. An existing outer alternate screen is rejected because its contents cannot be recovered from the TTY. Optional keyboard, mouse, focus, paste, and grapheme modes depend on verified outer support. [terminal identity](https://invisible-island.net/ncurses/man/terminfo.5.html), [DEC queries](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html).
+
+| Capability | Supported profile and boundary |
+| :--- | :--- |
+| Keyboard | Matching protocols preserve original bytes. Negotiated cursor/keypad, Kitty, and modifyOtherKeys differences use native encoding; recognized cursor/keypad wire forms supplement unavailable mode reports. Unsupported key/modifier identities fail explicitly when conversion is required; legacy input cannot supply absent physical identity or release phases. Bare Escape/two-byte introducer ambiguity uses a 50 ms deadline; parameterized fragmented controls and paste do not. |
+| Paste and focus | Recognized paste payloads remain opaque; markers adapt to the child's bracketed mode. Focus reports reach only a child that requests them. |
+| Mouse | Supported native cell encodings use child-local coordinates. Pixel reporting requires measured geometry and verified outer pixel support. Frame-origin gestures and outside releases are not clamped into child cells; dropping an outside release can leave the child's held-button state until a later valid event. Legacy/UTF-8 coordinate overflow, invalid native UTF-8 button reports, and unsupported buttons 10/11 fail explicitly. Highlight tracking is unsupported. |
+| Screen state | Text, colors, native supported rendition, hyperlinks, cursor, alternate screens, and synchronized-update holds are composed inside the viewport. Overline is preserved in native cell metadata but cannot be rendered by the selected UV cell style. Hyperlink URLs are available; OSC 8 parameter/id metadata is not exposed by the binding. |
+| Geometry and widths | Outer resize recomputes the viewport and native PTY size. A resize leaving no positive child viewport returns `ErrViewportTooSmall`. A child-requested DECCOLM grid change outside that allocation returns `*frame.GeometryError`, matching `frame.ErrGeometry`; it does not resize the physical terminal or silently crop a 132-column grid. Font/shaping and an outer terminal without agreed grapheme-width support limit Unicode fidelity. |
+| Graphics and side effects | Graphics are not rasterized into the composed display or advertised through device attributes. Kitty graphics is disabled natively, including positive capability replies; Sixel is unsupported by the selected emulator. Clipboard requests are observed and receive unsupported replies; notifications/progress are observations rather than desktop side effects. Bell requests ring the outer terminal. Child titles and cwd hints remain metadata. |
+
+These boundaries define the current supported profile. Full image placement/clipping, complete historical/screen metadata, and additional outer effects remain implementation-spec requirements where the requested arbitrary-TUI scope exceeds that profile. Raw passthrough cannot provide confined graphics or arbitrary outer-terminal effects. The [architecture research](reports/TUI%20frame%20architecture%20research.md) records these gaps and dependency tradeoffs. [Graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/).
 
 Font/Unicode shaping, unavailable pixel geometry, unknown extensions, terminal-consumed shortcuts, detached descendants, and uncatchable process termination impose fidelity limits. Process-group cancellation cannot guarantee termination of a descendant that escapes its group. [Unicode width guidance](https://www.unicode.org/reports/tr11/), [process-group signals](https://man7.org/linux/man-pages/man2/kill.2.html).
 
-The [architecture research](reports/TUI%20frame%20architecture%20research.md) explains the terminal contract and dependency tradeoffs in depth.
+Cancellation sends SIGTERM and SIGCONT to observed groups in the owned child session, then SIGKILL after one second if needed. Final cleanup inventories that session even after the launch leader exits. Output drain has a two-second deadline after the leader is reaped. Descendants that create a different session and races in inventory/signaling remain boundaries; the wrapper does not implement suspend/resume of its own terminal session.
+
+# Example CLI
+
+The bundled example wraps the command and complete argument list after `--`:
+
+```sh
+./bin/tui-frame -- nvim --clean
+```
+
+F5 selects the previous frame demo; F6 selects the next one. Both update the native Lip Gloss header and footer. Ctrl-Q exits the example. Other input follows the normal child path. These bindings belong to the example's explicit capture handler; the library has no default shortcuts. See the [example source](cmd/tui-frame) and [native build setup](docs/internal/references/native-build.md) for the executable.
 
 # License
 
-A project license has not been selected.
+[MIT License](LICENSE) © 2026 Alex Gorbatchev.
