@@ -41,6 +41,22 @@ func sameColor(a, b color.Color) bool {
 	return ar == br && ag == bg && ab == bb && aa == ba
 }
 
+func TestHeaderBackgroundIsIndependentOfLayout(t *testing.T) {
+	for demo := range demoCount {
+		for background, expected := range []string{"#B91C1C", "#172554", "#115E59"} {
+			view := lipgloss.NewCanvas(60, headerRows)
+			ctx := frame.DrawContext[UIData]{View: view, Data: UIData{Demo: demo, Background: background}}
+			drawHeader(ctx)
+			for _, point := range [][2]int{{0, 0}, {59, 2}} {
+				cell := view.CellAt(point[0], point[1])
+				if cell == nil || cell.Style.Bg == nil || !sameColor(cell.Style.Bg, lipgloss.Color(expected)) {
+					t.Fatalf("layout %d background %d did not fill native cell %v: %#v", demo, background, point, cell)
+				}
+			}
+		}
+	}
+}
+
 func TestFooterUsesChildMetadataAndChangesWithTheDemo(t *testing.T) {
 	for demo, bg := range []string{"#0F172A", "#172554", "#115E59"} {
 		t.Run(demoName(demo), func(t *testing.T) {
@@ -55,7 +71,7 @@ func TestFooterUsesChildMetadataAndChangesWithTheDemo(t *testing.T) {
 				Data: UIData{Demo: demo},
 			}
 			drawFooter(ctx)
-			for _, text := range []string{"nvim", "80×24", "文", "F6", "Ctrl+Q"} {
+			for _, text := range []string{"nvim", "80×24", "文", "Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+Q", "border off"} {
 				if !strings.Contains(view.Render(), text) {
 					t.Errorf("footer omitted %q: %q", text, view.Render())
 				}
@@ -86,13 +102,22 @@ func TestDemoKeysUseNativeEventsWithoutCapturingOtherInput(t *testing.T) {
 		key  uv.KeyEvent
 		want demoAction
 	}{
-		{"next", uv.KeyPressEvent{Code: uv.KeyF6}, demoNext},
-		{"previous", uv.KeyPressEvent{Code: uv.KeyF5}, demoPrevious},
+		{"next", uv.KeyPressEvent{Code: '1', Mod: uv.ModCtrl}, demoNext},
+		{"background", uv.KeyPressEvent{Code: '2', Mod: uv.ModCtrl}, demoBackground},
+		{"border", uv.KeyPressEvent{Code: '3', Mod: uv.ModCtrl}, demoBorder},
 		{"quit", uv.KeyPressEvent{Code: 'q', Mod: uv.ModCtrl}, demoQuit},
 		{"ordinary key", uv.KeyPressEvent{Code: 'q', Text: "q"}, demoPass},
-		{"modified function", uv.KeyPressEvent{Code: uv.KeyF6, Mod: uv.ModAlt}, demoPass},
-		{"selected release", uv.KeyReleaseEvent{Code: uv.KeyF6}, demoRelease},
-		{"selected release pointer", &uv.KeyReleaseEvent{Code: uv.KeyF6}, demoRelease},
+		{"plain digit", uv.KeyPressEvent{Code: '1', Text: "1"}, demoPass},
+		{"extra modifier", uv.KeyPressEvent{Code: '1', Mod: uv.ModCtrl | uv.ModAlt}, demoPass},
+		{"old next function", uv.KeyPressEvent{Code: uv.KeyF6}, demoPass},
+		{"old previous function", uv.KeyPressEvent{Code: uv.KeyF5}, demoPass},
+		{"selected release", uv.KeyReleaseEvent{Code: '1', Mod: uv.ModCtrl}, demoRelease},
+		{"selected release pointer", &uv.KeyReleaseEvent{Code: '1', Mod: uv.ModCtrl}, demoRelease},
+		{"background release", uv.KeyReleaseEvent{Code: '2', Mod: uv.ModCtrl}, demoRelease},
+		{"border release", uv.KeyReleaseEvent{Code: '3', Mod: uv.ModCtrl}, demoRelease},
+		{"old function release", uv.KeyReleaseEvent{Code: uv.KeyF6}, demoPass},
+		{"ambiguous NUL", uv.KeyPressEvent{Code: 0, Mod: uv.ModCtrl}, demoPass},
+		{"ambiguous ESC", uv.KeyPressEvent{Code: uv.KeyEscape}, demoPass},
 		{"ordinary release", uv.KeyReleaseEvent{Code: 'a'}, demoPass},
 		{"non-key", nil, demoPass},
 	}

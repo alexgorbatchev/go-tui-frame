@@ -33,7 +33,7 @@ func setupHelp(cmd *cobra.Command) error {
 					{Name: "COLUMNS", Description: "Positive width for human help; otherwise terminal width or 80"},
 				},
 				Quickstart: []helptree.QuickstartItem{
-					{Command: "tui-frame -- nvim", Comment: "F5/F6 change demos; Ctrl+Q quits"},
+					{Command: "tui-frame -- nvim", Comment: "Ctrl+1 layout; Ctrl+2 colour; Ctrl+3 border; Ctrl+Q quit"},
 					{Command: "tui-frame -- less README.md", Comment: "Wrap any command with a terminal interface"},
 				},
 			},

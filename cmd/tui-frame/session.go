@@ -42,8 +42,9 @@ func runDemo(ctx context.Context, child *exec.Cmd) error {
 }
 
 func newDemoFrame(child *exec.Cmd, data UIData, cancel context.CancelCauseFunc) *frame.Frame[UIData] {
+	data.Border = !data.Agent
 	app := frame.New(child, data).Header(headerRows, drawHeader).Footer(footerRows, drawFooter)
-	app.Border(!data.Agent)
+	app.Border(data.Border)
 	app.Capture(func(input frame.Input) frame.Disposition {
 		switch actionFor(input) {
 		case demoPass:
@@ -55,8 +56,14 @@ func newDemoFrame(child *exec.Cmd, data UIData, cancel context.CancelCauseFunc) 
 			return frame.Consume
 		case demoNext:
 			data.Demo = (data.Demo + 1) % demoCount
-		case demoPrevious:
-			data.Demo = (data.Demo + demoCount - 1) % demoCount
+		case demoBackground:
+			data.Background = (data.Background + 1) % backgroundCount
+		case demoBorder:
+			data.Border = !data.Border
+			if err := app.SetBorder(data.Border); err != nil {
+				cancel(fmt.Errorf("update child border: %w", err))
+				return frame.Consume
+			}
 		}
 		if err := invalidateDemo(app, data); err != nil {
 			cancel(fmt.Errorf("update demo regions: %w", err))

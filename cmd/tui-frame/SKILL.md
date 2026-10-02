@@ -2,14 +2,14 @@
 name: tui-frame
 description: >-
   REQUIRED when operating tui-frame, wrapping a child terminal application with
-  tui-frame -- command, changing frame demos with F5/F6, or reading tui-frame
+  tui-frame -- command, changing frame demos with Ctrl+1/2/3, or reading tui-frame
   help, version, skill, or shell completion output. Read this operating reference
   for this executable's exact arguments and keyboard capture. Use Go project
   instructions for developing the library instead.
 author: alexgorbatchev
 metadata:
   created_on: 2026-10-01 13:23
-  last_modified: 2026-10-01 20:14
+  last_modified: 2026-10-01 20:54
   status: current
 ---
 
@@ -32,23 +32,34 @@ tui-frame -- sh -c 'printf "hello\n"; read answer'
 The initial demo is **Signal bar**, with a red header. **Layered badge** uses
 positioned native Lip Gloss layers. **Bordered card** uses a native rounded
 border. Each demo also changes the footer's native style or composition. Human
-mode reserves three header rows, two footer rows, and a one-cell child border.
-Agent mode reserves the same header and footer rows with plain text and omits
-the border. Regions report
+mode starts with three header rows, two footer rows, and a one-cell child border.
+Agent mode starts with the same header and footer rows with plain text and no
+border. The layout and header background have independent three-step cycles;
+the background starts red, then cycles navy, teal, and back to red. Agent chrome
+remains plain when cycling the background. Regions report
 the child PID, executable name, terminal title, and child viewport size. Region
-geometry stays fixed for the session; demo changes repaint region content.
+header/footer geometry stays fixed for the session. A child-border toggle adds
+or removes a one-cell inset, resizes the child PTY, and repaints the frame. The
+footer shows the current border state and child viewport dimensions.
 
 | Key | Wrapper action |
 | --- | --- |
-| F6 | Advance to the next demo, wrapping after the third |
-| F5 | Return to the previous demo, wrapping before the first |
+| Ctrl+1 | Advance to the next layout, wrapping after the third |
+| Ctrl+2 | Advance the header background independently: red, navy, teal |
+| Ctrl+3 | Toggle the child frame border and resize the child PTY |
 | Ctrl+Q | Cancel the session and terminate observed process groups in the owned child session |
 
-The wrapper consumes these exact unmodified function keys and Ctrl+Q, including
+The wrapper consumes these exact Ctrl+number keys and Ctrl+Q, including
 their key-release events. Other keyboard events follow the library's child
-input route. Paste, mouse input, and unknown controls follow ordinary routing.
+input route. Plain digits, combinations with extra modifiers, and F5/F6 follow
+the child route. Paste, mouse input, and unknown controls follow ordinary routing.
 Child mouse coordinates follow the child viewport geometry. The child can
 change terminal modes and responds to terminal resizing through its PTY.
+Ctrl+number controls require a terminal that reports those keys distinctly.
+The capture layer requests Kitty key disambiguation when the terminal reports
+support, or modifyOtherKeys level 2 when its probe confirms support. Legacy
+terminals can collapse Ctrl+1 into `1`, Ctrl+2 into NUL, and Ctrl+3 into Escape;
+those ambiguous bytes retain their child meanings and do not trigger controls.
 The viewport paints terminal cells; it does not render inline graphics. Native
 Kitty graphics storage is disabled, so its capability query does not advertise
 successful image support.
@@ -129,5 +140,5 @@ installing those scripts.
 
 Read `AGENT=1 tui-frame skill`, then inspect `tui-frame --version` when matching
 this reference to a deployed executable. Run `tui-frame -- <command> [args...]`
-with a terminal available, and use F5/F6 to repaint demos or Ctrl+Q to close the
-session.
+with a terminal available. Use Ctrl+1 for layout, Ctrl+2 for header colour,
+Ctrl+3 for the child border, or Ctrl+Q to close the session.

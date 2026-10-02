@@ -13,21 +13,24 @@ import (
 )
 
 const (
-	headerRows = 3
-	footerRows = 2
-	demoCount  = 3
-	red        = "#B91C1C"
-	navy       = "#172554"
-	teal       = "#115E59"
-	white      = "#FFFFFF"
-	slate      = "#0F172A"
-	keyHints   = "F5 previous | F6 next | Ctrl+Q quit"
+	headerRows      = 3
+	footerRows      = 2
+	demoCount       = 3
+	backgroundCount = 3
+	red             = "#B91C1C"
+	navy            = "#172554"
+	teal            = "#115E59"
+	white           = "#FFFFFF"
+	slate           = "#0F172A"
+	keyHints        = "Ctrl+1 layout | Ctrl+2 colour | Ctrl+3 border | Ctrl+Q quit"
 )
 
 // UIData is an immutable value published to each frame region.
 type UIData struct {
-	Demo  int
-	Agent bool
+	Demo       int
+	Background int
+	Border     bool
+	Agent      bool
 }
 
 func demoName(demo int) string {
@@ -44,7 +47,7 @@ func drawHeader(ctx frame.DrawContext[UIData]) {
 		paint(view, lipgloss.NewStyle(), text)
 		return
 	}
-	style := headerStyle(ctx.Data.Demo)
+	style := headerStyle(ctx.Data.Background)
 	paint(view, style, "")
 	switch ctx.Data.Demo {
 	case 0:
@@ -53,20 +56,20 @@ func drawHeader(ctx frame.DrawContext[UIData]) {
 		title := lipgloss.NewLayer(style.Render(text)).Y(1)
 		badgeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(navy)).
 			Background(lipgloss.Color(white)).Bold(true).Padding(0, 1)
-		badge := lipgloss.NewLayer(badgeStyle.Render("F5 / F6")).Z(1)
+		badge := lipgloss.NewLayer(badgeStyle.Render("Ctrl+1 layout")).Z(1)
 		badge.X(max(0, view.Width()-badge.Width()-1))
 		view.Compose(lipgloss.NewCompositor(title, badge))
 	case 2:
 		cardStyle := style.Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color(white)).Padding(0, 1).
+			BorderForeground(lipgloss.Color(white)).BorderBackground(style.GetBackground()).Padding(0, 1).
 			Width(max(1, view.Width()-2)).MaxWidth(view.Width()).MaxHeight(view.Height())
 		card := lipgloss.NewLayer(cardStyle.Render(text)).X(1)
 		view.Compose(lipgloss.NewCompositor(card))
 	}
 }
 
-func headerStyle(demo int) lipgloss.Style {
-	bg := [...]string{red, navy, teal}[demo]
+func headerStyle(background int) lipgloss.Style {
+	bg := [...]string{red, navy, teal}[background]
 	return lipgloss.NewStyle().Background(lipgloss.Color(bg)).
 		Foreground(lipgloss.Color(white)).Bold(true)
 }
@@ -79,8 +82,12 @@ func drawFooter(ctx frame.DrawContext[UIData]) {
 	if ctx.Term.Child.Executable != "" {
 		name = metadataText(filepath.Base(ctx.Term.Child.Executable))
 	}
-	metadata := fmt.Sprintf("%s | %d×%d | %s",
-		name, ctx.Term.Viewport.Cols, ctx.Term.Viewport.Rows, metadataText(ctx.Term.Terminal.Title))
+	border := "off"
+	if ctx.Data.Border {
+		border = "on"
+	}
+	metadata := fmt.Sprintf("%s | %d×%d | border %s | %s",
+		name, ctx.Term.Viewport.Cols, ctx.Term.Viewport.Rows, border, metadataText(ctx.Term.Terminal.Title))
 	text := metadata + "\n" + keyHints
 	if ctx.Data.Agent {
 		paint(ctx.View, lipgloss.NewStyle(), text)
@@ -127,7 +134,8 @@ type demoAction uint8
 const (
 	demoPass demoAction = iota
 	demoNext
-	demoPrevious
+	demoBackground
+	demoBorder
 	demoQuit
 	demoRelease
 )
@@ -139,10 +147,12 @@ func actionFor(input frame.Input) demoAction {
 	key := input.Key.Key()
 	action := demoPass
 	switch {
-	case key.MatchString("f6"):
+	case key.MatchString("ctrl+1"):
 		action = demoNext
-	case key.MatchString("f5"):
-		action = demoPrevious
+	case key.MatchString("ctrl+2"):
+		action = demoBackground
+	case key.MatchString("ctrl+3"):
+		action = demoBorder
 	case key.MatchString("ctrl+q"):
 		action = demoQuit
 	}

@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 13:56
-last_modified: 2026-10-01 19:33
+last_modified: 2026-10-01 20:54
 status: current
 ---
 
@@ -43,9 +43,15 @@ Demo painting can also be checked independently with
 - Paint borrowed region-local `*lipgloss.Canvas` targets through native styles,
   layers, and compositors. Do not retain canvases, acquire terminal stdin from
   callbacks, or write directly to the outer terminal.
-- Reserve geometry before `Run`. F5/F6 update immutable typed payloads through
-  region invalidation. Ctrl+Q cancels the session; all other input follows the
-  library's child route.
+- Reserve header/footer geometry before `Run`. Ctrl+1 changes layout and Ctrl+2
+  changes the native header background independently through immutable region
+  payloads. Ctrl+3 uses `SetBorder` to change the child inset and PTY size during
+  the session. Ctrl+Q cancels it. Consume reported releases without repeating
+  actions; pass plain digits, extra modifiers, and F5/F6 to the child.
+- Require native distinct-key negotiation for Ctrl+number controls. Keep legacy
+  NUL/Escape/digit input in the child route; do not add ambiguous capture aliases.
+  Test actual outer negotiation, native painted cells, and child-reported PTY
+  sizes after each border change.
 - Keep Ghostty statically linked. Require a Mach-O artifact to import only
   macOS system libraries; require Linux ELF to have no imported shared libraries
   or dynamic loader. Cross-build inspection does not replace Linux runtime tests.

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"image/color"
 	"io"
 	"os"
 	"os/exec"
@@ -12,15 +13,21 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/lipgloss/v2"
 	frame "github.com/alexgorbatchev/go-tui-frame"
 	"github.com/alexgorbatchev/go-tui-frame/internal/emulator"
 	"github.com/creack/pty"
+	ghostty "go.mitchellh.com/libghostty"
 	"golang.org/x/term"
 )
 
 const sessionTimeout = 10 * time.Second
 
 func demoTTY(t *testing.T) (*os.File, *os.File) {
+	return demoTTYObserved(t, nil)
+}
+
+func demoTTYObserved(t *testing.T, observed func(emulator.State)) (*os.File, *os.File) {
 	t.Helper()
 	master, slave, err := pty.Open()
 	if err != nil {
@@ -79,6 +86,14 @@ func demoTTY(t *testing.T) (*os.File, *os.File) {
 						}
 					}
 				}
+				if observed != nil {
+					state, err := outer.State()
+					if err != nil {
+						t.Errorf("read native outer state: %v", err)
+						return
+					}
+					observed(state)
+				}
 			}
 			if err != nil {
 				if !errors.Is(err, os.ErrDeadlineExceeded) && !errors.Is(err, os.ErrClosed) && !errors.Is(err, syscall.EIO) {
@@ -103,8 +118,9 @@ func demoTTY(t *testing.T) (*os.File, *os.File) {
 
 type regionPaint struct {
 	region string
-	demo   int
+	data   UIData
 	term   frame.Snapshot
+	bg     color.Color
 }
 
 func waitPaint(t *testing.T, paints <-chan regionPaint, match func(regionPaint) bool) regionPaint {
@@ -123,14 +139,29 @@ func waitPaint(t *testing.T, paints <-chan regionPaint, match func(regionPaint) 
 	}
 }
 
-func TestDemoCaptureRepaintsBothRegionsAndPassesChildInput(t *testing.T) {
-	master, slave := demoTTY(t)
+func TestDemoControlsRepaintAndResizeRealChild(t *testing.T) {
+	type outerObservation struct {
+		flags  ghostty.KittyKeyFlags
+		corner string
+	}
+	states := make(chan outerObservation, 128)
+	master, slave := demoTTYObserved(t, func(s emulator.State) {
+		observation := outerObservation{flags: s.KittyKeyboardFlags}
+		if i := headerRows * s.Size.Cols; i < len(s.Cells) {
+			observation.corner = s.Cells[i].Content
+		}
+		select {
+		case states <- observation:
+		default:
+		}
+	})
 	before, err := term.GetState(int(slave.Fd()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	inputFile := filepath.Join(projectTempDir(t), "child-input")
-	child := exec.Command("sh", "-c", `stty -echo; printf '\033]2;demo-child\007'; IFS= read -r line; printf '%s' "$line" > "$1"`, "sh", inputFile)
+	sizeFile := filepath.Join(projectTempDir(t), "child-sizes")
+	child := exec.Command("sh", "-c", `stty -echo; sizes=0; printf '\033]2;demo-child\007'; while IFS= read -r line; do if test "$line" = size; then stty size >> "$1"; sizes=$((sizes+1)); printf '\033]2;sized-%d\007' "$sizes"; else printf '%s' "$line" > "$2"; break; fi; done`, "sh", sizeFile, inputFile)
 	ctx, cancel := context.WithTimeout(context.Background(), sessionTimeout)
 	defer cancel()
 	ctx, quit := context.WithCancelCause(ctx)
@@ -139,10 +170,10 @@ func TestDemoCaptureRepaintsBothRegionsAndPassesChildInput(t *testing.T) {
 	paints := make(chan regionPaint, 64)
 	app.Header(headerRows, func(ctx frame.DrawContext[UIData]) {
 		drawHeader(ctx)
-		paints <- regionPaint{"header", ctx.Data.Demo, ctx.Term}
+		paints <- regionPaint{region: "header", data: ctx.Data, term: ctx.Term, bg: ctx.View.CellAt(0, 0).Style.Bg}
 	}).Footer(footerRows, func(ctx frame.DrawContext[UIData]) {
 		drawFooter(ctx)
-		paints <- regionPaint{"footer", ctx.Data.Demo, ctx.Term}
+		paints <- regionPaint{region: "footer", data: ctx.Data, term: ctx.Term}
 	})
 	done := make(chan error, 1)
 	exited := make(chan struct{})
@@ -168,27 +199,108 @@ func TestDemoCaptureRepaintsBothRegionsAndPassesChildInput(t *testing.T) {
 	if ready.term.Viewport != (frame.Size{Cols: 98, Rows: 13}) || ready.term.Child.Executable == "" {
 		t.Fatalf("metadata does not describe the real child viewport: %+v", ready.term)
 	}
+	negotiated := false
+	for !negotiated {
+		select {
+		case s := <-states:
+			negotiated = s.flags&ghostty.KittyKeyDisambiguate != 0
+		case <-ctx.Done():
+			t.Fatal("outer terminal was not asked to disambiguate Ctrl+number")
+		}
+	}
+	querySize := func(expected string) {
+		t.Helper()
+		if _, err := io.WriteString(master, "size\n"); err != nil {
+			t.Fatal(err)
+		}
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		for {
+			bytes, err := os.ReadFile(sizeFile)
+			if err == nil && string(bytes) == expected {
+				return
+			}
+			select {
+			case <-ticker.C:
+			case <-ctx.Done():
+				t.Fatalf("actual child PTY size output %q, error %v; want %q", bytes, err, expected)
+			}
+		}
+	}
+	querySize("13 98\n")
+	waitBorder := func(enabled bool) {
+		t.Helper()
+		for {
+			select {
+			case state := <-states:
+				if (state.corner == lipgloss.RoundedBorder().TopLeft) == enabled {
+					return
+				}
+			case <-ctx.Done():
+				t.Fatalf("actual outer terminal border did not become %v", enabled)
+			}
+		}
+	}
+	waitBorder(true)
 	for _, change := range []struct {
-		key  string
-		demo int
-	}{{"\x1b[17~", 1}, {"\x1b[17~", 2}, {"\x1b[15~", 1}} {
+		key        string
+		demo, bg   int
+		border     bool
+		viewport   frame.Size
+		colour     string
+		sizeOutput string
+	}{
+		{"\x1b[49;5u", 1, 0, true, frame.Size{Cols: 98, Rows: 13}, red, ""},
+		{"\x1b[49;5u", 2, 0, true, frame.Size{Cols: 98, Rows: 13}, red, ""},
+		{"\x1b[49;5u", 0, 0, true, frame.Size{Cols: 98, Rows: 13}, red, ""},
+		{"\x1b[50;5u", 0, 1, true, frame.Size{Cols: 98, Rows: 13}, navy, ""},
+		{"\x1b[50;5u", 0, 2, true, frame.Size{Cols: 98, Rows: 13}, teal, ""},
+		{"\x1b[50;5u", 0, 0, true, frame.Size{Cols: 98, Rows: 13}, red, ""},
+		{"\x1b[51;5u", 0, 0, false, frame.Size{Cols: 100, Rows: 15}, red, "13 98\n15 100\n"},
+		{"\x1b[51;5u", 0, 0, true, frame.Size{Cols: 98, Rows: 13}, red, "13 98\n15 100\n13 98\n"},
+	} {
+		if change.sizeOutput != "" {
+			// Discard old renders before checking the next actual border state.
+			for len(states) > 0 {
+				<-states
+			}
+		}
 		if _, err := io.WriteString(master, change.key); err != nil {
 			t.Fatal(err)
 		}
 		seen := make(map[string]bool)
 		for len(seen) < 2 {
-			p := waitPaint(t, paints, func(p regionPaint) bool { return p.demo == change.demo })
+			p := waitPaint(t, paints, func(p regionPaint) bool {
+				return p.data.Demo == change.demo && p.data.Background == change.bg && p.data.Border == change.border && p.term.Viewport == change.viewport
+			})
+			if p.region == "header" && (p.bg == nil || !sameColor(p.bg, lipgloss.Color(change.colour))) {
+				t.Fatalf("native header background = %#v, want %s", p.bg, change.colour)
+			}
 			seen[p.region] = true
 		}
+		if change.sizeOutput != "" {
+			querySize(change.sizeOutput)
+			waitBorder(change.border)
+		}
 	}
-	if _, err := io.WriteString(master, "hello child\n"); err != nil {
+	// Selected release reports do not cycle/toggle a second time or reach the
+	// child. Ordinary digits and the old function keys remain child input.
+	if _, err := io.WriteString(master, "\x1b[49;5:3u\x1b[50;5:3u\x1b[51;5:3u"); err != nil {
+		t.Fatal(err)
+	}
+	querySize("13 98\n15 100\n13 98\n13 98\n")
+	released := waitPaint(t, paints, func(p regionPaint) bool { return p.term.Terminal.Title == "sized-4" })
+	if released.data.Demo != 0 || released.data.Background != 0 || !released.data.Border {
+		t.Fatalf("reported releases changed the demo: %+v", released.data)
+	}
+	if _, err := io.WriteString(master, "123\x1b[15~\x1b[17~ hello child\n"); err != nil {
 		t.Fatal(err)
 	}
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(inputFile)
-	if err != nil || string(got) != "hello child" {
+	if err != nil || string(got) != "123\x1b[15~\x1b[17~ hello child" {
 		t.Fatalf("captured keys reached child or ordinary input changed: %q, %v", got, err)
 	}
 	after, err := term.GetState(int(slave.Fd()))
@@ -248,5 +360,41 @@ func TestDemoQuitPreservesCauseAndReapsChild(t *testing.T) {
 	}
 	if got.result.DrainError != nil || got.result.CleanupError != nil {
 		t.Fatalf("quit failed cleanup: %+v", got.result)
+	}
+}
+
+func TestAgentDemoStartsPlainAndCanEnableChildBorder(t *testing.T) {
+	master, slave := demoTTY(t)
+	ctx, cancel := context.WithTimeout(context.Background(), sessionTimeout)
+	defer cancel()
+	ctx, quit := context.WithCancelCause(ctx)
+	defer quit(nil)
+	child := exec.Command("sh", "-c", "sleep 30")
+	app := newDemoFrame(child, UIData{Agent: true}, quit).Terminal(slave, slave)
+	paints := make(chan regionPaint, 32)
+	app.Header(headerRows, func(ctx frame.DrawContext[UIData]) {
+		drawHeader(ctx)
+		paints <- regionPaint{data: ctx.Data, term: ctx.Term, bg: ctx.View.CellAt(0, 0).Style.Bg}
+	})
+	done := make(chan error, 1)
+	go func() { _, err := app.Run(ctx); done <- err }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(sessionTimeout):
+			t.Error("agent demo did not stop")
+		}
+	})
+	initial := waitPaint(t, paints, func(p regionPaint) bool { return p.term.Child.PID > 0 })
+	if initial.data.Border || initial.term.Viewport != (frame.Size{Cols: 100, Rows: 15}) || initial.bg != nil {
+		t.Fatalf("agent defaults are not plain and borderless: %+v", initial)
+	}
+	if _, err := io.WriteString(master, "\x1b[51;5u"); err != nil {
+		t.Fatal(err)
+	}
+	enabled := waitPaint(t, paints, func(p regionPaint) bool { return p.data.Border })
+	if enabled.term.Viewport != (frame.Size{Cols: 98, Rows: 13}) || enabled.bg != nil {
+		t.Fatalf("agent border toggle lost plain styling or geometry: %+v", enabled)
 	}
 }
