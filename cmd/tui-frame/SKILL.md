@@ -9,7 +9,7 @@ description: >-
 author: alexgorbatchev
 metadata:
   created_on: 2026-10-01 13:23
-  last_modified: 2026-10-01 19:59
+  last_modified: 2026-10-01 20:14
   status: current
 ---
 
@@ -42,7 +42,7 @@ geometry stays fixed for the session; demo changes repaint region content.
 | --- | --- |
 | F6 | Advance to the next demo, wrapping after the third |
 | F5 | Return to the previous demo, wrapping before the first |
-| Ctrl+Q | Cancel the session and terminate the child process group |
+| Ctrl+Q | Cancel the session and terminate observed process groups in the owned child session |
 
 The wrapper consumes these exact unmodified function keys and Ctrl+Q, including
 their key-release events. Other keyboard events follow the library's child
@@ -119,9 +119,11 @@ alternate screen, mismatched input/output terminals, or another frame owning
 the same terminal produces a startup error.
 
 An interactive run starts a child in a PTY, changes terminal modes, paints the
-frame, and restores terminal state on exit. Cancellation terminates the child
-process group. The child retains its ordinary permissions and filesystem or
-network side effects. Metadata commands start no child process. Completion
+frame, and restores terminal state on exit. Cancellation terminates observed
+process groups in the owned child session. Normal teardown also terminates
+remaining observed groups after the leader exits; detached processes in new
+sessions are excluded. The child retains its ordinary permissions and filesystem
+or network side effects. Metadata commands start no child process. Completion
 commands print scripts; apply shell redirection or sourcing explicitly when
 installing those scripts.
 
