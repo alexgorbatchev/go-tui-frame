@@ -34,6 +34,7 @@ type Size struct {
 // Clipboard handlers run synchronously during Write and must not reenter the
 // terminal. Nil handlers produce Unsupported replies and observable requests.
 type Options struct {
+	Profile                                *Profile
 	Size                                   Size
 	TerminfoName                           string
 	Version                                string
@@ -48,18 +49,20 @@ type Options struct {
 // Terminal owns native terminal, render state and reusable iterators.
 // Its owner must serialize calls, including Close and Effects.
 type Terminal struct {
-	native      *ghostty.Terminal
-	render      *ghostty.RenderState
-	rows        *ghostty.RenderStateRowIterator
-	cells       *ghostty.RenderStateRowCells
-	keys        *ghostty.KeyEncoder
-	probe       *ghostty.KeyEvent
-	mouse       *ghostty.MouseEncoder
-	size        Size
-	visual      visualState
-	held        bool
-	effects     []Effect
-	callbackErr error
+	native                         *ghostty.Terminal
+	render                         *ghostty.RenderState
+	rows                           *ghostty.RenderStateRowIterator
+	cells                          *ghostty.RenderStateRowCells
+	keys                           *ghostty.KeyEncoder
+	probe                          *ghostty.KeyEvent
+	mouse                          *ghostty.MouseEncoder
+	size                           Size
+	visual                         visualState
+	held                           bool
+	effects                        []Effect
+	callbackErr                    error
+	scheme                         *ghostty.ColorScheme
+	hostForeground, hostBackground *ghostty.ColorRGB
 }
 
 func New(opts Options) (*Terminal, error) {
@@ -96,6 +99,10 @@ func New(opts Options) (*Terminal, error) {
 	if err != nil {
 		t.Close()
 		return nil, fmt.Errorf("creating native terminal: %w", err)
+	}
+	if err := t.initializeProfile(opts.Profile); err != nil {
+		t.Close()
+		return nil, err
 	}
 	// Storage also controls the native graphics protocol's capability replies.
 	// The compositor renders text cells, so acknowledging image support would

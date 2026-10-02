@@ -199,7 +199,7 @@ func (t *Terminal) copyCell(x, y int, colors ghostty.RenderStateColors, text *[]
 	if err != nil {
 		return uv.Cell{}, NativeCell{}, err
 	}
-	cell := uv.Cell{Content: string(*text), Style: uvStyle(style, colors), Width: 1}
+	cell := uv.Cell{Content: string(*text), Style: t.uvStyle(style, colors), Width: 1}
 	switch wide {
 	case ghostty.CellWideWide:
 		cell.Width = 2
@@ -230,18 +230,18 @@ func (t *Terminal) copyCell(x, y int, colors ghostty.RenderStateColors, text *[]
 	return cell, NativeCell{Raw: *raw, Style: *style, Wide: wide, Selected: selected}, nil
 }
 
-func uvStyle(style *ghostty.Style, colors ghostty.RenderStateColors) uv.Style {
+func (t *Terminal) uvStyle(style *ghostty.Style, colors ghostty.RenderStateColors) uv.Style {
 	result := uv.Style{
 		Fg: styleColor(style.FgColor(), colors.Palette), Bg: styleColor(style.BgColor(), colors.Palette),
 		UnderlineColor: styleColor(style.UnderlineColor(), colors.Palette),
 	}
-	// Explicit default colors are required: the child can change OSC 10/11
-	// without changing any cell's StyleColorNone, and the physical terminal's
-	// defaults may differ from the virtual terminal's queried defaults.
-	if result.Fg == nil {
+	// Keep host-matching defaults as default rendition to preserve opacity
+	// and physical-terminal default-color policies. OSC overrides and isolated
+	// defaults require explicit colors so rendering agrees with child queries.
+	if result.Fg == nil && (t.hostForeground == nil || *t.hostForeground != colors.Foreground) {
 		result.Fg = rgbColor(colors.Foreground)
 	}
-	if result.Bg == nil {
+	if result.Bg == nil && (t.hostBackground == nil || *t.hostBackground != colors.Background) {
 		result.Bg = rgbColor(colors.Background)
 	}
 	flags := []struct {

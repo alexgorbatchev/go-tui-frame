@@ -132,6 +132,7 @@ Each region keeps its own data: updating the header does not update the footer. 
 | `Capture` | `(handler func(Input) Disposition) *Frame[T]` | Consume selected keyboard events or pass them to the child. |
 | `Observe` | `(handler func(Event)) *Frame[T]` | Receive owned observations without consuming input. |
 | `Terminal` | `(input, output *os.File) *Frame[T]` | Borrow terminal files; defaults to standard input and output. |
+| `InheritTerminal` | `(enabled bool) *Frame[T]` | Inherit reported terminal preferences and original PTY settings; enabled by default. |
 | `Run` | `(ctx context.Context) (Result, error)` | Execute one session and wait for drain and cleanup. |
 
 ## Drawing context
@@ -165,6 +166,10 @@ The canvas is borrowed until the callback returns. Keep its dimensions, draw syn
 Configure the frame before calling `Run`; region declarations and handlers freeze at startup. Region sizes must be positive, the child viewport must fit, and the command must be unstarted with no conflicting stdio or process settings. The session owns command start/wait. Use a standard `exec.Cmd` to set `Dir` or `Env`; its arguments are passed without shell interpretation. [Go command semantics](https://pkg.go.dev/os/exec#Cmd).
 
 `Run` borrows the outer terminal files and restores the state it acquires. Input and output must refer to the same interactive terminal, with one frame owner at a time. Each controller executes one session and cannot be reused.
+
+At startup, the child inherits reported foreground/background colors, the 256-color palette, cursor color/style/blink, supported preference modes, keyboard protocol settings, and light/dark color scheme. Its PTY receives the outer terminal's original line discipline, including control characters, echo, and flow control. Default-colored cells keep the outer terminal's default rendition, preserving its background appearance. Queries have a 300 ms deadline; missing or invalid replies retain native defaults.
+
+Use `.InheritTerminal(false)` or the demo's `--no-terminal-inheritance` flag before `--` to use emulator and PTY defaults. Capability and restoration probes still run. Font, shaping, opacity, window settings, and terminal key mappings belong to the outer terminal and cannot be disabled inside a viewport. Screen contents, scrollback, margins, and application mouse tracking belong to the new child session; graphics and clipboard permissions remain subject to the documented endpoint capabilities. Preferences are captured at startup; live changes to the outer terminal's theme are not queried again.
 
 Region reservations stay fixed. Outer resize recomputes their canvases and the child viewport. `SetBorder` is safe concurrently before and during `Run`; it coalesces pending requests and resizes the child's native terminal and PTY when applied, preserving measured cell pixels. It returns `ErrSessionClosed` after shutdown begins. Acceptance does not acknowledge painting; an inset that cannot fit ends the session with `ErrViewportTooSmall`.
 

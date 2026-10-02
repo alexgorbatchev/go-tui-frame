@@ -9,7 +9,7 @@ description: >-
 author: alexgorbatchev
 metadata:
   created_on: 2026-10-01 13:23
-  last_modified: 2026-10-01 23:00
+  last_modified: 2026-10-02 14:41
   status: current
 ---
 
@@ -82,6 +82,25 @@ controls can change the sequence's resulting layouts and colors. Child exit,
 startup failure, and cancellation stop and join playback before returning.
 Agent mode keeps plain chrome during playback, including when changing colors.
 
+## Terminal preferences
+
+Terminal preference inheritance is enabled by default. At startup, reported
+foreground/background colors, all 256 palette entries, cursor color/style/blink,
+supported preference modes, keyboard settings, and light/dark color scheme seed
+the child emulator. The child PTY receives the outer terminal's original line
+discipline, including control characters, echo, and flow control. Missing or
+invalid probe replies retain native defaults after a 300 ms deadline.
+Default-colored cells use the outer terminal's default rendition.
+
+Use `tui-frame --no-terminal-inheritance -- <command> [args...]` to select
+emulator and PTY defaults. Capability and restoration probes still run. Fonts,
+shaping, opacity, window settings, and terminal key mappings remain owned by the
+outer terminal and cannot be disabled inside a viewport. Screen contents,
+scrollback, margins, and application mouse tracking belong to the child session;
+graphics and clipboard permissions retain the documented endpoint limits.
+Preferences are captured at startup; live outer theme changes are not queried
+again.
+
 ## Commands and options
 
 | Command | Positional arguments | Result |
@@ -100,6 +119,7 @@ Agent mode keeps plain chrome during playback, including when changing colors.
 | `--help`, `-h` | Boolean | `false` | `true`/`false`; every public command; show help without starting a child |
 | `--version`, `-v` | Boolean | `false` | `true`/`false`; root only; print raw version and newline; development builds report `dev` |
 | `--showcase` | Boolean | `false` | `true`/`false`; root only, before `--`; play the eight frame actions once with two-second spacing |
+| `--no-terminal-inheritance` | Boolean | `false` | `true`/`false`; root only, before `--`; disable terminal preference and PTY inheritance |
 | `--no-descriptions` | Boolean | `false` | `true`/`false`; each completion shell command; omit completion descriptions |
 
 `skill` accepts no positional arguments or command-specific flags. It operates
@@ -116,7 +136,8 @@ protocol endpoints; their stdout contains completion candidates and a final
 | `AGENT` | Trim whitespace and ignore case; `1`, `true`, or `yes` selects agent mode; every other value selects human mode |
 | `COLUMNS` | A positive integer caps human help width; otherwise use detected stdout terminal width, falling back to 80 cells; agent help remains untruncated |
 | `PATH` | Standard executable search for a child name without a path separator |
-| `TERM` | Inherited child terminal description, subject to the library's PTY policy |
+| `TERM`, `COLORTERM` | Child receives `xterm-256color` and `truecolor` to describe its virtual endpoint |
+| `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `KITTY_WINDOW_ID`, `GHOSTTY_RESOURCES_DIR`, `GHOSTTY_BIN_DIR`, `WEZTERM_PANE`, `ITERM_SESSION_ID` | Removed from the child environment because physical-terminal vendor hints misdescribe the virtual endpoint |
 | Other variables | Inherited by the child process |
 
 Human help uses a command tree and hides generated completion commands from

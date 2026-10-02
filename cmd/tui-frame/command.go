@@ -20,6 +20,7 @@ func (e *exitError) Unwrap() error { return e.err }
 
 func newRootCommand() (*cobra.Command, error) {
 	var showcase bool
+	var noTerminalInheritance bool
 	cmd := &cobra.Command{
 		Use:          "tui-frame -- <command> [args...]",
 		Short:        "Wrap a terminal application with a live frame",
@@ -27,10 +28,11 @@ func newRootCommand() (*cobra.Command, error) {
 		SilenceUsage: true,
 		Args:         commandArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDemo(cmd.Context(), exec.Command(args[0], args[1:]...), showcase)
+			return runDemo(cmd.Context(), exec.Command(args[0], args[1:]...), showcase, !noTerminalInheritance)
 		},
 	}
 	cmd.Flags().BoolVar(&showcase, "showcase", false, "Play the frame's layouts, colors, and border changes once")
+	cmd.Flags().BoolVar(&noTerminalInheritance, "no-terminal-inheritance", false, "Start the child with independent terminal defaults")
 	cmd.SetVersionTemplate("{{.Version}}\n")
 	cmd.SetFlagErrorFunc(explainUsage)
 	cmd.AddCommand(newSkillCommand())

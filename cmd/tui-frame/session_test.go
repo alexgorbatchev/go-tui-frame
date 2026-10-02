@@ -16,12 +16,68 @@ import (
 	"charm.land/lipgloss/v2"
 	frame "github.com/alexgorbatchev/go-tui-frame"
 	"github.com/alexgorbatchev/go-tui-frame/internal/emulator"
+	charmterm "github.com/charmbracelet/x/term"
 	"github.com/creack/pty"
 	ghostty "go.mitchellh.com/libghostty"
+	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 )
 
 const sessionTimeout = 10 * time.Second
+
+func TestCLIInheritanceChild(t *testing.T) {
+	path := os.Getenv("FRAME_CLI_INHERITANCE_FILE")
+	if path == "" {
+		return
+	}
+	state, err := charmterm.GetState(os.Stdin.Fd())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte{state.Cc[unix.VERASE]}, 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCLIInheritanceFlagControlsRealPTYSettings(t *testing.T) {
+	binary := buildExample(t)
+	for _, tt := range []struct {
+		name    string
+		flags   []string
+		inherit bool
+	}{
+		{name: "default", inherit: true},
+		{name: "disabled", flags: []string{"--no-terminal-inheritance"}},
+		{name: "showcase with inheritance disabled", flags: []string{"--showcase", "--no-terminal-inheritance"}},
+		{name: "explicitly enabled", flags: []string{"--no-terminal-inheritance=false"}, inherit: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, slave := demoTTY(t)
+			state, err := charmterm.GetState(slave.Fd())
+			if err != nil {
+				t.Fatal(err)
+			}
+			state.Cc[unix.VERASE] = '#'
+			if err := charmterm.SetState(slave.Fd(), state); err != nil {
+				t.Fatal(err)
+			}
+			file := filepath.Join(projectTempDir(t), "erase-byte")
+			ctx, cancel := context.WithTimeout(context.Background(), sessionTimeout)
+			defer cancel()
+			args := append(append([]string{}, tt.flags...), "--", os.Args[0], "-test.run=^TestCLIInheritanceChild$")
+			cmd := exec.CommandContext(ctx, binary, args...)
+			cmd.Env = append(os.Environ(), "FRAME_CLI_INHERITANCE_FILE="+file)
+			cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
+			if err := cmd.Run(); err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(file)
+			if err != nil || len(got) != 1 || (got[0] == '#') != tt.inherit {
+				t.Fatalf("child erase byte=%q err=%v; inheritance=%v", got, err, tt.inherit)
+			}
+		})
+	}
+}
 
 func demoTTY(t *testing.T) (*os.File, *os.File) {
 	return demoTTYObserved(t, nil)

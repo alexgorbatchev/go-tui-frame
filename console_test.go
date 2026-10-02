@@ -12,7 +12,6 @@ import (
 	"github.com/alexgorbatchev/go-tui-frame/internal/input"
 	"github.com/charmbracelet/x/ansi"
 	ghostty "go.mitchellh.com/libghostty"
-	"golang.org/x/sys/unix"
 )
 
 func TestCaptureNegotiatesDistinctKeysAndRestoresOuterMode(t *testing.T) {
@@ -300,7 +299,7 @@ func TestProbeKeepsPasteFramingAcrossSessionHandoff(t *testing.T) {
 	writeErr := make(chan error, 1)
 	events := newEventDispatcher(func(e Event) {
 		if e.Kind == OuterInput && strings.Contains(string(e.Bytes), "\x1b[?1049;2$y") {
-			once.Do(func() { _, err := unix.Write(h.fd, []byte("\x1b[200~before")); writeErr <- err })
+			once.Do(func() { writeErr <- h.writeReplies([]byte("\x1b[200~before")) })
 		}
 	})
 	defer events.close()

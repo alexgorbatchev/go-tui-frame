@@ -14,10 +14,11 @@ import (
 
 var errDemoQuit = errors.New("quit requested by frame capture")
 
-func runDemo(ctx context.Context, child *exec.Cmd, showcase bool) error {
+func runDemo(ctx context.Context, child *exec.Cmd, showcase, inheritTerminal bool) error {
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	demo := newDemoSession(child, UIData{Agent: helptree.IsAgentMode()}, cancel)
+	demo.frame.InheritTerminal(inheritTerminal)
 	if showcase {
 		stop := demo.startShowcase(ctx)
 		defer stop()

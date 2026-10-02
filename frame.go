@@ -38,24 +38,25 @@ type region[T any] struct {
 // Frame configures one child session and accepts concurrent region updates.
 // Configure before Run; Invalidate methods and SetBorder accept concurrent updates.
 type Frame[T any] struct {
-	mu          sync.Mutex
-	cmd         *exec.Cmd
-	initial     T
-	regions     [edgeCount]region[T]
-	border      bool
-	layoutDirty bool
-	input       *os.File
-	output      *os.File
-	capture     func(Input) Disposition
-	observe     func(Event)
-	state       phase
-	configErr   error
-	wake        chan struct{}
+	mu              sync.Mutex
+	cmd             *exec.Cmd
+	initial         T
+	regions         [edgeCount]region[T]
+	border          bool
+	inheritTerminal bool
+	layoutDirty     bool
+	input           *os.File
+	output          *os.File
+	capture         func(Input) Disposition
+	observe         func(Event)
+	state           phase
+	configErr       error
+	wake            chan struct{}
 }
 
 // New creates a controller without starting the command or touching a terminal.
 func New[T any](cmd *exec.Cmd, initial T) *Frame[T] {
-	return &Frame[T]{cmd: cmd, initial: initial, input: os.Stdin, output: os.Stdout,
+	return &Frame[T]{cmd: cmd, initial: initial, input: os.Stdin, output: os.Stdout, inheritTerminal: true,
 		wake: make(chan struct{}, 1)}
 }
 
@@ -130,6 +131,14 @@ func (f *Frame[T]) takeLayoutChange() bool {
 // it restores terminal state and never closes the caller's files.
 func (f *Frame[T]) Terminal(input, output *os.File) *Frame[T] {
 	f.configure(func() { f.input, f.output = input, output })
+	return f
+}
+
+// InheritTerminal selects whether the child starts with reported outer-terminal
+// preferences and the original PTY line discipline. The default is true.
+// Capability negotiation and terminal restoration remain required in either mode.
+func (f *Frame[T]) InheritTerminal(enabled bool) *Frame[T] {
+	f.configure(func() { f.inheritTerminal = enabled })
 	return f
 }
 

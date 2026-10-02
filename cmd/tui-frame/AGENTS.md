@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 13:56
-last_modified: 2026-10-01 23:00
+last_modified: 2026-10-02 14:41
 status: current
 ---
 
@@ -66,5 +66,11 @@ Demo painting can also be checked independently with
   Use real canvases, files, binaries, and terminals rather than runtime stubs.
 - Record new user instructions in the appropriate `AGENTS.md` upon receipt;
   check with the user before changing conflicting instructions.
+- Inherit reported terminal preferences and original PTY settings by default;
+  expose `--no-terminal-inheritance` to disable inheritance. Preserve truthful
+  virtual-endpoint capabilities. Test reported colors, palette, cursor settings,
+  terminal modes, original PTY settings, opt-out, and outer restoration using
+  actual terminal sessions. Work in an isolated worktree when concurrent edits
+  prevent changing the shared files safely.
 - Never publish releases, tags, packages, or production deployments without
   explicit user authorization.

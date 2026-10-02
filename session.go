@@ -55,6 +55,7 @@ func (f *Frame[T]) Run(ctx context.Context) (result Result, err error) {
 		return result, err
 	}
 	c.capture = f.capture != nil
+	c.inherit = f.inheritTerminal
 	defer func() {
 		result.CleanupError = errors.Join(result.CleanupError, c.restore())
 		f.close()
@@ -71,7 +72,7 @@ func (f *Frame[T]) Run(ctx context.Context) (result Result, err error) {
 		c.cellHeight = uint32(w.Ypixel) / uint32(w.Row)
 	}
 	size := c.childSize(g)
-	em, err := emulator.New(emulator.Options{Size: size, TerminfoName: "xterm-256color", GraphemeWidth: c.supports(2027)})
+	em, err := emulator.New(c.childOptions(size))
 	if err != nil {
 		return result, err
 	}
@@ -90,7 +91,7 @@ func (f *Frame[T]) Run(ctx context.Context) (result Result, err error) {
 	if ctx.Err() != nil {
 		return result, context.Cause(ctx)
 	}
-	s.master, err = pty.StartWithSize(f.cmd, c.childWinsize(g))
+	s.master, err = c.startChild(f.cmd, c.childWinsize(g))
 	if err != nil {
 		return result, fmt.Errorf("start child PTY: %w", err)
 	}
@@ -221,6 +222,9 @@ func (s *session[T]) render(force bool) error {
 	}
 	s.frame.compose(s.screen, s.geometry, s.snapshot, force)
 	c := s.console
+	if err := c.syncCursor(s.snapshot.Terminal.Native); err != nil {
+		return fmt.Errorf("render child cursor: %w", err)
+	}
 	c.renderer.Render(s.screen.RenderBuffer)
 	cursor := s.snapshot.Terminal.Cursor
 	if cursor.Visible {

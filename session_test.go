@@ -157,12 +157,35 @@ func (h *terminalHarness) read() {
 			return
 		}
 		if len(replies) > 0 {
-			if _, err := unix.Write(h.fd, replies); err != nil {
+			if err := h.writeReplies(replies); err != nil {
 				h.fail(err)
 				return
 			}
 		}
 	}
+}
+
+func (h *terminalHarness) writeReplies(replies []byte) error {
+	for len(replies) > 0 {
+		select {
+		case <-h.stop:
+			return nil
+		default:
+		}
+		n, err := unix.Write(h.fd, replies)
+		if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EINTR) {
+			fds := []unix.PollFd{{Fd: int32(h.fd), Events: unix.POLLOUT}}
+			if _, err := unix.Poll(fds, 20); err != nil && !errors.Is(err, unix.EINTR) {
+				return err
+			}
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		replies = replies[n:]
+	}
+	return nil
 }
 
 func (h *terminalHarness) fail(err error) { h.mu.Lock(); h.err = err; h.mu.Unlock() }
