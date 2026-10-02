@@ -33,6 +33,7 @@ type console struct {
 	fd                                                   int
 	device                                               uint64
 	raw                                                  *term.State
+	capture                                              bool
 	entry                                                map[ansi.DECMode]ansi.ModeSetting
 	applied                                              map[ansi.DECMode]bool
 	pending                                              map[ansi.DECMode]bool
@@ -268,6 +269,9 @@ func (c *console) syncInput(s emulator.State) error {
 		return err
 	}
 	flags := s.KittyKeyboardFlags
+	if c.capture {
+		flags |= ghostty.KittyKeyDisambiguate
+	}
 	if !c.kittySupported {
 		flags = 0
 	}
@@ -279,7 +283,7 @@ func (c *console) syncInput(s emulator.State) error {
 	}
 	if c.modifySupported {
 		level := 0
-		if s.ModifyOtherKeys2 {
+		if s.ModifyOtherKeys2 || c.capture && !c.kittySupported {
 			level = 2
 		}
 		if err := c.setModify(level); err != nil {

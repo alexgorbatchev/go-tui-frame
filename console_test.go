@@ -2,16 +2,120 @@ package frame
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/alexgorbatchev/go-tui-frame/internal/emulator"
 	"github.com/alexgorbatchev/go-tui-frame/internal/input"
 	"github.com/charmbracelet/x/ansi"
 	ghostty "go.mitchellh.com/libghostty"
 	"golang.org/x/sys/unix"
 )
+
+func TestCaptureNegotiatesDistinctKeysAndRestoresOuterMode(t *testing.T) {
+	for _, tt := range []struct {
+		capture bool
+		child   ghostty.KittyKeyFlags
+		want    ghostty.KittyKeyFlags
+	}{{false, 0, 0}, {true, 0, ghostty.KittyKeyDisambiguate}, {false, ghostty.KittyKeyReportEvents, ghostty.KittyKeyReportEvents}, {true, ghostty.KittyKeyReportEvents, ghostty.KittyKeyReportEvents | ghostty.KittyKeyDisambiguate}} {
+		t.Run(fmt.Sprintf("capture=%v/child=%d", tt.capture, tt.child), func(t *testing.T) {
+			h := newHarness(t)
+			fd, device, _, err := inspectConsole(h.slave, h.slave)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c, err := acquireConsole(h.slave, h.slave, fd, device)
+			if err != nil {
+				t.Fatal(err)
+			}
+			restored := false
+			t.Cleanup(func() {
+				if !restored {
+					if err := c.restore(); err != nil {
+						t.Error(err)
+					}
+				}
+			})
+			c.capture = tt.capture
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if _, err := c.probe(ctx, nil); err != nil {
+				t.Fatal(err)
+			}
+			if !c.kittySupported {
+				t.Fatal("native test outer terminal did not report Kitty support")
+			}
+			child, err := emulator.New(emulator.Options{Size: emulator.Size{Cols: 10, Rows: 5}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(child.Close)
+			if _, err := child.Write([]byte(fmt.Sprintf("\x1b[>%du", tt.child))); err != nil {
+				t.Fatal(err)
+			}
+			state, err := child.State()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := c.enter(); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.syncInput(state); err != nil {
+				t.Fatal(err)
+			}
+			// A marker after the mode write proves the native outer parsed it.
+			if _, err := c.renderer.WriteString("\x1b]2;capture-mode-test\x07"); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.renderer.Flush(); err != nil {
+				t.Fatal(err)
+			}
+			for {
+				h.mu.Lock()
+				outer, err := h.em.State()
+				h.mu.Unlock()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if outer.Title == "capture-mode-test" {
+					if outer.KittyKeyboardFlags != tt.want {
+						t.Fatalf("outer flags=%d, want %d", outer.KittyKeyboardFlags, tt.want)
+					}
+					break
+				}
+				if ctx.Err() != nil {
+					t.Fatal("mode marker did not arrive", ctx.Err())
+				}
+				time.Sleep(time.Millisecond)
+			}
+			if err := c.restore(); err != nil {
+				t.Fatal(err)
+			}
+			restored = true
+			for {
+				h.mu.Lock()
+				outer, err := h.em.State()
+				h.mu.Unlock()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !outer.Alternate {
+					if outer.KittyKeyboardFlags != 0 {
+						t.Fatalf("restored flags=%d", outer.KittyKeyboardFlags)
+					}
+					break
+				}
+				if ctx.Err() != nil {
+					t.Fatal("outer mode was not restored", ctx.Err())
+				}
+				time.Sleep(time.Millisecond)
+			}
+		})
+	}
+}
 
 func TestConsoleRestoresObservedEntryModes(t *testing.T) {
 	h := newHarness(t)
@@ -128,11 +232,38 @@ func TestConsoleAppliesAndRestoresReportedModifyOtherKeys(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if err := c.restore(); err != nil {
-		t.Fatal(err)
-	}
 	if !disabled {
 		t.Fatal("outer modifyOtherKeys did not match child legacy mode")
+	}
+	// Select the observed MOK2 profile without relying on Kitty negotiation.
+	// The native outer's mode agrees with the solicited report decoded above.
+	c.capture, c.kittySupported = true, false
+	if err := c.syncInput(NativeState{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.renderer.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(time.Second)
+	enabled := false
+	for time.Now().Before(deadline) {
+		h.mu.Lock()
+		s, err := h.em.State()
+		h.mu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.ModifyOtherKeys2 {
+			enabled = true
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !enabled {
+		t.Fatal("capture did not select the reported modifyOtherKeys fallback")
+	}
+	if err := c.restore(); err != nil {
+		t.Fatal(err)
 	}
 	deadline = time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {

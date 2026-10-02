@@ -54,6 +54,7 @@ func (f *Frame[T]) Run(ctx context.Context) (result Result, err error) {
 	if err != nil {
 		return result, err
 	}
+	c.capture = f.capture != nil
 	defer func() {
 		result.CleanupError = errors.Join(result.CleanupError, c.restore())
 		f.close()
@@ -235,6 +236,9 @@ func (s *session[T]) render(force bool) error {
 }
 
 func (s *session[T]) route(p input.Packet) error {
+	if err := s.updateLayout(); err != nil {
+		return err
+	}
 	if s.console.consumeReply(p) {
 		if _, ok := p.Event.(uv.CellSizeEvent); ok {
 			return s.applyGeometry(s.geometry)
@@ -245,6 +249,11 @@ func (s *session[T]) route(p input.Packet) error {
 	s.router.host = hostInputProfile{KittyFlags: s.console.kittyFlags, ApplicationCursor: s.console.applied[1], ApplicationKeypad: s.console.applied[66], Backarrow: s.console.applied[67], Numlock: s.console.applied[1035], AltEscPrefix: s.console.applied[1036], AltSendsEsc: s.console.applied[1039], ModifyOtherKeysKnown: s.console.modifySupported, ModifyOtherKeys2: s.console.modifyLevel == 2, MousePixels: s.console.applied[1016], CellWidthPx: s.console.cellWidth, CellHeightPx: s.console.cellHeight}
 	r, err := s.router.route(p, s.state)
 	if err != nil {
+		return err
+	}
+	// Capture can schedule geometry changes. Apply them before another packet
+	// in the same read uses the child's coordinates or generated query state.
+	if err := s.updateLayout(); err != nil {
 		return err
 	}
 	if r.Disposition == Consume {
@@ -403,6 +412,20 @@ func (s *session[T]) resize() error {
 		if _, err := s.console.renderer.WriteString(ansi.WindowOp(16)); err != nil {
 			return err
 		}
+	}
+	return s.applyGeometry(g)
+}
+
+func (s *session[T]) updateLayout() error {
+	if !s.frame.takeLayoutChange() {
+		return nil
+	}
+	g, err := s.frame.layout(Size{Cols: s.geometry.outer.Dx(), Rows: s.geometry.outer.Dy()})
+	if err != nil {
+		return err
+	}
+	if g == s.geometry {
+		return nil
 	}
 	return s.applyGeometry(g)
 }
@@ -696,6 +719,9 @@ func (s *session[T]) handleWake(buf []byte, resizes <-chan struct{}) error {
 			return err
 		}
 	default:
+	}
+	if err := s.updateLayout(); err != nil {
+		return err
 	}
 	return s.render(false)
 }

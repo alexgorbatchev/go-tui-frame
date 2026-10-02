@@ -36,20 +36,21 @@ type region[T any] struct {
 }
 
 // Frame configures one child session and accepts concurrent region updates.
-// Configure before Run; only Invalidate methods are concurrent update methods.
+// Configure before Run; Invalidate methods and SetBorder accept concurrent updates.
 type Frame[T any] struct {
-	mu        sync.Mutex
-	cmd       *exec.Cmd
-	initial   T
-	regions   [edgeCount]region[T]
-	border    bool
-	input     *os.File
-	output    *os.File
-	capture   func(Input) Disposition
-	observe   func(Event)
-	state     phase
-	configErr error
-	wake      chan struct{}
+	mu          sync.Mutex
+	cmd         *exec.Cmd
+	initial     T
+	regions     [edgeCount]region[T]
+	border      bool
+	layoutDirty bool
+	input       *os.File
+	output      *os.File
+	capture     func(Input) Disposition
+	observe     func(Event)
+	state       phase
+	configErr   error
+	wake        chan struct{}
 }
 
 // New creates a controller without starting the command or touching a terminal.
@@ -98,6 +99,31 @@ func (f *Frame[T]) configureRegion(e edge, size int, draw func(DrawContext[T])) 
 func (f *Frame[T]) Border(enabled bool) *Frame[T] {
 	f.configure(func() { f.border = enabled })
 	return f
+}
+
+// SetBorder schedules a change to the child viewport's one-cell border.
+// It is safe before and during Run. Pending changes coalesce; acceptance does
+// not acknowledge painting. An inset that cannot fit fails the running session
+// with ErrViewportTooSmall, following the outer-resize contract.
+func (f *Frame[T]) SetBorder(enabled bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.state == closed {
+		return ErrSessionClosed
+	}
+	if f.border != enabled {
+		f.border, f.layoutDirty = enabled, true
+		f.notify()
+	}
+	return nil
+}
+
+func (f *Frame[T]) takeLayoutChange() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	changed := f.layoutDirty
+	f.layoutDirty = false
+	return changed
 }
 
 // Terminal selects the input and output terminals. The session borrows them;
