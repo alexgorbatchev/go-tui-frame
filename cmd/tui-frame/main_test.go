@@ -20,6 +20,8 @@ func TestExecuteUsesNativeCobraAndChildExitStatuses(t *testing.T) {
 		{"unknown flag", []string{"--bogus"}, 2},
 		{"missing executable", []string{"--", "/nonexistent/go-tui-frame-child"}, 1},
 		{"child success", []string{"--", "sh", "-c", "exit 0"}, 0},
+		{"showcase child success", []string{"--showcase", "--", "sh", "-c", "exit 0"}, 0},
+		{"showcase startup failure", []string{"--showcase", "--", "/nonexistent/go-tui-frame-child"}, 1},
 		{"child failure", []string{"--", "sh", "-c", "exit 17"}, 17},
 		{"child signal", []string{"--", "sh", "-c", "kill -TERM $$"}, 143},
 	}
@@ -37,7 +39,7 @@ func TestExecuteUsesNativeCobraAndChildExitStatuses(t *testing.T) {
 
 func TestExecuteCtrlQStopsItsRealChild(t *testing.T) {
 	ready := filepath.Join(projectTempDir(t), "child-started")
-	master, _ := cliTTY(t, "--", "sh", "-c", `printf started > "$1"; exec sleep 30`, "sh", ready)
+	master, _ := cliTTY(t, "--showcase", "--", "sh", "-c", `printf started > "$1"; exec sleep 30`, "sh", ready)
 	done := make(chan int, 1)
 	exited := make(chan struct{})
 	go func() {

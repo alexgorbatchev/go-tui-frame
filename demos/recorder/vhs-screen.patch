@@ -1,0 +1,877 @@
+--- a/vhs.go
++++ b/vhs.go
+@@ -22,21 +22,23 @@
+ 
+ // VHS is the object that controls the setup.
+ type VHS struct {
+-	Options       *Options
+-	Errors        []error
+-	Page          *rod.Page
+-	browser       *rod.Browser
+-	TextCanvas    *rod.Element
+-	CursorCanvas  *rod.Element
+-	mutex         *sync.Mutex
+-	started       bool
+-	recording     bool
+-	tty           *exec.Cmd
+-	totalFrames   int
+-	currentFrame  int64
+-	close         func() error
+-	KeyLogger     *KeyLogger
+-	OverlayEvents []OverlayEvent
++	Options        *Options
++	Errors         []error
++	Page           *rod.Page
++	browser        *rod.Browser
++	TextCanvas     *rod.Element
++	CursorCanvas   *rod.Element
++	Screen         *rod.Element
++	mutex          *sync.Mutex
++	started        bool
++	recording      bool
++	tty            *exec.Cmd
++	totalFrames    int
++	currentFrame   int64
++	close          func() error
++	KeyLogger      *KeyLogger
++	OverlayEvents  []OverlayEvent
++	keycapsEnabled bool
+ }
+ 
+ // Options is the set of options for the setup.
+@@ -183,8 +185,13 @@
+ 	vhs.Page = vhs.Page.MustSetViewport(width, height, 0, false)
+ 
+ 	// Find xterm.js canvases for the text and cursor layer for recording.
+-	vhs.TextCanvas, _ = vhs.Page.Element("canvas.xterm-text-layer")
+-	vhs.CursorCanvas, _ = vhs.Page.Element("canvas.xterm-cursor-layer")
++	if vhs.Options.Video.CompositeFrames {
++		vhs.Screen = vhs.Page.MustElement(".xterm-screen")
++		vhs.Options.Screenshot.compositeFrames = true
++	} else {
++		vhs.TextCanvas, _ = vhs.Page.Element("canvas.xterm-text-layer")
++		vhs.CursorCanvas, _ = vhs.Page.Element("canvas.xterm-cursor-layer")
++	}
+ 
+ 	// Apply options to the terminal
+ 	// By this point the setting commands have been executed, so the `opts` struct is up to date.
+@@ -287,18 +294,21 @@
+ 	var wg sync.WaitGroup
+ 
+ 	for counter := offsetStart; counter <= offsetEnd; counter++ {
+-		wg.Add(1)
+-		go func(frameNum int) {
+-			defer wg.Done()
+-			offsetFrameNum := frameNum + vhs.totalFrames
+-			if err := os.Rename(
+-				filepath.Join(vhs.Options.Video.Input, fmt.Sprintf(cursorFrameFormat, frameNum)),
+-				filepath.Join(vhs.Options.Video.Input, fmt.Sprintf(cursorFrameFormat, offsetFrameNum)),
+-			); err != nil {
+-				errCh <- fmt.Errorf("error applying offset to cursor frame: %w", err)
+-			}
+-		}(counter)
++		if !vhs.Options.Video.CompositeFrames {
++			wg.Add(1)
++			go func(frameNum int) {
++				defer wg.Done()
++				offsetFrameNum := frameNum + vhs.totalFrames
++				if err := os.Rename(
++					filepath.Join(vhs.Options.Video.Input, fmt.Sprintf(cursorFrameFormat, frameNum)),
++					filepath.Join(vhs.Options.Video.Input, fmt.Sprintf(cursorFrameFormat, offsetFrameNum)),
++				); err != nil {
++					errCh <- fmt.Errorf("error applying offset to cursor frame: %w", err)
++				}
++			}(counter)
+ 
++		}
++
+ 		wg.Add(1)
+ 		go func(frameNum int) {
+ 			defer wg.Done()
+@@ -360,22 +370,23 @@
+ 					continue
+ 				}
+ 
+-				cursor, cursorErr := vhs.CursorCanvas.CanvasToImage("image/png", quality)
+-				text, textErr := vhs.TextCanvas.CanvasToImage("image/png", quality)
+-				if textErr != nil || cursorErr != nil {
+-					ch <- fmt.Errorf("error: %v, %v", textErr, cursorErr)
++				text, cursor, err := vhs.captureFrame()
++				if err != nil {
++					ch <- err
+ 					continue
+ 				}
+ 
+ 				counter++
+ 				atomic.StoreInt64(&vhs.currentFrame, int64(counter))
+-				if err := os.WriteFile(
+-					filepath.Join(vhs.Options.Video.Input, fmt.Sprintf(cursorFrameFormat, counter)),
+-					cursor,
+-					0o600,
+-				); err != nil {
+-					ch <- fmt.Errorf("error writing cursor frame: %w", err)
+-					continue
++				if !vhs.Options.Video.CompositeFrames {
++					if err := os.WriteFile(
++						filepath.Join(vhs.Options.Video.Input, fmt.Sprintf(cursorFrameFormat, counter)),
++						cursor,
++						0o600,
++					); err != nil {
++						ch <- fmt.Errorf("error writing cursor frame: %w", err)
++						continue
++					}
+ 				}
+ 				if err := os.WriteFile(
+ 					filepath.Join(vhs.Options.Video.Input, fmt.Sprintf(textFrameFormat, counter)),
+@@ -397,6 +408,19 @@
+ 	return ch
+ }
+ 
++func (vhs *VHS) captureFrame() ([]byte, []byte, error) {
++	if vhs.Options.Video.CompositeFrames {
++		text, err := vhs.Screen.Screenshot(proto.PageCaptureScreenshotFormatPng, 0)
++		return text, nil, err
++	}
++	cursor, err := vhs.CursorCanvas.CanvasToImage("image/png", quality)
++	if err != nil {
++		return nil, nil, fmt.Errorf("capture cursor: %w", err)
++	}
++	text, err := vhs.TextCanvas.CanvasToImage("image/png", quality)
++	return text, cursor, err
++}
++
+ // ResumeRecording indicates to VHS that the recording should be resumed.
+ func (vhs *VHS) ResumeRecording() {
+ 	vhs.mutex.Lock()
+--- a/tty.go
++++ b/tty.go
+@@ -25,16 +25,23 @@
+ 
+ // buildTtyCmd builds the ttyd exec.Command on the given port.
+ func buildTtyCmd(port int, shell Shell) *exec.Cmd {
++	renderer := "canvas"
++	if os.Getenv("VHS_SCREEN_CAPTURE") == "true" {
++		renderer = "dom"
++	}
+ 	args := []string{ //nolint:prealloc
+ 		fmt.Sprintf("--port=%d", port),
+ 		"--interface", "127.0.0.1",
+-		"-t", "rendererType=canvas",
++		"-t", "rendererType=" + renderer,
+ 		"-t", "disableResizeOverlay=true",
+ 		"-t", "enableSixel=true",
+ 		"-t", "customGlyphs=true",
+ 		"--once", // will allow one connection and exit
+ 		"--writable",
+ 	}
++	if index := os.Getenv("VHS_TTYD_INDEX"); index != "" {
++		args = append(args, "--index", index, "-t", `vtExtensions={"kittyKeyboard":true}`)
++	}
+ 
+ 	args = append(args, shell.Command...)
+ 
+--- a/video.go
++++ b/video.go
+@@ -49,14 +49,16 @@
+ 
+ // VideoOptions is the set of options for converting frames to a GIF.
+ type VideoOptions struct {
+-	Framerate     int
+-	PlaybackSpeed float64
+-	Input         string
+-	MaxColors     int
+-	Output        VideoOutputs
+-	StartingFrame int
+-	Style         *StyleOptions
+-	CaptionFile   string
++	Framerate       int
++	PlaybackSpeed   float64
++	Input           string
++	MaxColors       int
++	Output          VideoOutputs
++	StartingFrame   int
++	Style           *StyleOptions
++	CaptionFile     string
++	CompositeFrames bool
++	Keycaps         bool
+ }
+ 
+ const (
+@@ -68,12 +70,14 @@
+ // to a GIF, which are used if they are not overridden.
+ func DefaultVideoOptions() VideoOptions {
+ 	return VideoOptions{
+-		Framerate:     defaultFramerate,
+-		Input:         randomDir(),
+-		MaxColors:     defaultMaxColors,
+-		Output:        VideoOutputs{GIF: "", WebM: "", MP4: "", Frames: ""},
+-		PlaybackSpeed: defaultPlaybackSpeed,
+-		StartingFrame: defaultStartingFrame,
++		Framerate:       defaultFramerate,
++		Input:           randomDir(),
++		MaxColors:       defaultMaxColors,
++		Output:          VideoOutputs{GIF: "", WebM: "", MP4: "", Frames: ""},
++		PlaybackSpeed:   defaultPlaybackSpeed,
++		StartingFrame:   defaultStartingFrame,
++		CompositeFrames: os.Getenv("VHS_SCREEN_CAPTURE") == "true",
++		Keycaps:         os.Getenv("VHS_KEYCAPS") == "true",
+ 	}
+ }
+ 
+@@ -110,6 +114,9 @@
+ func buildFFopts(opts VideoOptions, targetFile string) []string {
+ 	var args []string //nolint:prealloc
+ 	streamCounter := 2
++	if opts.CompositeFrames {
++		streamCounter = 1
++	}
+ 
+ 	streamBuilder := NewStreamBuilder(streamCounter, opts.Input, opts.Style)
+ 
+@@ -121,10 +128,14 @@
+ 		"-r", fmt.Sprint(opts.Framerate),
+ 		"-start_number", fmt.Sprint(opts.StartingFrame),
+ 		"-i", filepath.Join(opts.Input, textFrameFormat),
+-		"-r", fmt.Sprint(opts.Framerate),
+-		"-start_number", fmt.Sprint(opts.StartingFrame),
+-		"-i", filepath.Join(opts.Input, cursorFrameFormat),
+ 	)
++	if !opts.CompositeFrames {
++		streamBuilder.args = append(streamBuilder.args,
++			"-r", fmt.Sprint(opts.Framerate),
++			"-start_number", fmt.Sprint(opts.StartingFrame),
++			"-i", filepath.Join(opts.Input, cursorFrameFormat),
++		)
++	}
+ 
+ 	streamBuilder = streamBuilder.
+ 		WithMargin().
+--- a/ffmpeg.go
++++ b/ffmpeg.go
+@@ -20,9 +20,13 @@
+ func NewVideoFilterBuilder(videoOpts *VideoOptions) *FilterComplexBuilder {
+ 	filterCode := strings.Builder{}
+ 	termWidth, termHeight := calcTermDimensions(*videoOpts.Style)
++	if videoOpts.CompositeFrames {
++		filterCode.WriteString("[0]null[merged];")
++	} else {
++		filterCode.WriteString("[0][1]overlay[merged];")
++	}
+ 
+ 	_, _ = fmt.Fprintf(&filterCode, `
+-		[0][1]overlay[merged];
+ 		[merged]scale=%d:%d:force_original_aspect_ratio=1[scaled];
+ 		[scaled]fps=%d,setpts=PTS/%f[speed];
+ 		[speed]pad=%d:%d:(ow-iw)/2:(oh-ih)/2:%s[padded];
+@@ -55,12 +59,16 @@
+ }
+ 
+ // NewScreenshotFilterComplexBuilder returns instance of FilterComplexBuilder with screenshot config.
+-func NewScreenshotFilterComplexBuilder(style *StyleOptions) *FilterComplexBuilder {
++func NewScreenshotFilterComplexBuilder(style *StyleOptions, composite bool) *FilterComplexBuilder {
+ 	filterCode := strings.Builder{}
+ 	termWidth, termHeight := calcTermDimensions(*style)
++	if composite {
++		filterCode.WriteString("[0]null[merged];")
++	} else {
++		filterCode.WriteString("[0][1]overlay[merged];")
++	}
+ 
+ 	_, _ = fmt.Fprintf(&filterCode, `
+-		[0][1]overlay[merged];
+ 		[merged]scale=%d:%d:force_original_aspect_ratio=1[scaled];
+ 		[scaled]pad=%d:%d:(ow-iw)/2:(oh-ih)/2:%s[padded];
+ 		[padded]fillborders=left=%d:right=%d:top=%d:bottom=%d:mode=fixed:color=%s[padded]
+--- a/screenshot.go
++++ b/screenshot.go
+@@ -20,7 +20,8 @@
+ 	// Input represents location of cursor and text frames png files.
+ 	input string
+ 
+-	style *StyleOptions
++	style           *StyleOptions
++	compositeFrames bool
+ }
+ 
+ // NewScreenshotOptions returns ScreenshotOptions by given input.
+@@ -72,6 +73,9 @@
+ func (opts *ScreenshotOptions) buildFFopts(targetFile, textStream, cursorStream string) []string {
+ 	var args []string //nolint:prealloc
+ 	streamCounter := 2
++	if opts.compositeFrames {
++		streamCounter = 1
++	}
+ 
+ 	streamBuilder := NewStreamBuilder(streamCounter, opts.input, opts.style)
+ 	// Input frame options, used no matter what
+@@ -80,15 +84,17 @@
+ 	streamBuilder.args = append(streamBuilder.args,
+ 		"-y",
+ 		"-i", textStream,
+-		"-i", cursorStream,
+ 	)
++	if !opts.compositeFrames {
++		streamBuilder.args = append(streamBuilder.args, "-i", cursorStream)
++	}
+ 
+ 	streamBuilder = streamBuilder.
+ 		WithMargin().
+ 		WithBar().
+ 		WithCorner()
+ 
+-	filterBuilder := NewScreenshotFilterComplexBuilder(opts.style).
++	filterBuilder := NewScreenshotFilterComplexBuilder(opts.style, opts.compositeFrames).
+ 		WithWindowBar(streamBuilder.barStream).
+ 		WithBorderRadius(streamBuilder.cornerStream).
+ 		WithMarginFill(streamBuilder.marginStream)
+--- /dev/null
++++ b/composite_test.go
+@@ -0,0 +1,94 @@
++package main
++
++import (
++	"bytes"
++	"fmt"
++	"image"
++	gifcodec "image/gif"
++	_ "image/png"
++	"os"
++	"path/filepath"
++	"testing"
++)
++
++func TestCompositeFrameLoopOffset(t *testing.T) {
++	dir := t.TempDir()
++	frame, err := os.ReadFile("examples/demo.png")
++	if err != nil {
++		t.Fatal(err)
++	}
++	for i := 1; i <= 2; i++ {
++		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf(textFrameFormat, i)), frame, 0o600); err != nil {
++			t.Fatal(err)
++		}
++	}
++	v := VHS{totalFrames: 2, Options: &Options{
++		LoopOffset: 50,
++		Video:      VideoOptions{Input: dir, StartingFrame: 1, CompositeFrames: true},
++	}}
++	if err := v.ApplyLoopOffset(); err != nil {
++		t.Fatal(err)
++	}
++	for _, i := range []int{2, 3} {
++		actual, err := os.ReadFile(filepath.Join(dir, fmt.Sprintf(textFrameFormat, i)))
++		if err != nil || !bytes.Equal(actual, frame) {
++			t.Fatalf("frame %d after rotation: %v", i, err)
++		}
++	}
++	if _, err := os.Stat(filepath.Join(dir, fmt.Sprintf(textFrameFormat, 1))); !os.IsNotExist(err) {
++		t.Fatalf("old frame after rotation: %v", err)
++	}
++}
++
++func TestCompositeFrameEncoding(t *testing.T) {
++	frame, err := os.ReadFile("examples/demo.png")
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, format := range []string{"gif", "png"} {
++		t.Run(format, func(t *testing.T) {
++			dir := t.TempDir()
++			if err := os.WriteFile(filepath.Join(dir, "frame-text-00001.png"), frame, 0o600); err != nil {
++				t.Fatal(err)
++			}
++			style := DefaultStyleOptions()
++			style.Width, style.Height, style.Padding = 320, 240, 0
++			target := filepath.Join(dir, "composite."+format)
++			var data []byte
++			if format == "gif" {
++				opts := DefaultVideoOptions()
++				opts.Input, opts.Style, opts.Output.GIF = dir, style, target
++				opts.CompositeFrames = true
++				if out, err := MakeGIF(opts).CombinedOutput(); err != nil {
++					t.Fatalf("encode composite GIF: %v\n%s", err, out)
++				}
++			} else {
++				opts := NewScreenshotOptions(dir, style)
++				opts.compositeFrames = true
++				opts.screenshots[target] = 1
++				for _, cmd := range MakeScreenshots(opts) {
++					if out, err := cmd.CombinedOutput(); err != nil {
++						t.Fatalf("encode composite screenshot: %v\n%s", err, out)
++					}
++				}
++			}
++			data, err = os.ReadFile(target)
++			if err != nil {
++				t.Fatal(err)
++			}
++			img, _, err := image.Decode(bytes.NewReader(data))
++			if err != nil {
++				t.Fatal(err)
++			}
++			if img.Bounds().Dx() != 320 || img.Bounds().Dy() != 240 {
++				t.Fatalf("encoded bounds: %v", img.Bounds())
++			}
++			if format == "gif" {
++				animation, err := gifcodec.DecodeAll(bytes.NewReader(data))
++				if err != nil || len(animation.Image) == 0 {
++					t.Fatalf("decode composite GIF: %v", err)
++				}
++			}
++		})
++	}
++}
+--- a/command.go
++++ b/command.go
+@@ -219,6 +219,7 @@
+ 	v.KeyLogger.LogKey("Ctrl+" + c.Args)
+ 	// Create key combination by holding ControlLeft
+ 	action := v.Page.KeyActions().Press(input.ControlLeft)
++	physicalKeys := []input.Key{input.ControlLeft}
+ 	keys := strings.Split(c.Args, " ")
+ 
+ 	for i, key := range keys {
+@@ -252,6 +253,7 @@
+ 
+ 		// Press or hold key in case it's valid
+ 		if inputKey != nil {
++			physicalKeys = append(physicalKeys, *inputKey)
+ 			if i != len(keys)-1 {
+ 				action.Press(*inputKey)
+ 			} else {
+@@ -261,6 +263,9 @@
+ 		}
+ 	}
+ 
++	if v.Options.Video.Keycaps {
++		return v.sendKeycapsChord(physicalKeys)
++	}
+ 	err := action.Do()
+ 	if err != nil {
+ 		return fmt.Errorf("failed to type key %s: %w", c.Args, err)
+@@ -353,7 +358,7 @@
+ // ExecuteHide is a CommandFunc that starts or stops the recording of the vhs.
+ func ExecuteHide(_ parser.Command, v *VHS) error {
+ 	v.PauseRecording()
+-	return nil
++	return v.syncKeycaps()
+ }
+ 
+ // ExecuteRequire is a CommandFunc that checks if all the binaries mentioned in the
+@@ -366,7 +371,7 @@
+ // ExecuteShow is a CommandFunc that resumes the recording of the vhs.
+ func ExecuteShow(_ parser.Command, v *VHS) error {
+ 	v.ResumeRecording()
+-	return nil
++	return v.syncKeycaps()
+ }
+ 
+ // ExecuteSleep sleeps for the desired time specified through the argument of
+@@ -814,6 +819,10 @@
+ 
+ // ExecuteCaptionOn enables caption key logging.
+ func ExecuteCaptionOn(_ parser.Command, v *VHS) error {
++	if v.Options.Video.Keycaps {
++		v.keycapsEnabled = true
++		return v.syncKeycaps()
++	}
+ 	if err := ensureLibass(); err != nil {
+ 		return err
+ 	}
+@@ -823,6 +832,10 @@
+ 
+ // ExecuteCaptionOff disables caption key logging.
+ func ExecuteCaptionOff(_ parser.Command, v *VHS) error {
++	if v.Options.Video.Keycaps {
++		v.keycapsEnabled = false
++		return v.syncKeycaps()
++	}
+ 	v.KeyLogger.Disable()
+ 	return nil
+ }
+--- /dev/null
++++ b/keycaps.go
+@@ -0,0 +1,71 @@
++package main
++
++import (
++	_ "embed"
++	"errors"
++	"fmt"
++	"time"
++
++	"github.com/go-rod/rod/lib/input"
++)
++
++//go:embed keycaps.js
++var keycapsScript string
++
++func (v *VHS) syncKeycaps() error {
++	if !v.Options.Video.Keycaps {
++		return nil
++	}
++	if !v.Options.Video.CompositeFrames {
++		return errors.New("VHS_KEYCAPS requires VHS_SCREEN_CAPTURE=true")
++	}
++	_, err := v.Page.Eval(keycapsScript, v.keycapsEnabled, v.recording, v.Options.Caption)
++	if err != nil {
++		return fmt.Errorf("update browser keycaps: %w", err)
++	}
++	return nil
++}
++
++// Delay physical actions so captured frames can show keys while they are held.
++// The overlay observes the browser; this path never supplies caption events.
++func (v *VHS) sendKeycapsChord(keys []input.Key) (retErr error) {
++	var held []input.Key
++	defer func() {
++		for i := len(held) - 1; i >= 0; i-- {
++			if err := v.Page.Keyboard.Release(held[i]); err != nil {
++				retErr = errors.Join(retErr, fmt.Errorf("release chord key: %w", err))
++			}
++		}
++	}()
++	for _, key := range keys {
++		if err := v.Page.Keyboard.Press(key); err != nil {
++			return fmt.Errorf("press chord key: %w", err)
++		}
++		held = append(held, key)
++		if err := v.waitKeycapsPhase(); err != nil {
++			return err
++		}
++	}
++	for len(held) > 0 {
++		last := len(held) - 1
++		if err := v.Page.Keyboard.Release(held[last]); err != nil {
++			return fmt.Errorf("release chord key: %w", err)
++		}
++		held = held[:last]
++		if err := v.waitKeycapsPhase(); err != nil {
++			return err
++		}
++	}
++	return nil
++}
++
++func (v *VHS) waitKeycapsPhase() error {
++	timer := time.NewTimer(v.Options.TypingSpeed)
++	defer timer.Stop()
++	select {
++	case <-timer.C:
++		return nil
++	case <-v.Page.GetContext().Done():
++		return fmt.Errorf("wait for chord phase: %w", v.Page.GetContext().Err())
++	}
++}
+--- /dev/null
++++ b/keycaps.js
+@@ -0,0 +1,71 @@
++(enabled, visible, opts) => {
++  if (!window.vhsKeycaps) {
++    const screen = document.querySelector('.xterm-screen');
++    if (!screen) throw new Error('keycaps require a terminal screen');
++    const host = document.createElement('div');
++    host.className = 'vhs-keycaps';
++    Object.assign(host.style, {
++      position: 'absolute', zIndex: '100', pointerEvents: 'none',
++      right: `${opts.MarginRight}px`, bottom: `${opts.MarginVertical}px`,
++      display: 'flex', gap: '6px', maxWidth: '100%',
++      fontFamily: opts.Font, fontSize: `${opts.FontSize}px`,
++      fontWeight: '700', lineHeight: '1.2', letterSpacing: 'normal',
++    });
++    screen.appendChild(host);
++    const held = new Set();
++    let events = [];
++    let timer;
++    const state = { enabled: false, visible: false };
++    const clear = () => {
++      clearTimeout(timer);
++      held.clear();
++      events = [];
++      host.replaceChildren();
++    };
++    const label = key => ({
++      Control: 'Ctrl', Meta: '⌘', Alt: '⌥', Shift: '⇧',
++      ' ': 'Space', ArrowLeft: '←', ArrowRight: '→',
++      ArrowUp: '↑', ArrowDown: '↓',
++    })[key] || key;
++    const draw = () => {
++      host.replaceChildren(...events.map(event => {
++        const cap = document.createElement('span');
++        const down = event.type === 'keydown';
++        const active = down && held.has(event.code);
++        cap.className = 'vhs-keycap';
++        cap.dataset.held = String(active);
++        cap.dataset.phase = down ? 'down' : 'up';
++        cap.textContent = `${label(event.key)} ${down ? '↓' : '↑'}`;
++        Object.assign(cap.style, {
++          padding: '4px 8px', borderRadius: '5px', whiteSpace: 'nowrap',
++          border: `1px solid ${active ? opts.HighlightColor : '#64748B'}`,
++          color: active ? '#0F172A' : opts.FontColor,
++          backgroundColor: active ? opts.HighlightColor : opts.BoxColor,
++          opacity: active ? '1' : '0.7',
++        });
++        return cap;
++      }));
++    };
++    const observe = event => {
++      if (!state.enabled || !state.visible || !event.isTrusted) return;
++      clearTimeout(timer);
++      if (event.type === 'keydown') held.add(event.code);
++      else held.delete(event.code);
++      events.push({ key: event.key, code: event.code, type: event.type });
++      events = events.slice(-Math.max(1, opts.MaxKeysOnscreen));
++      draw();
++      if (held.size === 0) timer = setTimeout(clear, opts.InactivityTimerMs);
++    };
++    window.addEventListener('keydown', observe, true);
++    window.addEventListener('keyup', observe, true);
++    window.addEventListener('blur', clear);
++    window.vhsKeycaps = {
++      set: (enabled, visible) => {
++        state.enabled = enabled;
++        state.visible = visible;
++        if (!enabled || !visible) clear();
++      },
++    };
++  }
++  window.vhsKeycaps.set(enabled, visible);
++}
+--- /dev/null
++++ b/keycaps_test.go
+@@ -0,0 +1,235 @@
++package main
++
++import (
++	"bytes"
++	"context"
++	"errors"
++	"image"
++	_ "image/png"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++	"time"
++
++	"github.com/charmbracelet/vhs/parser"
++	"github.com/go-rod/rod"
++	"github.com/go-rod/rod/lib/input"
++	"github.com/go-rod/rod/lib/launcher"
++	"github.com/go-rod/rod/lib/proto"
++)
++
++func keycapsBrowser(t *testing.T) *VHS {
++	t.Helper()
++	t.Setenv("VHS_KEYCAPS", "true")
++	t.Setenv("VHS_SCREEN_CAPTURE", "true")
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++		w.Header().Set("Content-Type", "text/html; charset=utf-8")
++		if _, err := w.Write([]byte(`<div class="xterm-screen" style="position:relative;width:600px;height:250px"><textarea autofocus></textarea></div>`)); err != nil {
++			t.Error(err)
++		}
++	}))
++	t.Cleanup(server.Close)
++	path, found := launcher.LookPath()
++	if !found {
++		t.Fatal("installed Chromium browser required")
++	}
++	l := launcher.New().Bin(path).UserDataDir(t.TempDir()).Leakless(false)
++	u, err := l.Launch()
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(l.Cleanup)
++	b := rod.New().ControlURL(u)
++	if err := b.Connect(); err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() {
++		if err := b.Close(); err != nil {
++			t.Error(err)
++		}
++	})
++	p, err := b.Page(proto.TargetCreateTarget{URL: server.URL})
++	if err != nil {
++		t.Fatal(err)
++	}
++	p = p.Timeout(5 * time.Second)
++	if err := p.WaitLoad(); err != nil {
++		t.Fatal(err)
++	}
++	textarea, err := p.Element("textarea")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := textarea.Focus(); err != nil {
++		t.Fatal(err)
++	}
++	v := New()
++	v.Page = p
++	v.Options.Caption.InactivityTimerMs = 80
++	v.Options.TypingSpeed = 10 * time.Millisecond
++	v.ResumeRecording()
++	return &v
++}
++
++func capsText(t *testing.T, v *VHS) string {
++	t.Helper()
++	r, err := v.Page.Eval(`() => [...document.querySelectorAll('.vhs-keycap')].map(e => e.textContent).join('|')`)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return r.Value.Str()
++}
++
++func TestKeycapsRealBrowserPhases(t *testing.T) {
++	v := keycapsBrowser(t)
++	if err := ExecuteCaptionOn(parser.Command{}, v); err != nil {
++		t.Fatal(err)
++	}
++	steps := []struct {
++		key  input.Key
++		down bool
++		want string
++	}{
++		{input.ControlLeft, true, "Ctrl ↓"},
++		{input.Digit1, true, "Ctrl ↓|1 ↓"},
++		{input.Digit1, false, "Ctrl ↓|1 ↓|1 ↑"},
++		{input.ControlLeft, false, "Ctrl ↓|1 ↓|1 ↑|Ctrl ↑"},
++	}
++	for _, step := range steps {
++		var err error
++		if step.down {
++			err = v.Page.Keyboard.Press(step.key)
++		} else {
++			err = v.Page.Keyboard.Release(step.key)
++		}
++		if err != nil {
++			t.Fatal(err)
++		}
++		if got := capsText(t, v); got != step.want {
++			t.Fatalf("physical phase: got %q, want %q", got, step.want)
++		}
++		if step.key == input.Digit1 {
++			r, err := v.Page.Eval(`() => document.querySelectorAll('.vhs-keycap[data-held="true"]').length`)
++			if err != nil {
++				t.Fatal(err)
++			}
++			want := 1
++			if step.down {
++				want = 2
++			}
++			if got := r.Value.Int(); got != want {
++				t.Fatalf("held keys: got %d, want %d", got, want)
++			}
++		}
++	}
++	if err := v.Page.Wait(rod.Eval(`() => document.querySelector('.vhs-keycaps').childElementCount === 0`)); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func TestKeycapsVisibilityAndInput(t *testing.T) {
++	v := keycapsBrowser(t)
++	v.Options.Caption.MaxKeysOnscreen = 4
++	v.Options.Caption.InactivityTimerMs = 1000
++	if err := ExecuteCaptionOn(parser.Command{}, v); err != nil {
++		t.Fatal(err)
++	}
++	if err := ExecuteCtrl(parser.Command{Args: "1"}, v); err != nil {
++		t.Fatal(err)
++	}
++	if got := capsText(t, v); got != "Ctrl ↓|1 ↓|1 ↑|Ctrl ↑" {
++		t.Fatalf("recorded chord phases: %q", got)
++	}
++	screen, err := v.Page.Element(".xterm-screen")
++	if err != nil {
++		t.Fatal(err)
++	}
++	frame, err := screen.Screenshot(proto.PageCaptureScreenshotFormatPng, 0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	img, _, err := image.Decode(bytes.NewReader(frame))
++	if err != nil || img.Bounds().Dx() != 600 || img.Bounds().Dy() != 250 {
++		t.Fatalf("native screen capture: %v", err)
++	}
++	if err := ExecuteHide(parser.Command{}, v); err != nil {
++		t.Fatal(err)
++	}
++	if err := v.Page.Keyboard.Type(input.KeyA); err != nil {
++		t.Fatal(err)
++	}
++	if got := capsText(t, v); got != "" {
++		t.Fatalf("hidden input displayed: %q", got)
++	}
++	if err := ExecuteShow(parser.Command{}, v); err != nil {
++		t.Fatal(err)
++	}
++	if err := v.Page.Keyboard.Type(input.KeyB); err != nil {
++		t.Fatal(err)
++	}
++	if got := capsText(t, v); got != "b ↓|b ↑" {
++		t.Fatalf("resumed input phases: %q", got)
++	}
++	if _, err := v.Page.Eval(`() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'x', code: 'KeyX' }))`); err != nil {
++		t.Fatal(err)
++	}
++	if got := capsText(t, v); got != "b ↓|b ↑" {
++		t.Fatalf("untrusted event displayed: %q", got)
++	}
++	if err := ExecuteCaptionOff(parser.Command{}, v); err != nil {
++		t.Fatal(err)
++	}
++	if err := v.Page.Keyboard.Type(input.KeyC); err != nil {
++		t.Fatal(err)
++	}
++	if got := capsText(t, v); got != "" {
++		t.Fatalf("disabled input displayed: %q", got)
++	}
++	r, err := v.Page.Eval(`() => document.querySelector('textarea').value`)
++	if err != nil || r.Value.Str() != "abc" {
++		t.Fatalf("native input was intercepted: %v", err)
++	}
++	if err := ExecuteCaptionOn(parser.Command{}, v); err != nil {
++		t.Fatal(err)
++	}
++	if err := v.Page.Keyboard.Type(input.KeyD); err != nil {
++		t.Fatal(err)
++	}
++	if got := capsText(t, v); got != "d ↓|d ↑" {
++		t.Fatalf("duplicate or stale listeners: %q", got)
++	}
++}
++
++func TestKeycapsFailures(t *testing.T) {
++	v := keycapsBrowser(t)
++	v.Options.Video.CompositeFrames = false
++	if err := ExecuteCaptionOn(parser.Command{}, v); err == nil {
++		t.Fatal("accepted keycaps without composite capture")
++	}
++	v.Options.Video.CompositeFrames = true
++	if _, err := v.Page.Eval(`() => document.querySelector('.xterm-screen').remove()`); err != nil {
++		t.Fatal(err)
++	}
++	if err := ExecuteCaptionOn(parser.Command{}, v); err == nil {
++		t.Fatal("accepted keycaps without terminal screen")
++	}
++	ctx, cancel := context.WithCancel(context.Background())
++	cancel()
++	v.Page = v.Page.Context(ctx)
++	if err := v.waitKeycapsPhase(); !errors.Is(err, context.Canceled) {
++		t.Fatalf("phase wait ignored cancellation: %v", err)
++	}
++	if err := v.sendKeycapsChord([]input.Key{input.ControlLeft}); err == nil {
++		t.Fatal("accepted input on canceled page")
++	}
++	if err := v.Page.Context(context.Background()).Close(); err != nil {
++		t.Fatal(err)
++	}
++	if err := v.sendKeycapsChord([]input.Key{input.ControlLeft}); err == nil {
++		t.Fatal("accepted input on closed page")
++	}
++	v.Options.Video.Keycaps = false
++	if err := v.syncKeycaps(); err != nil {
++		t.Fatalf("inactive keycaps touched browser: %v", err)
++	}
++}

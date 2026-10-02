@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"sync"
 	"syscall"
 
 	helptree "github.com/alexgorbatchev/cobra-help-tree/v2"
@@ -13,11 +14,15 @@ import (
 
 var errDemoQuit = errors.New("quit requested by frame capture")
 
-func runDemo(ctx context.Context, child *exec.Cmd) error {
+func runDemo(ctx context.Context, child *exec.Cmd, showcase bool) error {
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
-	app := newDemoFrame(child, UIData{Agent: helptree.IsAgentMode()}, cancel)
-	result, err := app.Run(ctx)
+	demo := newDemoSession(child, UIData{Agent: helptree.IsAgentMode()}, cancel)
+	if showcase {
+		stop := demo.startShowcase(ctx)
+		defer stop()
+	}
+	result, err := demo.frame.Run(ctx)
 	if errors.Is(err, errDemoQuit) {
 		return errors.Join(result.DrainError, result.CleanupError)
 	}
@@ -41,36 +46,58 @@ func runDemo(ctx context.Context, child *exec.Cmd) error {
 	return nil
 }
 
-func newDemoFrame(child *exec.Cmd, data UIData, cancel context.CancelCauseFunc) *frame.Frame[UIData] {
+type demoSession struct {
+	mu     sync.Mutex
+	frame  *frame.Frame[UIData]
+	data   UIData
+	cancel context.CancelCauseFunc
+}
+
+func newDemoSession(child *exec.Cmd, data UIData, cancel context.CancelCauseFunc) *demoSession {
 	data.Border = !data.Agent
 	app := frame.New(child, data).Header(headerRows, drawHeader).Footer(footerRows, drawFooter)
 	app.Border(data.Border)
-	app.Capture(func(input frame.Input) frame.Disposition {
-		switch actionFor(input) {
-		case demoPass:
-			return frame.Pass
-		case demoRelease:
-			return frame.Consume
-		case demoQuit:
-			cancel(errDemoQuit)
-			return frame.Consume
-		case demoNext:
-			data.Demo = (data.Demo + 1) % demoCount
-		case demoBackground:
-			data.Background = (data.Background + 1) % backgroundCount
-		case demoBorder:
-			data.Border = !data.Border
-			if err := app.SetBorder(data.Border); err != nil {
-				cancel(fmt.Errorf("update child border: %w", err))
-				return frame.Consume
-			}
-		}
-		if err := invalidateDemo(app, data); err != nil {
-			cancel(fmt.Errorf("update demo regions: %w", err))
-		}
+	demo := &demoSession{frame: app, data: data, cancel: cancel}
+	app.Capture(demo.capture)
+	return demo
+}
+
+func (d *demoSession) capture(input frame.Input) frame.Disposition {
+	action := actionFor(input)
+	switch action {
+	case demoPass:
+		return frame.Pass
+	case demoRelease:
 		return frame.Consume
-	})
-	return app
+	case demoQuit:
+		d.cancel(errDemoQuit)
+		return frame.Consume
+	}
+	if err := d.apply(action); err != nil {
+		d.cancel(err)
+	}
+	return frame.Consume
+}
+
+func (d *demoSession) apply(action demoAction) error {
+	// Keyboard capture and showcase events publish one ordered stream of values.
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	switch action {
+	case demoNext:
+		d.data.Demo = (d.data.Demo + 1) % demoCount
+	case demoBackground:
+		d.data.Background = (d.data.Background + 1) % backgroundCount
+	case demoBorder:
+		d.data.Border = !d.data.Border
+		if err := d.frame.SetBorder(d.data.Border); err != nil {
+			return fmt.Errorf("update child border: %w", err)
+		}
+	}
+	if err := invalidateDemo(d.frame, d.data); err != nil {
+		return fmt.Errorf("update demo regions: %w", err)
+	}
+	return nil
 }
 
 func invalidateDemo(app *frame.Frame[UIData], data UIData) error {

@@ -216,6 +216,24 @@ func TestCobraPreservesTheChildCommandLine(t *testing.T) {
 	}
 }
 
+func TestShowcaseFlagPreservesChildFlags(t *testing.T) {
+	cmd, err := newRootCommand()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.ParseFlags([]string{"--showcase", "--", "yazi", "--showcase", "word two"}); err != nil {
+		t.Fatal(err)
+	}
+	args := cmd.Flags().Args()
+	if err := cmd.ValidateArgs(args); err != nil {
+		t.Fatal(err)
+	}
+	showcase, err := cmd.Flags().GetBool("showcase")
+	if err != nil || !showcase || !slices.Equal(args, []string{"yazi", "--showcase", "word two"}) {
+		t.Fatalf("showcase=%v, child args=%q, error=%v", showcase, args, err)
+	}
+}
+
 func TestEmbeddedReferenceCoversTheLiveInterface(t *testing.T) {
 	cmd, err := newRootCommand()
 	if err != nil {

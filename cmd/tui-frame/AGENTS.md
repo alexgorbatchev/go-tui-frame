@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 13:56
-last_modified: 2026-10-01 22:24
+last_modified: 2026-10-01 23:00
 status: current
 ---
 
@@ -54,6 +54,10 @@ Demo painting can also be checked independently with
   NUL/Escape/digit input in the child route; do not add ambiguous capture aliases.
   Test actual outer negotiation, native painted cells, and child-reported PTY
   sizes after each border change.
+- Demo recordings must emphasize the wrapper's layouts, colors, and live border
+  changes while Yazi remains the child. Use `--showcase` for VHS terminals that
+  cannot distinguish Ctrl+number. Keep playback on the shared frame actions;
+  do not synthesize key reports or alter capture aliases for a recording.
 - Keep Ghostty statically linked. Require a Mach-O artifact to import only
   macOS system libraries; require Linux ELF to have no imported shared libraries
   or dynamic loader. Cross-build inspection does not replace Linux runtime tests.

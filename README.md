@@ -1,5 +1,7 @@
 `go-tui-frame` lets Go applications put their own UI around an external TUI. Wrap an editor, shell, or interactive tool with styled headers, footers, side regions, and a border, then update them from your application's events. The child keeps its own terminal; input passes through by default.
 
+![Pressed Ctrl+1, Ctrl+2, and Ctrl+3 keys change the frame's layouts, header colors, and border while Yazi runs inside.](assets/demo.gif)
+
 # What It Does
 
 - **Custom frame:** Draw into region-sized cell buffers. Use Lip Gloss for styles and layers, or draw directly without it.
@@ -238,6 +240,16 @@ The [demo app](cmd/tui-frame) wraps the executable and complete argument list af
 ```
 
 It reserves a three-row header and two-row footer, showing child metadata alongside interactive Lip Gloss layouts.
+
+The GIF above shows the frame's three layouts, red/navy/teal header backgrounds, and live border changes around [Yazi](https://yazi-rs.github.io/). Its bottom-right keycaps show actual key-down (`↓`) and key-up (`↑`) events, highlighting held keys and dimming released keys. The [VHS tape](demos/yazi.tape) sends actual shortcuts and uses the bundled [sample workspace](demos/fixtures/workspace) and an isolated [Yazi configuration](demos/yazi). See the [recording setup](docs/internal/references/demo-recording.md) to reproduce it.
+
+Use `--showcase` to play the frame changes automatically, one action every two seconds:
+
+```sh
+./bin/tui-frame --showcase -- yazi
+```
+
+Playback runs once and leaves the child running. It uses the same frame actions as keyboard capture, which remains active throughout. This also demonstrates application-driven updates when the outer terminal cannot distinguish Ctrl+number shortcuts.
 
 | Key | Behavior |
 | :--- | :--- |

@@ -1,0 +1,8 @@
+# A workspace for the recording
+name = "My workspace"
+child = "yazi"
+
+[frame]
+header_rows = 3
+footer_rows = 2
+border = true

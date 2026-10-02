@@ -9,7 +9,7 @@ description: >-
 author: alexgorbatchev
 metadata:
   created_on: 2026-10-01 13:23
-  last_modified: 2026-10-01 20:54
+  last_modified: 2026-10-01 23:00
   status: current
 ---
 
@@ -64,6 +64,24 @@ The viewport paints terminal cells; it does not render inline graphics. Native
 Kitty graphics storage is disabled, so its capability query does not advertise
 successful image support.
 
+## Play the frame showcase
+
+Use `tui-frame --showcase -- yazi` to demonstrate the wrapper with an idle child.
+After the child starts, apply one frame action every two seconds, in this order:
+layout, background, background, border, layout, border, background, layout.
+From the defaults this shows Layered badge in red, navy, and teal; removes the
+child border; switches to Bordered card; restores the border; returns the header
+to red; and finishes on Signal bar. Each border change resizes the actual child
+PTY. Playback submits application updates through the same actions as capture;
+it does not synthesize keyboard input or add a periodic rendering timer.
+
+Run this sequence once per session. Leave the child running after playback;
+use Ctrl+Q or the child's exit command to finish. Keyboard capture remains
+active during playback. Actions advance from the current state, so manual
+controls can change the sequence's resulting layouts and colors. Child exit,
+startup failure, and cancellation stop and join playback before returning.
+Agent mode keeps plain chrome during playback, including when changing colors.
+
 ## Commands and options
 
 | Command | Positional arguments | Result |
@@ -81,6 +99,7 @@ successful image support.
 | --- | --- | --- | --- |
 | `--help`, `-h` | Boolean | `false` | `true`/`false`; every public command; show help without starting a child |
 | `--version`, `-v` | Boolean | `false` | `true`/`false`; root only; print raw version and newline; development builds report `dev` |
+| `--showcase` | Boolean | `false` | `true`/`false`; root only, before `--`; play the eight frame actions once with two-second spacing |
 | `--no-descriptions` | Boolean | `false` | `true`/`false`; each completion shell command; omit completion descriptions |
 
 `skill` accepts no positional arguments or command-specific flags. It operates

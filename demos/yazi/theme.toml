@@ -1,0 +1,7 @@
+# Readable icons without a Nerd Font.
+# https://yazi-rs.github.io/docs/configuration/theme/#icon
+[icon]
+prepend_globs = [
+  { url = "*/", text = "+", fg = "blue" },
+  { url = "*", text = "·", fg = "cyan" },
+]

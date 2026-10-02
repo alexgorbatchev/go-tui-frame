@@ -1,0 +1,48 @@
+--- a/html/package.json
++++ b/html/package.json
+@@ -54,21 +54,22 @@
+   "dependencies": {
+     "@xterm/addon-canvas": "^0.7.0",
+     "@xterm/addon-clipboard": "^0.1.0",
+-    "@xterm/addon-fit": "^0.10.0",
++    "@xterm/addon-fit": "0.12.0-beta.301",
+     "@xterm/addon-image": "^0.8.0",
+     "@xterm/addon-unicode11": "^0.8.0",
+     "@xterm/addon-web-links": "^0.11.0",
+-    "@xterm/addon-webgl": "^0.18.0",
+-    "@xterm/xterm": "^5.5.0",
++    "@xterm/addon-webgl": "0.20.0-beta.300",
++    "@xterm/xterm": "6.1.0-beta.304",
+     "decko": "^1.2.0",
+     "file-saver": "^2.0.5",
+     "preact": "^10.19.6",
+     "trzsz": "^1.1.5",
+     "whatwg-fetch": "^3.6.20",
++    "xterm": "5.3.0",
+     "zmodem.js": "^0.1.10"
+   },
+-  "resolutions": {
+-    "zmodem.js@^0.1.10": "patch:zmodem.js@npm%3A0.1.10#./.yarn/patches/zmodem.js-npm-0.1.10-e5537fa2ed.patch"
+-  },
+-  "packageManager": "yarn@3.6.3"
++  "packageManager": "yarn@3.6.3",
++  "patchedDependencies": {
++    "zmodem.js@0.1.10": ".yarn/patches/zmodem.js-npm-0.1.10-e5537fa2ed.patch"
++  }
+ }
+--- a/html/src/components/terminal/index.tsx
++++ b/html/src/components/terminal/index.tsx
+@@ -34,7 +34,12 @@
+ 
+     render({ id }: Props, { modal }: State) {
+         return (
+-            <div id={id} ref={c => (this.container = c as HTMLElement)}>
++            <div
++                id={id}
++                ref={c => {
++                    if (c) this.container = c;
++                }}
++            >
+                 <Modal show={modal}>
+                     <label class="file-label">
+                         <input onChange={this.sendFile} class="file-input" type="file" multiple />

@@ -166,7 +166,7 @@ func TestDemoControlsRepaintAndResizeRealChild(t *testing.T) {
 	defer cancel()
 	ctx, quit := context.WithCancelCause(ctx)
 	defer quit(nil)
-	app := newDemoFrame(child, UIData{}, quit).Terminal(slave, slave)
+	app := newDemoSession(child, UIData{}, quit).frame.Terminal(slave, slave)
 	paints := make(chan regionPaint, 64)
 	app.Header(headerRows, func(ctx frame.DrawContext[UIData]) {
 		drawHeader(ctx)
@@ -316,7 +316,7 @@ func TestDemoQuitPreservesCauseAndReapsChild(t *testing.T) {
 	ctx, quit := context.WithCancelCause(ctx)
 	defer quit(nil)
 	child := exec.Command("sh", "-c", "sleep 30")
-	app := newDemoFrame(child, UIData{}, quit).Terminal(slave, slave)
+	app := newDemoSession(child, UIData{}, quit).frame.Terminal(slave, slave)
 	ready := make(chan struct{}, 1)
 	app.Header(headerRows, func(ctx frame.DrawContext[UIData]) {
 		drawHeader(ctx)
@@ -370,7 +370,7 @@ func TestAgentDemoStartsPlainAndCanEnableChildBorder(t *testing.T) {
 	ctx, quit := context.WithCancelCause(ctx)
 	defer quit(nil)
 	child := exec.Command("sh", "-c", "sleep 30")
-	app := newDemoFrame(child, UIData{Agent: true}, quit).Terminal(slave, slave)
+	app := newDemoSession(child, UIData{Agent: true}, quit).frame.Terminal(slave, slave)
 	paints := make(chan regionPaint, 32)
 	app.Header(headerRows, func(ctx frame.DrawContext[UIData]) {
 		drawHeader(ctx)
