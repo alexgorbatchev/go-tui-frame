@@ -99,7 +99,8 @@ Supply a standard `exec.Cmd` to configure `Dir`, `Env`, and other compatible lau
 | `New` | `New[T any](cmd *exec.Cmd, initial T) *Frame[T]` | Create the configuration and live controller for one unstarted command. |
 | `Header`, `Footer` | `(rows int, draw func(DrawContext[T])) *Frame[T]` | Reserve rows; receive one typed drawing context. |
 | `Left`, `Right` | `(cols int, draw func(DrawContext[T])) *Frame[T]` | Reserve columns with the same callback contract. |
-| `Border` | `(enabled bool) *Frame[T]` | Declare a border around the child viewport. |
+| `Border` | `(enabled bool) *Frame[T]` | Configure the initial one-cell border around the child viewport. |
+| `SetBorder` | `(enabled bool) error` | Submit a concurrent border change before or during `Run`. |
 | `Terminal` | `(input, output *os.File) *Frame[T]` | Borrow outer terminal files; default to `os.Stdin` and `os.Stdout`. |
 | `InvalidateHeader`, `InvalidateFooter` | `(data T) error` | Replace the selected region's data and schedule drawing. |
 | `InvalidateLeft`, `InvalidateRight` | `(data T) error` | Replace the selected side region's data and schedule drawing. |
@@ -149,7 +150,9 @@ Invalidating an absent region returns `ErrRegionNotConfigured`; once session shu
 
 Application data is copied by value, without a deep clone. Submit immutable snapshots, and keep referenced maps, slices, pointers, and their contents immutable while the frame can use them. The example's struct of strings needs no caller-managed synchronization. `DrawContext.Term` is owned separately from `DrawContext.Data`; grouping them in one value does not make them a joint atomic transaction. [Go assignment semantics](https://go.dev/ref/spec#Assignment_statements).
 
-Frame dimensions are fixed by their declarations. Headers and footers reserve the specified rows; side regions reserve the specified columns. Content is clipped to its region at terminal-cell boundaries, and changing text does not resize the child or paint outside that region. Resizing the outer terminal recomputes the child viewport and canvas dimensions from the same frame declarations.
+Region reservations are fixed by their declarations: headers and footers reserve the specified rows, and side regions reserve the specified columns. Content is clipped to its region at terminal-cell boundaries, so changing text does not resize the child or paint outside that region. Outer resize recomputes the child viewport and canvas dimensions from those reservations.
+
+Use `Border(enabled)` for initial configuration and `SetBorder(enabled)` for a live change. `SetBorder` is safe concurrently before and during `Run`; for example, `app.SetBorder(false)` requests removal of the child border. Requests coalesce to the latest pending value and return without terminal I/O or waiting for drawing. The session applies the border inset, resizes the child terminal and PTY, and updates input coordinates in its owned path. Border-only changes retain measured cell pixels; region reservations stay unchanged. An accepted request can produce `ErrViewportTooSmall` as a session error when applied, just as an outer resize can. After shutdown begins, `SetBorder` returns `ErrSessionClosed`; a successful submission does not acknowledge a completed paint.
 
 Drawing callbacks use the canvas in the session's serialized rendering path, outside state locks, and must return promptly. Terminal controls within display text do not become arbitrary outer-terminal operations. Prefer the supplied payload over reading mutable application state directly; synchronize any foreign shared state that a callback does read.
 
@@ -167,6 +170,8 @@ type Input struct {
 	Key uv.KeyEvent
 }
 ```
+
+Explicit capture requests distinct key reports when the outer terminal supports them: verified Kitty support retains escape-code disambiguation even for a legacy child; otherwise, verified modifyOtherKeys support enables mode 2. Uncaptured events still follow the child's requested protocol through native conversion. Without those capabilities, control-digit shortcuts cannot be distinguished reliably; legacy Ctrl-2/NUL and Ctrl-3/Escape are not treated as capture aliases. The library's default path without a capture handler does not request these extra keyboard reports. [Keyboard disambiguation](https://sw.kovidgoyal.net/kitty/keyboard-protocol/#disambiguate-escape-codes).
 
 `Raw` is an owned copy of the event's original input bytes. `Key` supplies native Ultraviolet key information without replacing those bytes. Use `input.Key.Key().MatchString(...)` for matching: the pinned native `KeyEvent` interface exposes `Key()`, and the returned `uv.Key` has `MatchString`. [Native events](https://github.com/charmbracelet/ultraviolet/blob/006e29f97886/event.go), [key matching](https://github.com/charmbracelet/ultraviolet/blob/006e29f97886/key.go).
 
@@ -243,7 +248,18 @@ The bundled example wraps the command and complete argument list after `--`:
 ./bin/tui-frame -- nvim --clean
 ```
 
-F5 selects the previous frame demo; F6 selects the next one. Both update the native Lip Gloss header and footer. Ctrl-Q exits the example. Other input follows the normal child path. These bindings belong to the example's explicit capture handler; the library has no default shortcuts. See the [example source](cmd/tui-frame) and [native build setup](docs/internal/references/native-build.md) for the executable.
+The example's explicit capture handler supplies these controls:
+
+| Key | Behavior |
+| :--- | :--- |
+| Ctrl-1 | Cycle the Signal bar, Layered badge, and Bordered card layouts. |
+| Ctrl-2 | Cycle the header background through red, navy, and teal independently of the layout. |
+| Ctrl-3 | Toggle the child border, recomputing its viewport and terminal size. |
+| Ctrl-Q | Exit the example. |
+
+Control-digit bindings require distinct modified-key reports from the outer terminal, as described under keyboard capture. Other input follows the normal child path; the library has no default shortcuts. See the [example source](cmd/tui-frame) and [native build setup](docs/internal/references/native-build.md) for the executable.
+
+`AGENT=1` uses plain header/footer text and starts with the child border disabled; Ctrl-3 can enable it. The [example's usage guide](cmd/tui-frame/SKILL.md) documents its commands, environment, and terminal side effects.
 
 # License
 
