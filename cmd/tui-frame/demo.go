@@ -1,0 +1,156 @@
+package main
+
+import (
+	"fmt"
+	"path/filepath"
+	"strings"
+	"unicode"
+
+	"charm.land/lipgloss/v2"
+	frame "github.com/alexgorbatchev/go-tui-frame"
+	uv "github.com/charmbracelet/ultraviolet"
+	"github.com/charmbracelet/x/ansi"
+)
+
+const (
+	headerRows = 3
+	footerRows = 2
+	demoCount  = 3
+	red        = "#B91C1C"
+	navy       = "#172554"
+	teal       = "#115E59"
+	white      = "#FFFFFF"
+	slate      = "#0F172A"
+	keyHints   = "F5 previous | F6 next | Ctrl+Q quit"
+)
+
+// UIData is an immutable value published to each frame region.
+type UIData struct {
+	Demo  int
+	Agent bool
+}
+
+func demoName(demo int) string {
+	return [...]string{"Signal bar", "Layered badge", "Bordered card"}[demo]
+}
+
+func drawHeader(ctx frame.DrawContext[UIData]) {
+	view := ctx.View
+	if view.Bounds().Empty() {
+		return
+	}
+	text := fmt.Sprintf("%s | PID %d", demoName(ctx.Data.Demo), ctx.Term.Child.PID)
+	if ctx.Data.Agent {
+		paint(view, lipgloss.NewStyle(), text)
+		return
+	}
+	style := headerStyle(ctx.Data.Demo)
+	paint(view, style, "")
+	switch ctx.Data.Demo {
+	case 0:
+		paint(view, style.Padding(0, 1).AlignVertical(lipgloss.Center), text)
+	case 1:
+		title := lipgloss.NewLayer(style.Render(text)).Y(1)
+		badgeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(navy)).
+			Background(lipgloss.Color(white)).Bold(true).Padding(0, 1)
+		badge := lipgloss.NewLayer(badgeStyle.Render("F5 / F6")).Z(1)
+		badge.X(max(0, view.Width()-badge.Width()-1))
+		view.Compose(lipgloss.NewCompositor(title, badge))
+	case 2:
+		cardStyle := style.Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color(white)).Padding(0, 1).
+			Width(max(1, view.Width()-2)).MaxWidth(view.Width()).MaxHeight(view.Height())
+		card := lipgloss.NewLayer(cardStyle.Render(text)).X(1)
+		view.Compose(lipgloss.NewCompositor(card))
+	}
+}
+
+func headerStyle(demo int) lipgloss.Style {
+	bg := [...]string{red, navy, teal}[demo]
+	return lipgloss.NewStyle().Background(lipgloss.Color(bg)).
+		Foreground(lipgloss.Color(white)).Bold(true)
+}
+
+func drawFooter(ctx frame.DrawContext[UIData]) {
+	if ctx.View.Bounds().Empty() {
+		return
+	}
+	name := "starting"
+	if ctx.Term.Child.Executable != "" {
+		name = metadataText(filepath.Base(ctx.Term.Child.Executable))
+	}
+	metadata := fmt.Sprintf("%s | %d×%d | %s",
+		name, ctx.Term.Viewport.Cols, ctx.Term.Viewport.Rows, metadataText(ctx.Term.Terminal.Title))
+	text := metadata + "\n" + keyHints
+	if ctx.Data.Agent {
+		paint(ctx.View, lipgloss.NewStyle(), text)
+		return
+	}
+	bg := lipgloss.Color([...]string{slate, navy, teal}[ctx.Data.Demo])
+	style := lipgloss.NewStyle().Background(bg).Foreground(lipgloss.Color(white))
+	switch ctx.Data.Demo {
+	case 0:
+		paint(ctx.View, style, text)
+	case 1:
+		paint(ctx.View, style, "")
+		lineStyle := style.Width(ctx.View.Width()).MaxWidth(ctx.View.Width()).MaxHeight(1)
+		metadataLayer := lipgloss.NewLayer(lineStyle.Render(metadata))
+		controlsLayer := lipgloss.NewLayer(lineStyle.Bold(true).Render(keyHints)).Y(1)
+		ctx.View.Compose(lipgloss.NewCompositor(metadataLayer, controlsLayer))
+	case 2:
+		style = style.Border(lipgloss.NormalBorder(), false, false, false, true).
+			BorderForeground(lipgloss.Color(white)).BorderBackground(bg)
+		paint(ctx.View, style, text)
+	}
+}
+
+func paint(view *lipgloss.Canvas, style lipgloss.Style, text string) {
+	if view.Bounds().Empty() {
+		return
+	}
+	style = style.Width(view.Width()).Height(view.Height()).
+		MaxWidth(view.Width()).MaxHeight(view.Height())
+	view.Compose(lipgloss.NewLayer(style.Render(text)))
+}
+
+func metadataText(text string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, ansi.Strip(text))
+}
+
+type demoAction uint8
+
+const (
+	demoPass demoAction = iota
+	demoNext
+	demoPrevious
+	demoQuit
+	demoRelease
+)
+
+func actionFor(input frame.Input) demoAction {
+	if input.Key == nil {
+		return demoPass
+	}
+	key := input.Key.Key()
+	action := demoPass
+	switch {
+	case key.MatchString("f6"):
+		action = demoNext
+	case key.MatchString("f5"):
+		action = demoPrevious
+	case key.MatchString("ctrl+q"):
+		action = demoQuit
+	}
+	if action != demoPass {
+		switch input.Key.(type) {
+		case uv.KeyReleaseEvent, *uv.KeyReleaseEvent:
+			return demoRelease
+		}
+	}
+	return action
+}

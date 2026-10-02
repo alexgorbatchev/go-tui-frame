@@ -1,19 +1,95 @@
 # go-tui-frame justfile
 
+set positional-arguments
+set tempdir := '.tmp'
+
+native_root := justfile_directory() / '.tmp/native'
+linux_host_arch := if arch() == 'x86_64' { 'amd64' } else if arch() == 'aarch64' { 'arm64' } else { error('Native builds support amd64 and arm64 hosts.') }
+linux_host_target := if linux_host_arch == 'amd64' { 'x86_64-linux-musl' } else { 'aarch64-linux-musl' }
+native_target := if os() == 'linux' { linux_host_target } else if os() == 'macos' { 'native' } else { error('Native builds support Linux and macOS.') }
+native_prefix_name := if os() == 'linux' { 'linux-musl' / linux_host_arch / 'prefix' } else { 'prefix' }
+native_cache_name := if os() == 'linux' { if linux_host_arch == 'amd64' { 'linux-musl-cache' } else { 'linux-arm64-musl-cache' } } else { 'zig-cache' }
+native_prefix := native_root / native_prefix_name
+export CGO_ENABLED := '1'
+export PKG_CONFIG_PATH := native_prefix / 'share/pkgconfig' + if env('PKG_CONFIG_PATH', '') == '' { '' } else { ':' + env('PKG_CONFIG_PATH') }
+export CC := if os() == 'linux' { 'zig cc -target ' + linux_host_target } else { env('CC', 'cc') }
+export TMPDIR := justfile_directory() / '.tmp'
+
+mod example 'cmd/tui-frame/justfile'
+
 # Default recipe: list available recipes
 default:
     @just --list
 
-# Build all library packages.
-build:
+# Build the pinned Ghostty archive for the current macOS or Linux host.
+native:
+    mkdir -p .tmp
+    just _native {{ native_target }} {{ native_prefix_name }} {{ native_cache_name }}
+
+# Build a Linux amd64 or arm64 musl archive, including from macOS.
+[arg('architecture', pattern='amd64|arm64')]
+native-linux architecture='amd64':
+    mkdir -p .tmp
+    just _native {{ if architecture == 'amd64' { 'x86_64-linux-musl' } else { 'aarch64-linux-musl' } }} {{ 'linux-musl' / architecture / 'prefix' }} {{ if architecture == 'amd64' { 'linux-musl-cache' } else { 'linux-arm64-musl-cache' } }}
+
+[private]
+_native target prefix cache:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    revision='33da6848d63b3bba2b4f31ab1531d618f2795192'
+    archive_sha='bbda18d6f6666ff05dec33974c134483b096fe321ff68a22eba9399b70354de6'
+    root={{ quote(native_root) }}
+    source="$root/ghostty"
+    test "$(zig version)" = '0.16.0' || { printf 'Zig 0.16.0 is required.\n' >&2; exit 1; }
+    command -v pkg-config >/dev/null
+    mkdir -p "$root"
+    if test -e "$source"; then
+        test -f "$source/.frame-source-revision" && test "$(cat "$source/.frame-source-revision")" = "$revision" || { printf 'Existing native source is unmarked or uses another revision: %s\n' "$source" >&2; exit 1; }
+    else
+        archive="$root/ghostty-$revision.tar.gz"
+        if ! test -f "$archive"; then
+            curl --fail --location --retry 3 "https://codeload.github.com/ghostty-org/ghostty/tar.gz/$revision" --output "$archive"
+        fi
+        printf '%s  %s\n' "$archive_sha" "$archive" | shasum -a 256 --check
+        extracted=$(mktemp -d "$root/source.XXXXXX")
+        trap 'rm -rf "$extracted"' EXIT
+        tar -xzf "$archive" --strip-components=1 -C "$extracted"
+        printf '%s\n' "$revision" > "$extracted/.frame-source-revision"
+        mv "$extracted" "$source"
+        trap - EXIT
+    fi
+    cd "$source"
+    zig build -Demit-lib-vt -Demit-xcframework=false -Doptimize=ReleaseFast -Dtarget="$1" --prefix "$root/$2" --cache-dir "$root/$3" --global-cache-dir "$root/zig-global-cache"
+    PKG_CONFIG_PATH="$root/$2/share/pkgconfig" pkg-config --static --libs --cflags libghostty-vt-static
+
+# Build all packages and the example wrapper after native setup.
+build: native
     go build ./...
+    go build {{ if os() == 'linux' { '-ldflags="-linkmode=external -extldflags=-static"' } else { '' } }} -o bin/tui-frame ./cmd/tui-frame
+
+# Produce a fully static Linux amd64 or arm64 example executable.
+[arg('architecture', pattern='amd64|arm64')]
+build-linux architecture='amd64': (native-linux architecture)
+    GOOS=linux GOARCH="$1" CC={{ quote('zig cc -target ' + if architecture == 'amd64' { 'x86_64-linux-musl' } else { 'aarch64-linux-musl' }) }} PKG_CONFIG_PATH={{ quote(native_root / 'linux-musl' / architecture / 'prefix/share/pkgconfig') }} go build -ldflags='-linkmode=external -extldflags=-static' -o "bin/tui-frame-linux-$1" ./cmd/tui-frame
+
+# Audit an existing macOS or Linux executable's dynamic dependencies.
+linkage artifact='bin/tui-frame':
+    TUI_FRAME_ARTIFACT={{ quote(artifact) }} go test -v ./cmd/tui-frame -run '^TestStandaloneBinary$$' -count=1
+
+# Run the example while preserving each argument.
+run *args='': native
+    just example run "$@"
+
+# Run the example with plain chrome and agent help.
+run-ai *args='': native
+    just example run-ai "$@"
 
 # Run all tests with the race detector.
-test:
+test: native
     go test -race ./...
 
 # Run static code analysis
-vet:
+vet: native
     go vet ./...
 
 # Lint (alias for vet)

@@ -13,7 +13,17 @@ jobs:
   verify:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            zig_target: x86_64-linux
+            zig_sha: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+            just_target: x86_64-unknown-linux-musl
+            just_sha: 4a5cc2f53e6f0f8c59092a6cc38291eb729d46a7dd95d3ae582008881b84931d
+          - os: macos-latest
+            zig_target: aarch64-macos
+            zig_sha: b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489
+            just_target: aarch64-apple-darwin
+            just_sha: 50ae3e996c974a0bf32ea7d10f495070df33f1b43e0616b2769e3d4821ed8f48
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -24,14 +34,25 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Check module hygiene
-        run: go mod tidy -diff
+      - name: Install pinned build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .tmp/tools/zig .tmp/tools/just
+          curl --fail --location --retry 3 'https://ziglang.org/download/0.16.0/zig-${{ matrix.zig_target }}-0.16.0.tar.xz' --output .tmp/tools/zig.tar.xz
+          printf '%s  %s\n' '${{ matrix.zig_sha }}' '.tmp/tools/zig.tar.xz' | shasum -a 256 --check
+          tar -xJf .tmp/tools/zig.tar.xz --strip-components=1 -C .tmp/tools/zig
+          curl --fail --location --retry 3 'https://github.com/casey/just/releases/download/1.58.0/just-1.58.0-${{ matrix.just_target }}.tar.gz' --output .tmp/tools/just.tar.gz
+          printf '%s  %s\n' '${{ matrix.just_sha }}' '.tmp/tools/just.tar.gz' | shasum -a 256 --check
+          tar -xzf .tmp/tools/just.tar.gz -C .tmp/tools/just
+          printf '%s\n' "$PWD/.tmp/tools/zig" "$PWD/.tmp/tools/just" >> "$GITHUB_PATH"
+          if ! command -v pkg-config >/dev/null; then
+            brew install pkgconf
+          fi
+          command -v pkg-config
 
-      - name: Build
-        run: go build ./...
+      - name: Verify module hygiene, build, vet, and race tests
+        run: just check
 
-      - name: Vet
-        run: go vet ./...
-
-      - name: Test
-        run: go test -race ./...
+      - name: Verify standalone binary linkage
+        run: just linkage

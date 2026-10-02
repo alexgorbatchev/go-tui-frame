@@ -1,5 +1,4 @@
-// Package frame is the package for the go-tui-frame library.
-//
-// The repository currently contains scaffolding and design documentation.
-// The terminal runtime and public consumer API are not implemented.
+// Package frame configures terminal frames around child commands.
+// Regions paint native Lip Gloss canvases using typed drawing contexts.
+// A controller accepts region payload invalidations independently of geometry.
 package frame

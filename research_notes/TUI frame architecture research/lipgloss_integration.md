@@ -1,12 +1,12 @@
 ---
 created_on: 2026-10-01 11:37
-last_modified: 2026-10-01 12:06
+last_modified: 2026-10-01 16:27
 status: current
 ---
 
 # Native Lip Gloss integration research
 
-This note gives the README author verified third-party contracts for the proposed consumer callbacks. It is research only: the frame runtime, typed controller, snapshots, and update mechanisms are not implemented. No dependencies are added to the repository. The [README](../../README.md) specifies `New(cmd, initialData)` returning a live typed `*Frame[T]`, with `Header(rows, draw)` receiving a last-argument callback of type `func(frame.DrawContext[T])`. The proposed drawing value contains `Term frame.Snapshot`, `View *lipgloss.Canvas`, and `Data T`. The application submits header data directly with `app.InvalidateHeader(data)`. These frame names remain design vocabulary.
+This note records verified third-party contracts for consumer drawing callbacks. The repository defines the typed controller and region invalidation API in [frame.go](../../frame.go), with [DrawContext and Snapshot types](../../types.go), and the terminal session in [session.go](../../session.go). The [module manifest](../../go.mod) includes the selected Lip Gloss v2.0.6 and its pinned Ultraviolet version. `New(cmd, initialData)` returns a live typed `*Frame[T]`, and `Header(rows, draw)` receives a last-argument callback of type `func(frame.DrawContext[T])`. The drawing value contains `Term frame.Snapshot`, `View *lipgloss.Canvas`, and `Data T`; the application submits header data directly with `app.InvalidateHeader(data)`.
 
 ## Versions and native contract
 
@@ -18,7 +18,7 @@ UV's [Screen and Drawable interfaces](https://github.com/charmbracelet/ultraviol
 
 ## Source-grounded callback body
 
-The following is an illustrative native Lip Gloss function, checked against source signatures, not compiled or executed during this research. The proposed last-argument Header or Footer callback receives one `frame.DrawContext[T]` value; it can pass `ctx.View` to this helper and obtain text from `ctx.Data` or the child state in `ctx.Term`. The same primitive can paint a footer with a different native Style and metadata text.
+The following is an illustrative native Lip Gloss function, checked against source signatures. The implemented last-argument Header or Footer callback receives one `frame.DrawContext[T]` value; it can pass `ctx.View` to this helper and obtain text from `ctx.Data` or the child state in `ctx.Term`. The example wrapper's [native painting helper](../../cmd/tui-frame/demo.go) uses the same primitives, verified through [real canvas tests](../../cmd/tui-frame/demo_test.go). The illustrative snippet itself is not a separately compiled artifact.
 
 ```go
 func paintBar(c *lipgloss.Canvas, style lipgloss.Style, text string) {
@@ -68,4 +68,6 @@ gitsnip https://github.com/charmbracelet/lipgloss . .tmp/gitsnip/lipgloss/main/f
 gitsnip https://github.com/charmbracelet/ultraviolet . .tmp/gitsnip/ultraviolet/main/full -b main -q
 ```
 
-Both snapshots are inspected with codegraph status/init/explore/node and targeted rg fallback. Codegraph reports parse/read failures (LG 56, UV 44); successful symbol/source reads and direct stable raw-source web reads ground the APIs above. The snapshots' main branches and the latest UV package pseudo-version are not substituted for LG v2.0.6's pinned dependency. No terminal experiment, integration test, compile check of the illustrative snippet, library selection, or module dependency change is performed. Existing scaffold verification remains in the local ignored [scaffold-checks.log](../../.tmp/scaffold-checks.log).
+Both snapshots are inspected with codegraph status/init/explore/node and targeted rg fallback. Codegraph reports parse/read failures (LG 56, UV 44); successful symbol/source reads and direct stable raw-source web reads ground the APIs above. The snapshots' main branches and the latest UV package pseudo-version are not substituted for LG v2.0.6's pinned dependency.
+
+The example's full CLI tests pass with the race detector and 92.0% statement coverage in [cli-full-final.log](../../.tmp/cli-full-final.log). Real PTY sessions verify child PID/title/viewport metadata, F5/F6 payload updates in both regions, exact ordinary input, child argv and exit status, Ctrl+Q, and terminal restoration. Native canvas painting and footer-style mutations produce genuine failures in [cli-demo-mutation.log](../../.tmp/cli-demo-mutation.log) and [cli-footer-mutation.log](../../.tmp/cli-footer-mutation.log). The selected native build and consumer prerequisites are recorded in [native build setup](../../docs/internal/references/native-build.md). Actual artifact audits permit only OS-provided macOS libraries in [cli-macos-linkage-test.log](../../.tmp/cli-macos-linkage-test.log) and verify no ELF shared-library imports or dynamic loader in [cli-linux-linkage-test.log](../../.tmp/cli-linux-linkage-test.log). Linux artifacts are cross-built and inspected on macOS; Linux runtime tests are not executed locally. These execution logs are local ignored evidence.
