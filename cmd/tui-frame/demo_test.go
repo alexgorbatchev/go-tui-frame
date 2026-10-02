@@ -8,12 +8,13 @@ import (
 	"charm.land/lipgloss/v2"
 	frame "github.com/alexgorbatchev/go-tui-frame"
 	uv "github.com/charmbracelet/ultraviolet"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestHeaderPaintsNativeCellsAndCyclesLayouts(t *testing.T) {
 	for demo := range demoCount {
 		t.Run(demoName(demo), func(t *testing.T) {
-			view := lipgloss.NewCanvas(60, headerRows)
+			view := newDemoTestScreen(60, headerRows)
 			ctx := frame.DrawContext[UIData]{
 				View: view,
 				Term: frame.Snapshot{Child: frame.ChildSnapshot{PID: 4321}},
@@ -44,7 +45,7 @@ func sameColor(a, b color.Color) bool {
 func TestHeaderBackgroundIsIndependentOfLayout(t *testing.T) {
 	for demo := range demoCount {
 		for background, expected := range []string{"#B91C1C", "#172554", "#115E59"} {
-			view := lipgloss.NewCanvas(60, headerRows)
+			view := newDemoTestScreen(60, headerRows)
 			ctx := frame.DrawContext[UIData]{View: view, Data: UIData{Demo: demo, Background: background}}
 			drawHeader(ctx)
 			for _, point := range [][2]int{{0, 0}, {59, 2}} {
@@ -60,7 +61,7 @@ func TestHeaderBackgroundIsIndependentOfLayout(t *testing.T) {
 func TestFooterUsesChildMetadataAndChangesWithTheDemo(t *testing.T) {
 	for demo, bg := range []string{"#0F172A", "#172554", "#115E59"} {
 		t.Run(demoName(demo), func(t *testing.T) {
-			view := lipgloss.NewCanvas(100, footerRows)
+			view := newDemoTestScreen(100, footerRows)
 			ctx := frame.DrawContext[UIData]{
 				View: view,
 				Term: frame.Snapshot{
@@ -86,7 +87,7 @@ func TestFooterUsesChildMetadataAndChangesWithTheDemo(t *testing.T) {
 
 func TestPaintingTinyAndAgentCanvases(t *testing.T) {
 	for _, size := range []frame.Size{{}, {Cols: 1, Rows: 1}, {Cols: 8, Rows: 2}} {
-		view := lipgloss.NewCanvas(size.Cols, size.Rows)
+		view := newDemoTestScreen(size.Cols, size.Rows)
 		ctx := frame.DrawContext[UIData]{View: view, Data: UIData{Agent: true}}
 		drawHeader(ctx)
 		drawFooter(ctx)
@@ -138,5 +139,19 @@ func TestMetadataIsPaintedAsTextRatherThanTerminalControls(t *testing.T) {
 	input := "\x1b[31mproject 文\x1b[0m\nnext\tstep"
 	if got := metadataText(input); got != "project 文 next step" {
 		t.Fatalf("metadata retained terminal controls: %q", got)
+	}
+}
+
+func newDemoTestScreen(width, height int) uv.ScreenBuffer {
+	view := uv.NewScreenBuffer(width, height)
+	view.Method = ansi.GraphemeWidth
+	return view
+}
+
+func TestDemoAcceptsOptionalLipGlossCanvas(t *testing.T) {
+	view := lipgloss.NewCanvas(60, headerRows)
+	drawHeader(frame.DrawContext[UIData]{View: view, Data: UIData{Demo: 1}})
+	if text := view.Render(); !strings.Contains(text, demoName(1)) || !strings.Contains(text, "Ctrl+1 layout") {
+		t.Fatalf("Lip Gloss drawable lost content: %q", text)
 	}
 }

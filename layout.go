@@ -5,10 +5,10 @@ import (
 	"image"
 	"slices"
 
-	"charm.land/lipgloss/v2"
 	"github.com/alexgorbatchev/go-tui-frame/internal/emulator"
 	"github.com/alexgorbatchev/go-tui-frame/internal/process"
 	uv "github.com/charmbracelet/ultraviolet"
+	"github.com/charmbracelet/x/ansi"
 )
 
 type geometry struct {
@@ -74,7 +74,9 @@ func (f *Frame[T]) paintRegions(dst uv.Screen, g geometry, snap Snapshot, force 
 			continue
 		}
 		if paint {
-			canvas = lipgloss.NewCanvas(area.Dx(), area.Dy())
+			buf := uv.NewScreenBuffer(area.Dx(), area.Dy())
+			buf.Method = ansi.GraphemeWidth
+			canvas = &buf
 			draw(DrawContext[T]{Term: cloneSnapshot(snap), View: canvas, Data: data})
 			f.mu.Lock()
 			f.regions[e].canvas = canvas

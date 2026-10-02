@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 20:10
-last_modified: 2026-10-01 21:11
+last_modified: 2026-10-01 22:24
 status: current
 ---
 
@@ -14,7 +14,7 @@ ignored artifacts; the source tests linked here are retained in the repository.
 ## Whole-repository checks
 
 The coordinator's `just check` exits successfully after the live-border,
-control-digit and measured-pixel changes. It executes module hygiene,
+control-digit, measured-pixel and drawing-interface changes. It executes module hygiene,
 library/example builds, vet, and all race-test packages. Its inspected output
 contains:
 
@@ -25,8 +25,8 @@ go build ./...
 go build -o bin/tui-frame ./cmd/tui-frame
 go vet ./...
 go test -race ./...
-ok github.com/alexgorbatchev/go-tui-frame 7.421s
-ok github.com/alexgorbatchev/go-tui-frame/cmd/tui-frame 9.145s
+ok github.com/alexgorbatchev/go-tui-frame 13.097s
+ok github.com/alexgorbatchev/go-tui-frame/cmd/tui-frame 9.379s
 ok github.com/alexgorbatchev/go-tui-frame/internal/emulator (cached)
 ok github.com/alexgorbatchev/go-tui-frame/internal/input (cached)
 ok github.com/alexgorbatchev/go-tui-frame/internal/process (cached)
@@ -42,9 +42,11 @@ ok github.com/alexgorbatchev/go-tui-frame/internal/emulator 1.858s
 ok github.com/alexgorbatchev/go-tui-frame/internal/process 18.313s
 ```
 
-The whole-repository vet check has no diagnostics. The README's unchanged first Go
-example compiles in a temporary executable wrapper against the actual module
-and native archive; that check does not execute interactive nvim.
+The whole-repository vet check has no diagnostics. Maintained
+[README tests](../../../readme_test.go) compile the actual showcase and its
+capture/plain-text variants against the module and native archive. These tests
+do not execute interactive nvim; actual screen/session behavior has separate
+native and real-PTY tests below.
 
 The current live-border/capture changes pass an independent targeted race run:
 
@@ -61,6 +63,27 @@ selected native race check (`4.509s`). The whole-repository check and the rebuil
 binary audits below include that correction.
 
 ## Behavior and deliberate negative checks
+
+The public drawing target is `uv.Screen`, backed by a native screen buffer with
+explicit grapheme width. The [drawing tests](../../../drawing_test.go) exercise
+buffer drawing, grapheme cells, and pushed replacements. CLI drawing tests use
+native UV buffers and also verify an optional Lip Gloss canvas. A full CLI race
+coverage run passes (`10.734s`, 91.8%). The core dependency test resolves the
+actual production package graph and confirms that Lip Gloss is absent; the demo
+continues to use it.
+
+Isolated negative checks verify all three contracts: reverting the public view
+to a Lip Gloss canvas fails the dependency test; disabling grapheme width renders
+the tested emoji as four cells instead of two; replacing the README's Header
+call with an undefined method fails its build test. Restored files are compared
+with the originals. Selected drawing race tests pass (`1.446s`), and restored
+README/dependency tests pass (`5.016s`). These retained tests replace manual
+temporary-program checks and execute through ordinary `go test`.
+
+The drawing-interface revision also rebuilds Linux amd64/arm64 binaries and
+passes all three linkage audits: macOS imports only OS-provided libresolv and
+libSystem; both Linux artifacts have no imported libraries or dynamic loader.
+Cross-build/audit results do not execute Linux runtime tests.
 
 | Retained test | Verified behavior and negative check |
 | :--- | :--- |

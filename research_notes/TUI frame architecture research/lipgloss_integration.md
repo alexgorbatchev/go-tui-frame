@@ -1,12 +1,12 @@
 ---
 created_on: 2026-10-01 11:37
-last_modified: 2026-10-01 21:03
+last_modified: 2026-10-01 22:24
 status: current
 ---
 
 # Native Lip Gloss integration research
 
-This note records verified third-party contracts for consumer drawing callbacks. The repository defines the typed controller and region invalidation API in [frame.go](../../frame.go), with [DrawContext and Snapshot types](../../types.go), and the terminal session in [session.go](../../session.go). The [module manifest](../../go.mod) includes the selected Lip Gloss v2.0.6 and its pinned Ultraviolet version. `New(cmd, initialData)` returns a live typed `*Frame[T]`, and `Header(rows, draw)` receives a last-argument callback of type `func(frame.DrawContext[T])`. The drawing value contains `Term frame.Snapshot`, `View *lipgloss.Canvas`, and `Data T`; the application submits header data directly with `app.InvalidateHeader(data)`.
+This note records verified third-party contracts for consumer drawing callbacks. The repository defines the typed controller and region invalidation API in [frame.go](../../frame.go), with [DrawContext and Snapshot types](../../types.go), and the terminal session in [session.go](../../session.go). The [module manifest](../../go.mod) includes the selected Lip Gloss v2.0.6 and its pinned Ultraviolet version. `New(cmd, initialData)` returns a live typed `*Frame[T]`, and `Header(rows, draw)` receives a last-argument callback of type `func(frame.DrawContext[T])`. The drawing value contains `Term frame.Snapshot`, `View uv.Screen`, and `Data T`; the application submits header data directly with `app.InvalidateHeader(data)`.
 
 ## Versions and native contract
 
@@ -21,7 +21,7 @@ UV's [Screen and Drawable interfaces](https://github.com/charmbracelet/ultraviol
 The following is an illustrative native Lip Gloss function, checked against source signatures. The implemented last-argument Header or Footer callback receives one `frame.DrawContext[T]` value; it can pass `ctx.View` to this helper and obtain text from `ctx.Data` or the child state in `ctx.Term`. The example wrapper's [native painting helper](../../cmd/tui-frame/demo.go) uses the same primitives, verified through [real canvas tests](../../cmd/tui-frame/demo_test.go). The illustrative snippet itself is not a separately compiled artifact.
 
 ```go
-func paintBar(c *lipgloss.Canvas, style lipgloss.Style, text string) {
+func paintBar(c uv.Screen, style lipgloss.Style, text string) {
 	b := c.Bounds()
 	if b.Empty() {
 		return
@@ -30,7 +30,7 @@ func paintBar(c *lipgloss.Canvas, style lipgloss.Style, text string) {
 		Width(b.Dx()).Height(b.Dy()).
 		MaxWidth(b.Dx()).MaxHeight(b.Dy()).
 		Render(text)
-	c.Compose(lipgloss.NewLayer(text))
+	lipgloss.NewLayer(text).Draw(c, c.Bounds())
 }
 
 headerStyle := lipgloss.NewStyle().
@@ -43,11 +43,11 @@ headerStyle := lipgloss.NewStyle().
 
 `Style.Render` returns ANSI styled text. Width wrapping and height alignment happen before final MaxWidth/MaxHeight truncation. Both caps apply only when greater than zero, hence the empty-region guard. Padding, aligned whitespace, and background styling occur in the native render path. [Render implementation](https://github.com/charmbracelet/lipgloss/blob/v2.0.6/style.go).
 
-An origin-local `NewLayer(text)` composed onto the entire header/footer canvas is valid. For positioning, use `c.Compose(lipgloss.NewCompositor(lipgloss.NewLayer(text).X(x).Y(y).Z(z)))`. `NewLayer(content string, layers ...*Layer) *Layer` and `NewCompositor(layers ...*Layer) *Compositor` are current signatures. Layer X/Y positions are relative to its parent. A Layer's own Draw does not apply its X/Y/Z or child hierarchy; the Compositor applies those positions. Call Compositor.Refresh after changing a layer tree or positions. Its Draw checks overlap but does not intersect layer bounds with the supplied area or translate positions by that area's origin. [Layer/compositor source](https://github.com/charmbracelet/lipgloss/blob/v2.0.6/layer.go). The official [canvas example](https://github.com/charmbracelet/lipgloss/blob/main/examples/canvas/main.go) uses NewCompositor; the README's `compositor.Compose(...)` fragment is inconsistent with this verified API.
+An origin-local `NewLayer(text)` composed onto the entire header/footer canvas is valid. For positioning, use `lipgloss.NewCompositor(lipgloss.NewLayer(text).X(x).Y(y).Z(z)).Draw(c, c.Bounds())`. `NewLayer(content string, layers ...*Layer) *Layer` and `NewCompositor(layers ...*Layer) *Compositor` are current signatures. Layer X/Y positions are relative to its parent. A Layer's own Draw does not apply its X/Y/Z or child hierarchy; the Compositor applies those positions. Call Compositor.Refresh after changing a layer tree or positions. Its Draw checks overlap but does not intersect layer bounds with the supplied area or translate positions by that area's origin. [Layer/compositor source](https://github.com/charmbracelet/lipgloss/blob/v2.0.6/layer.go). The official [canvas example](https://github.com/charmbracelet/lipgloss/blob/main/examples/canvas/main.go) uses NewCompositor; the README's `compositor.Compose(...)` fragment is inconsistent with this verified API.
 
 ## Engine composition and ownership implications
 
-Recommended integration, inferred from the native contracts: allocate a zero-origin region-sized Canvas for each consumer callback; paint only that local buffer; draw the completed buffer into the outer UV surface using its exact destination rectangle. Keep the child emulator's cell grid as cells through final composition. This uses LG/UV's intended primitives rather than serializing the child grid into an ANSI string and reparsing it for a custom proxy canvas.
+Implemented integration: allocate a zero-origin region-sized UV ScreenBuffer for each callback and expose it as `uv.Screen`; paint only that local buffer and clip its completed cells into the outer surface. Lip Gloss is an optional consumer/demo dependency, absent from the core production dependency graph. Keep the child emulator's cell grid as cells through final composition. This uses LG/UV's intended primitives rather than serializing the child grid into an ANSI string and reparsing it for a custom proxy canvas.
 
 `uv.Rectangle` aliases `image.Rectangle`; `uv.Rect(x, y, w, h)` sets Min to `(x,y)` and Max to `(x+w,y+h)`. Buffer.Draw maps source `(0,0)` to destination `area.Min`, reads source `(x-area.Min.X, y-area.Min.Y)`, and writes native cells with SetCell. For a local canvas of dimensions `w,h`, `c.Draw(screen, uv.Rect(x,y,w,h))` places it at `(x,y)`. Buffer.Draw skips nil/zero cells and does not clear the target first; initialize/clear the destination surface each full composition or maintain an explicit damage strategy. SetCell stores cells by value and handles wide-cell continuations and buffer-edge overflow. Passing a narrow region rectangle on a larger shared screen is not by itself a complete clipping boundary for every drawable. [UV buffer source](https://github.com/charmbracelet/ultraviolet/blob/006e29f97886/buffer.go).
 
@@ -55,9 +55,9 @@ A [UV Cell](https://github.com/charmbracelet/ultraviolet/blob/006e29f97886/cell.
 
 [UV StyledString](https://github.com/charmbracelet/ultraviolet/blob/006e29f97886/styled.go) decomposes ANSI SGR styling and hyperlinks into cells. Its Draw clears the supplied area before painting. That supports a styled bar on a separate region canvas, but can erase unrelated content if the whole outer screen is passed. It is not a complete child VT emulator: the source handles styled strings and explicitly leaves other control-sequence behavior unfinished. Use the selected terminal emulator for raw child PTY output.
 
-Canvas construction explicitly chooses `ansi.GraphemeWidth`, while the pinned UV NewScreenBuffer defaults to `ansi.WcWidth`. The engine must resolve cell-width policy and terminal grapheme-mode negotiation consistently with child emulation; composing incompatible widths can misplace the child or chrome. The hardcoded Canvas method has no public setter in this release. This is a cross-component contract requirement, not evidence that LG alone negotiates the outer terminal. [Canvas](https://github.com/charmbracelet/lipgloss/blob/v2.0.6/canvas.go), [UV defaults](https://github.com/charmbracelet/ultraviolet/blob/006e29f97886/buffer.go).
+Canvas construction explicitly chooses `ansi.GraphemeWidth`, while the pinned UV NewScreenBuffer defaults to `ansi.WcWidth`. The core sets its region buffers' method to GraphemeWidth to preserve that drawing contract. A native test verifies the emoji's two-cell grapheme; disabling that assignment produces a four-cell failure. Final renderer width policy remains subject to terminal negotiation. The optional Lip Gloss Canvas method has no public setter in this release. [Allocation](../../layout.go), [drawing test](../../drawing_test.go), [Canvas](https://github.com/charmbracelet/lipgloss/blob/v2.0.6/canvas.go), [UV defaults](https://github.com/charmbracelet/ultraviolet/blob/006e29f97886/buffer.go).
 
-Do not call Lip Gloss BackgroundColor/HasDarkBackground from paint callbacks while the frame owns terminal input: their standalone implementation changes raw mode and issues terminal queries. The frame's own protocol router must own those requests and replies. Do not use Lip Gloss Print/Println inside callbacks because direct writes bypass the composed surface. Native Style.Render plus Canvas.Compose perform offscreen work and do not need a Bubble Tea input loop. [Background-query source](https://github.com/charmbracelet/lipgloss/blob/v2.0.6/query.go), [query transport](https://github.com/charmbracelet/lipgloss/blob/v2.0.6/terminal.go).
+Do not call Lip Gloss BackgroundColor/HasDarkBackground from paint callbacks while the frame owns terminal input: their standalone implementation changes raw mode and issues terminal queries. The frame's own protocol router must own those requests and replies. Do not use Lip Gloss Print/Println inside callbacks because direct writes bypass the composed surface. Native Style.Render plus Layer.Draw/Compositor.Draw perform offscreen work and do not need a Bubble Tea input loop. [Background-query source](https://github.com/charmbracelet/lipgloss/blob/v2.0.6/query.go), [query transport](https://github.com/charmbracelet/lipgloss/blob/v2.0.6/terminal.go).
 
 ## Research evidence and limits
 

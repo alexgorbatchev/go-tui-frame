@@ -5,7 +5,6 @@ import (
 	"os"
 	"time"
 
-	"charm.land/lipgloss/v2"
 	"github.com/alexgorbatchev/go-tui-frame/internal/emulator"
 	"github.com/alexgorbatchev/go-tui-frame/internal/process"
 	uv "github.com/charmbracelet/ultraviolet"
@@ -33,7 +32,7 @@ type Size struct {
 // referenced contents must remain immutable while the frame may use them.
 type DrawContext[T any] struct {
 	Term Snapshot
-	View *lipgloss.Canvas
+	View uv.Screen
 	Data T
 }
 

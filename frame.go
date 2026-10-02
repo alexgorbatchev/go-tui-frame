@@ -6,7 +6,7 @@ import (
 	"os/exec"
 	"sync"
 
-	"charm.land/lipgloss/v2"
+	uv "github.com/charmbracelet/ultraviolet"
 )
 
 type edge uint8
@@ -32,7 +32,7 @@ type region[T any] struct {
 	draw   func(DrawContext[T])
 	data   T
 	dirty  bool
-	canvas *lipgloss.Canvas
+	canvas *uv.ScreenBuffer
 }
 
 // Frame configures one child session and accepts concurrent region updates.

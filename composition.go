@@ -1,9 +1,17 @@
 package frame
 
 import (
-	"charm.land/lipgloss/v2"
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
+)
+
+const (
+	borderHorizontal  = "─"
+	borderVertical    = "│"
+	borderTopLeft     = "╭"
+	borderTopRight    = "╮"
+	borderBottomLeft  = "╰"
+	borderBottomRight = "╯"
 )
 
 func (f *Frame[T]) compose(dst uv.ScreenBuffer, g geometry, snap Snapshot, force bool) {
@@ -16,20 +24,19 @@ func (f *Frame[T]) compose(dst uv.ScreenBuffer, g geometry, snap Snapshot, force
 }
 
 func paintBorder(dst uv.Screen, r uv.Rectangle) {
-	b := lipgloss.RoundedBorder()
 	put := func(x, y int, text string) { dst.SetCell(x, y, uv.NewCell(ansi.GraphemeWidth, text)) }
 	for x := r.Min.X + 1; x < r.Max.X-1; x++ {
-		put(x, r.Min.Y, b.Top)
-		put(x, r.Max.Y-1, b.Bottom)
+		put(x, r.Min.Y, borderHorizontal)
+		put(x, r.Max.Y-1, borderHorizontal)
 	}
 	for y := r.Min.Y + 1; y < r.Max.Y-1; y++ {
-		put(r.Min.X, y, b.Left)
-		put(r.Max.X-1, y, b.Right)
+		put(r.Min.X, y, borderVertical)
+		put(r.Max.X-1, y, borderVertical)
 	}
-	put(r.Min.X, r.Min.Y, b.TopLeft)
-	put(r.Max.X-1, r.Min.Y, b.TopRight)
-	put(r.Min.X, r.Max.Y-1, b.BottomLeft)
-	put(r.Max.X-1, r.Max.Y-1, b.BottomRight)
+	put(r.Min.X, r.Min.Y, borderTopLeft)
+	put(r.Max.X-1, r.Min.Y, borderTopRight)
+	put(r.Min.X, r.Max.Y-1, borderBottomLeft)
+	put(r.Max.X-1, r.Max.Y-1, borderBottomRight)
 }
 
 func paintChild(dst uv.Screen, area uv.Rectangle, term TerminalSnapshot) {

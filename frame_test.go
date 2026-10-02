@@ -2,13 +2,13 @@ package frame
 
 import (
 	"errors"
+	"image/color"
 	"math"
 	"os/exec"
 	"sync"
 	"testing"
 	"time"
 
-	"charm.land/lipgloss/v2"
 	uv "github.com/charmbracelet/ultraviolet"
 )
 
@@ -119,11 +119,15 @@ func TestInvalidateAbsentAndClosedRegions(t *testing.T) {
 	}
 }
 
-func TestNativeCanvasIsClippedToRegion(t *testing.T) {
+func TestNativeScreenIsClippedToRegion(t *testing.T) {
 	f := New(exec.Command("sh"), "red").Header(2, func(ctx DrawContext[string]) {
-		style := lipgloss.NewStyle().Background(lipgloss.Color("#B91C1C")).
-			Width(ctx.View.Width()).Height(ctx.View.Height())
-		ctx.View.Compose(lipgloss.NewLayer(style.Render(ctx.Data)))
+		bounds := ctx.View.Bounds()
+		cell := uv.Cell{Content: " ", Width: 1, Style: uv.Style{Bg: color.RGBA{R: 185, G: 28, B: 28, A: 255}}}
+		for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+			for x := bounds.Min.X; x < bounds.Max.X; x++ {
+				ctx.View.SetCell(x, y, &cell)
+			}
+		}
 	})
 	g, err := f.layout(Size{Cols: 12, Rows: 6})
 	if err != nil {
@@ -153,7 +157,7 @@ func TestLayoutRejectsOverflowingReservations(t *testing.T) {
 
 func TestInvalidCanvasCellWidthsCannotHangClipping(t *testing.T) {
 	for _, width := range []int{-1, math.MinInt, math.MaxInt} {
-		canvas := lipgloss.NewCanvas(1, 1)
+		canvas := uv.NewScreenBuffer(1, 1)
 		canvas.SetCell(0, 0, &uv.Cell{Content: "x", Width: width})
 		buf := uv.NewScreenBuffer(1, 1)
 		drawClipped(buf, canvas, uv.Rect(0, 0, 1, 1))

@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 13:56
-last_modified: 2026-10-01 20:54
+last_modified: 2026-10-01 22:24
 status: current
 ---
 
@@ -40,8 +40,10 @@ Demo painting can also be checked independently with
 - Preserve child argv through Cobra's native `--` handling. Keep just recipes'
   native positional arguments and quoted `"$@"`; string interpolation loses
   arguments containing spaces.
-- Paint borrowed region-local `*lipgloss.Canvas` targets through native styles,
-  layers, and compositors. Do not retain canvases, acquire terminal stdin from
+- Keep Lip Gloss optional for the core library. Paint borrowed region-local
+  `uv.Screen` targets through Lip Gloss styles, layers, and compositors in this
+  demo; use native `Draw(screen, bounds)` and `Bounds().Dx()/Dy()` dimensions.
+  Do not retain screens, acquire terminal stdin from
   callbacks, or write directly to the outer terminal.
 - Reserve header/footer geometry before `Run`. Ctrl+1 changes layout and Ctrl+2
   changes the native header background independently through immutable region

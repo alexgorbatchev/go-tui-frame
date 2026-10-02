@@ -57,14 +57,14 @@ func drawHeader(ctx frame.DrawContext[UIData]) {
 		badgeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(navy)).
 			Background(lipgloss.Color(white)).Bold(true).Padding(0, 1)
 		badge := lipgloss.NewLayer(badgeStyle.Render("Ctrl+1 layout")).Z(1)
-		badge.X(max(0, view.Width()-badge.Width()-1))
-		view.Compose(lipgloss.NewCompositor(title, badge))
+		badge.X(max(0, view.Bounds().Dx()-badge.Width()-1))
+		lipgloss.NewCompositor(title, badge).Draw(view, view.Bounds())
 	case 2:
 		cardStyle := style.Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color(white)).BorderBackground(style.GetBackground()).Padding(0, 1).
-			Width(max(1, view.Width()-2)).MaxWidth(view.Width()).MaxHeight(view.Height())
+			Width(max(1, view.Bounds().Dx()-2)).MaxWidth(view.Bounds().Dx()).MaxHeight(view.Bounds().Dy())
 		card := lipgloss.NewLayer(cardStyle.Render(text)).X(1)
-		view.Compose(lipgloss.NewCompositor(card))
+		lipgloss.NewCompositor(card).Draw(view, view.Bounds())
 	}
 }
 
@@ -100,10 +100,10 @@ func drawFooter(ctx frame.DrawContext[UIData]) {
 		paint(ctx.View, style, text)
 	case 1:
 		paint(ctx.View, style, "")
-		lineStyle := style.Width(ctx.View.Width()).MaxWidth(ctx.View.Width()).MaxHeight(1)
+		lineStyle := style.Width(ctx.View.Bounds().Dx()).MaxWidth(ctx.View.Bounds().Dx()).MaxHeight(1)
 		metadataLayer := lipgloss.NewLayer(lineStyle.Render(metadata))
 		controlsLayer := lipgloss.NewLayer(lineStyle.Bold(true).Render(keyHints)).Y(1)
-		ctx.View.Compose(lipgloss.NewCompositor(metadataLayer, controlsLayer))
+		lipgloss.NewCompositor(metadataLayer, controlsLayer).Draw(ctx.View, ctx.View.Bounds())
 	case 2:
 		style = style.Border(lipgloss.NormalBorder(), false, false, false, true).
 			BorderForeground(lipgloss.Color(white)).BorderBackground(bg)
@@ -111,13 +111,13 @@ func drawFooter(ctx frame.DrawContext[UIData]) {
 	}
 }
 
-func paint(view *lipgloss.Canvas, style lipgloss.Style, text string) {
+func paint(view uv.Screen, style lipgloss.Style, text string) {
 	if view.Bounds().Empty() {
 		return
 	}
-	style = style.Width(view.Width()).Height(view.Height()).
-		MaxWidth(view.Width()).MaxHeight(view.Height())
-	view.Compose(lipgloss.NewLayer(style.Render(text)))
+	style = style.Width(view.Bounds().Dx()).Height(view.Bounds().Dy()).
+		MaxWidth(view.Bounds().Dx()).MaxHeight(view.Bounds().Dy())
+	lipgloss.NewLayer(style.Render(text)).Draw(view, view.Bounds())
 }
 
 func metadataText(text string) string {

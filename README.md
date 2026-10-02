@@ -2,7 +2,7 @@
 
 # What It Does
 
-- **Custom frame:** Draw into region-sized Lip Gloss canvases with colors, alignment, borders, and layers.
+- **Custom frame:** Draw into region-sized cell buffers. Use Lip Gloss for styles and layers, or draw directly without it.
 - **Concise configuration:** Chain region declarations and optional handlers, then call `Run(ctx)`.
 - **Live updates:** Push typed application data to individual regions and toggle the child border during a session.
 - **Child information:** Read terminal cells, title, cursor, modes, process metadata, and PTY settings; observe input, output, and lifecycle events.
@@ -56,6 +56,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 	frame "github.com/alexgorbatchev/go-tui-frame"
+	uv "github.com/charmbracelet/ultraviolet"
 )
 
 type UIData struct{ Status string }
@@ -88,17 +89,18 @@ func main() {
 	}
 }
 
-func paint(view *lipgloss.Canvas, style lipgloss.Style, text string) {
-	if view.Bounds().Empty() {
+func paint(view uv.Screen, style lipgloss.Style, text string) {
+	bounds := view.Bounds()
+	if bounds.Empty() {
 		return
 	}
-	view.Compose(lipgloss.NewLayer(style.
-		Width(view.Width()).Height(view.Height()).
-		MaxWidth(view.Width()).MaxHeight(view.Height()).Render(text)))
+	lipgloss.NewLayer(style.
+		Width(bounds.Dx()).Height(bounds.Dy()).
+		MaxWidth(bounds.Dx()).MaxHeight(bounds.Dy()).Render(text)).Draw(view, bounds)
 }
 ```
 
-See the [demo app](cmd/tui-frame) for three interactive layouts with layered badges, background changes, and a live border toggle. Its [drawing callbacks](cmd/tui-frame/demo.go) and [capture handler](cmd/tui-frame/session.go) use the same public API.
+Lip Gloss is recommended for styling and used by this example; it is optional for library consumers. See the [demo app](cmd/tui-frame) for three interactive layouts with layered badges, background changes, and a live border toggle. Its [drawing callbacks](cmd/tui-frame/demo.go) and [capture handler](cmd/tui-frame/session.go) use the same public API.
 
 ## Push application updates
 
@@ -137,14 +139,22 @@ All drawing callbacks receive the same strongly typed context:
 ```go
 type DrawContext[T any] struct {
 	Term Snapshot
-	View *lipgloss.Canvas
+	View uv.Screen
 	Data T
 }
 ```
 
-`Term` is an owned child snapshot. `Data` is the selected region's application payload. `View` is a cleared, region-sized canvas whose `Width()`, `Height()`, and `Bounds()` are measured in terminal cells. Coordinates start at the region's own origin.
+`Term` is an owned child snapshot. `Data` is the selected region's application payload. `View` is a cleared, region-sized `uv.Screen` backed by a native screen buffer. `View.Bounds().Dx()` and `.Dy()` give its width and height in terminal cells. Coordinates start at the region's own origin.
 
-Use Lip Gloss styles and layers to fill the allocation, as `paint` does above. For positioned or overlapping layers, use `View.Compose(lipgloss.NewCompositor(layers...))`. Content is clipped to the region with wide-cell boundaries preserved. [Lip Gloss canvas](https://github.com/charmbracelet/lipgloss/blob/v2.0.6/canvas.go).
+The drawing contract requires synchronous drawing into `View`; filling the region and using Lip Gloss styles are optional. You can call `SetCell` directly or draw any `uv.Drawable`. Lip Gloss layers implement that interface: `lipgloss.NewLayer(text).Draw(ctx.View, ctx.View.Bounds())`. For positioned or overlapping layers, use `lipgloss.NewCompositor(layers...).Draw(ctx.View, ctx.View.Bounds())`. The library clips the completed region with wide-cell boundaries preserved. [Screen and drawable interfaces](https://github.com/charmbracelet/ultraviolet/blob/006e29f97886/uv.go), [Lip Gloss layers](https://github.com/charmbracelet/lipgloss/blob/v2.0.6/layer.go).
+
+For plain text without Lip Gloss, use the existing Ultraviolet drawing primitive:
+
+```go
+app.Header(1, func(ctx frame.DrawContext[UIData]) {
+	uv.NewStyledString(ctx.Data.Status).Draw(ctx.View, ctx.View.Bounds())
+})
+```
 
 The canvas is borrowed until the callback returns. Keep its dimensions, draw synchronously, and do not retain it. Callbacks run in the session's drawing path and must return promptly. Use offscreen styling; direct printing or terminal queries bypass the session's I/O ownership. `DrawContext` is drawing data, separate from the cancellation `context.Context` passed to `Run`.
 
