@@ -27,9 +27,6 @@ func TestCaptureConsumesNativeDamageAndPreservesOwnedFrames(t *testing.T) {
 	if err := em.native.SetColorForeground(&ghostty.ColorRGB{R: 0x12, G: 0x34, B: 0x56}); err != nil {
 		t.Fatal(err)
 	}
-	if err := em.native.SetColorBackground(&ghostty.ColorRGB{}); err != nil {
-		t.Fatal(err)
-	}
 	recolored := terminalState(t, em)
 	if recolored.Cells[0].Style.Fg != (color.RGBA{R: 0x12, G: 0x34, B: 0x56, A: 255}) {
 		t.Fatalf("default-color change left a cached style: %#v", recolored.Cells[0].Style)

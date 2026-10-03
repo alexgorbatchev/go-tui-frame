@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 20:10
-last_modified: 2026-10-02 17:28
+last_modified: 2026-10-02 21:24
 status: current
 ---
 
@@ -101,10 +101,75 @@ render; unchanged frames skip that call. The verified native dirty-tracking and
 render-hold contracts are documented in the
 [pinned native render API](https://github.com/ghostty-org/ghostty/blob/33da6848d63b3bba2b4f31ab1531d618f2795192/include/ghostty/vt/render.h).
 
-A separate diagnostic against the original capture source observes a native
-foreground of `#123456` after OSC 10 while captured and painted foregrounds
-remain white when background defaults are unset. `.tmp/color-probe.log` records
-that pre-existing observation issue; the repaint changes do not address it.
+### Default foreground/background colors
+
+The native terminal configures both default colors once at construction through
+its preference profile. Reported host colors seed the defaults when available;
+the native render state's white foreground and black background supply the
+fallbacks. Ghostty updates
+the render colors as a pair and expects the embedder to configure both defaults;
+leaving either unset prevents an independent OSC 10/11 override from reaching
+the rendered cells. The initialization uses the native setters described in the
+[pinned terminal color API](https://github.com/ghostty-org/ghostty/blob/33da6848d63b3bba2b4f31ab1531d618f2795192/include/ghostty/vt/terminal.h),
+without adding work to subsequent captures or repaints.
+
+[Color regressions](../../../internal/emulator/colors_test.go) verify independent
+OSC 10/11 overrides, OSC 110/111 resets, unchanged explicit SGR colors, owned
+snapshots, damage on every row, synchronized render holds, reverse colors, and
+native query replies matching the rendered colors. The real-PTY foreground
+regression in [repaint tests](../../../repaint_test.go) parses the emitted outer
+terminal bytes to verify existing text changes color and resets without new text.
+Its capture-file renderer explicitly selects a truecolor profile.
+
+`.tmp/colors-red.log` records the original failures. The compiler overlay in
+`.tmp/colors-disabled.json` removes only default-color initialization; all new
+color regressions fail, as recorded in `.tmp/colors-disabled.log`. The enabled
+source passes the whole-repository race suite, vet, module hygiene and library
+build. The inspected `.tmp/colors-final-race.log` contains:
+
+```text
+ok github.com/alexgorbatchev/go-tui-frame 14.279s
+ok github.com/alexgorbatchev/go-tui-frame/cmd/tui-frame 9.188s
+ok github.com/alexgorbatchev/go-tui-frame/internal/emulator 1.490s
+ok github.com/alexgorbatchev/go-tui-frame/internal/input 1.958s
+ok github.com/alexgorbatchev/go-tui-frame/internal/process 18.551s
+```
+
+The other logs are `.tmp/colors-final-vet.log`, `.tmp/colors-final-tidy.log`, and
+`.tmp/colors-final-build.log`; each command exits 0 without diagnostics.
+
+### Integration with inherited terminal preferences
+
+The repaint implementation preserves inherited colors, palette, keyboard modes,
+PTY line discipline and cursor restoration. Profile initialization seeds native
+colors; cached styles retain default rendition when colors match the host.
+Cursor shape, blinking and color changes trigger synchronized output even when
+cells and cursor position remain unchanged. The appearance-only regression in
+[performance tests](../../../performance_test.go) also verifies unchanged
+inherited cursors produce no output or allocations.
+
+The combined source passes `go test -race -count=1 ./...`, `go vet ./...`,
+`go build ./...`, and `go mod tidy -diff`. Logs are retained under
+`.tmp/repaint-landing/` in the primary checkout. `landing-race.log` contains:
+
+```text
+ok github.com/alexgorbatchev/go-tui-frame 21.480s
+ok github.com/alexgorbatchev/go-tui-frame/cmd/tui-frame 18.388s
+ok github.com/alexgorbatchev/go-tui-frame/internal/emulator 2.062s
+ok github.com/alexgorbatchev/go-tui-frame/internal/input 1.357s
+ok github.com/alexgorbatchev/go-tui-frame/internal/process 17.931s
+```
+
+`landing-cursor-disabled.log` records the appearance regression failing when
+cursor appearance changes do not trigger repaint. `landing-colors-disabled.log`
+records all OSC regressions failing when both native default-color setters are
+removed from profile initialization. Compiler overlays leave maintained sources
+enabled throughout the passing runs.
+
+`landing-bench.log` measures unchanged rendering at 158.0 ns/op with zero bytes
+and allocations, changing-row capture/repaint at 12.83 µs/op with 3,256 bytes and
+173 allocations, and warmed input delivery at 1.026 µs/op with zero bytes and
+allocations. These are local component measurements on the same Apple M4 Pro.
 
 ### Packaging and drawing checks
 

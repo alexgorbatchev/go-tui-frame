@@ -3,6 +3,7 @@ package frame
 import (
 	"bytes"
 	"context"
+	"image/color"
 	"os"
 	"os/exec"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/alexgorbatchev/go-tui-frame/internal/emulator"
+	"github.com/charmbracelet/colorprofile"
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/term"
@@ -88,6 +90,57 @@ func readRepaintChunk(t testing.TB, s *session[string], slave *os.File, chunk st
 	}
 	if err := s.readChild(make([]byte, len(chunk))); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestOSCForegroundRepaintsCleanRowsAndResets(t *testing.T) {
+	s, out, slave := newRepaintSession(t, ansi.ModeReset, nil)
+	// The capture file cannot advertise the outer terminal's color support.
+	s.console.renderer.SetColorProfile(colorprofile.TrueColor)
+	outer, err := emulator.New(emulator.Options{Size: emulator.Size{Cols: 20, Rows: 6}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(outer.Close)
+	readRepaintChunk(t, s, slave, "one\r\ntwo")
+	if err := s.render(false); err != nil {
+		t.Fatal(err)
+	}
+	initial := repaintOutput(t, out)
+	if _, err := outer.Write(initial); err != nil {
+		t.Fatal(err)
+	}
+	before := len(initial)
+	original := s.screen.CellAt(0, 0).Style.Fg
+	for _, step := range []struct {
+		sequence string
+		color    color.Color
+	}{
+		{"\x1b]10;#123456\a", color.RGBA{R: 0x12, G: 0x34, B: 0x56, A: 255}},
+		{"\x1b]110\a", original},
+	} {
+		readRepaintChunk(t, s, slave, step.sequence)
+		if err := s.render(false); err != nil {
+			t.Fatal(err)
+		}
+		output := repaintOutput(t, out)
+		if len(output) == before {
+			t.Fatal("color-only change did not repaint the outer terminal")
+		}
+		if _, err := outer.Write(output[before:]); err != nil {
+			t.Fatal(err)
+		}
+		painted, err := outer.State()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for y, content := range []string{"o", "t"} {
+			cell := painted.Cells[y*20]
+			if cell.Content != content || cell.Style.Fg != step.color {
+				t.Fatalf("outer row %d after %q: %#v; want foreground %#v", y, step.sequence, cell, step.color)
+			}
+		}
+		before = len(output)
 	}
 }
 
