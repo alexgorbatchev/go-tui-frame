@@ -150,7 +150,8 @@ func TestCursorAppearanceRepaintsWithoutCellOrPositionChanges(t *testing.T) {
 
 func TestInputQueueCompactsPartialWritesAndPreservesOrigins(t *testing.T) {
 	s, _, slave := newRepaintSession(t, ansi.ModeReset, nil)
-	if err := unix.SetNonblock(int(slave.Fd()), true); err != nil {
+	slaveFD := int(slave.Fd())
+	if err := unix.SetNonblock(slaveFD, true); err != nil {
 		t.Fatal(err)
 	}
 	first := bytes.Repeat([]byte("abc"), inputQueueLimit/6)
@@ -181,7 +182,7 @@ func TestInputQueueCompactsPartialWritesAndPreservesOrigins(t *testing.T) {
 		if err := s.writeInput(); err != nil {
 			t.Fatal(err)
 		}
-		n, err := unix.Read(int(slave.Fd()), received)
+		n, err := unix.Read(slaveFD, received)
 		if err != nil && err != unix.EAGAIN {
 			t.Fatal(err)
 		}

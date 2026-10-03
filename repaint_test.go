@@ -50,7 +50,10 @@ func newRepaintSessionSize(t testing.TB, size Size, mode ansi.ModeSetting, draw 
 	if _, err := term.MakeRaw(slave.Fd()); err != nil {
 		t.Fatal(err)
 	}
-	if err := unix.SetNonblock(int(master.Fd()), true); err != nil {
+	// File.Fd can restore blocking mode on pollable files. Cache the
+	// descriptor before SetNonblock, as the production session does.
+	masterFD := int(master.Fd())
+	if err := unix.SetNonblock(masterFD, true); err != nil {
 		t.Fatal(err)
 	}
 	f := New(exec.Command("sh"), "header")
@@ -68,7 +71,7 @@ func newRepaintSessionSize(t testing.TB, size Size, mode ansi.ModeSetting, draw 
 	t.Cleanup(em.Close)
 	c := &console{renderer: uv.NewTerminalRenderer(out, []string{"TERM=xterm-256color"}), entry: map[ansi.DECMode]ansi.ModeSetting{2026: mode}, applied: make(map[ansi.DECMode]bool)}
 	c.renderer.EnterAltScreen()
-	s := &session[string]{frame: f, console: c, terminal: em, geometry: g, screen: uv.NewScreenBuffer(size.Cols, size.Rows), fd: int(master.Fd()), snapshot: Snapshot{Child: ChildSnapshot{PID: os.Getpid()}}}
+	s := &session[string]{frame: f, console: c, terminal: em, geometry: g, screen: uv.NewScreenBuffer(size.Cols, size.Rows), fd: masterFD, snapshot: Snapshot{Child: ChildSnapshot{PID: os.Getpid()}}}
 	if err := s.refresh(true); err != nil {
 		t.Fatal(err)
 	}
