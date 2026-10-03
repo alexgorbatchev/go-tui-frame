@@ -2,7 +2,10 @@ package frame
 
 import (
 	"bytes"
+	"fmt"
+	"io"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -211,8 +214,9 @@ func TestInputQueueCompactsPartialWritesAndPreservesOrigins(t *testing.T) {
 func BenchmarkSessionRepaint(b *testing.B) {
 	for _, name := range []string{"unchanged render", "unchanged capture", "changing row"} {
 		b.Run(name, func(b *testing.B) {
-			s, _, _ := newRepaintSession(b, ansi.ModeNotRecognized, nil)
+			s, out, _ := newRepaintSession(b, ansi.ModeNotRecognized, nil)
 			text := []byte("\x1b[Hupdated")
+			before := repaintPosition(b, out)
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := range b.N {
@@ -232,8 +236,48 @@ func BenchmarkSessionRepaint(b *testing.B) {
 					b.Fatal(err)
 				}
 			}
+			b.StopTimer()
+			b.ReportMetric(float64(repaintPosition(b, out)-before)/float64(b.N), "output-B/op")
 		})
 	}
+}
+
+func repaintPosition(b *testing.B, out io.Seeker) int64 {
+	b.Helper()
+	pos, err := out.Seek(0, io.SeekCurrent)
+	if err != nil {
+		b.Fatal(err)
+	}
+	return pos
+}
+
+func BenchmarkPopulatedSessionRepaint(b *testing.B) {
+	s, out, _ := newRepaintSessionSize(b, Size{Cols: 120, Rows: 40}, ansi.ModeNotRecognized, nil)
+	var initial bytes.Buffer
+	for y := range s.geometry.child.Dy() {
+		fmt.Fprintf(&initial, "\x1b[%d;1H%s", y+1, strings.Repeat("x", s.geometry.child.Dx()-1))
+	}
+	if _, err := s.terminal.Write(initial.Bytes()); err != nil {
+		b.Fatal(err)
+	}
+	if err := s.refresh(false); err != nil {
+		b.Fatal(err)
+	}
+	before := repaintPosition(b, out)
+	text := []byte("\x1b[Hupdated")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := range b.N {
+		text[3] = byte('a' + i%2)
+		if _, err := s.terminal.Write(text); err != nil {
+			b.Fatal(err)
+		}
+		if err := s.refresh(false); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	b.ReportMetric(float64(repaintPosition(b, out)-before)/float64(b.N), "output-B/op")
 }
 
 func BenchmarkSessionInputQueue(b *testing.B) {

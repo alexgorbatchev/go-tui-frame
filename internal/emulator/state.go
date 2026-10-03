@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"image/color"
 	"slices"
+	"unicode/utf8"
 
 	uv "github.com/charmbracelet/ultraviolet"
 	ghostty "go.mitchellh.com/libghostty"
@@ -238,16 +239,17 @@ func (t *Terminal) copyRow(y int, visual *visualState) error {
 	if err != nil {
 		return fmt.Errorf("reading native row selection: %w", err)
 	}
+	t.plainStyle = capturedStyle{native: *t.defaultStyle, visual: t.cellStyle(t.defaultStyle, visual.colors)}
+	// Style IDs belong to the source page and may be reused after mutations.
+	// Reuse only within this captured row; retain map storage between rows.
+	clear(t.styles)
 	for x := range t.size.Cols {
-		if err := t.cells.Select(uint16(x)); err != nil {
-			return fmt.Errorf("selecting native cell %d,%d: %w", x, y, err)
-		}
 		i := y*t.size.Cols + x
 		// CellsRaw supplies copied packed values without a native getter per
-		// cell. Store them before using the binding's semantic accessors.
+		// cell. Decode properties from the linked library's layout manifest.
 		visual.nativeCells[i].Raw = *raw.Cell(x)
 		visual.nativeCells[i].Selected = selection != nil && x >= int(selection.StartX) && x <= int(selection.EndX)
-		cell, native, err := t.copyCell(i, visual)
+		cell, native, err := t.copyCell(i, visual, t.layout.decode(visual.nativeCells[i].Raw.PackedValue()))
 		if err != nil {
 			return fmt.Errorf("copying native cell %d,%d: %w", x, y, err)
 		}
@@ -256,30 +258,27 @@ func (t *Terminal) copyRow(y int, visual *visualState) error {
 	return nil
 }
 
-func (t *Terminal) copyCell(i int, visual *visualState) (uv.Cell, NativeCell, error) {
+func (t *Terminal) copyCell(i int, visual *visualState, data cellData) (uv.Cell, NativeCell, error) {
 	native := &visual.nativeCells[i]
 	raw := &native.Raw
-	styled, err := t.cells.HasStyling()
+	style, err := t.rowStyle(uint16(i%t.size.Cols), data.styleID, visual.colors)
 	if err != nil {
 		return uv.Cell{}, NativeCell{}, err
 	}
-	style := t.defaultStyle
-	if styled {
-		style, err = t.cells.Style()
+	t.text = t.text[:0]
+	if data.tag == ghostty.CellContentCodepointGrapheme {
+		if err := t.cells.Select(uint16(i % t.size.Cols)); err != nil {
+			return uv.Cell{}, NativeCell{}, err
+		}
+		t.text, err = t.cells.AppendGraphemes(t.text)
 		if err != nil {
 			return uv.Cell{}, NativeCell{}, err
 		}
+	} else if data.codepoint != 0 {
+		t.text = utf8.AppendRune(t.text, rune(data.codepoint))
 	}
-	wide, err := raw.Wide()
-	if err != nil {
-		return uv.Cell{}, NativeCell{}, err
-	}
-	t.text, err = t.cells.AppendGraphemes(t.text[:0])
-	if err != nil {
-		return uv.Cell{}, NativeCell{}, err
-	}
-	cell := uv.Cell{Content: cellText(t.text, visual.cells[i].Content), Style: t.cellStyle(style, visual.colors), Width: 1}
-	switch wide {
+	cell := uv.Cell{Content: cellText(t.text, visual.cells[i].Content), Style: style.visual, Width: 1}
+	switch data.wide {
 	case ghostty.CellWideWide:
 		cell.Width = 2
 	case ghostty.CellWideSpacerTail:
@@ -292,11 +291,7 @@ func (t *Terminal) copyCell(i int, visual *visualState) (uv.Cell, NativeCell, er
 	if cell.Content == "" && cell.Width > 0 {
 		cell.Content = " "
 	}
-	linked, err := raw.HasHyperlink()
-	if err != nil {
-		return uv.Cell{}, NativeCell{}, err
-	}
-	if linked {
+	if data.linked {
 		x, y := i%t.size.Cols, i/t.size.Cols
 		ref, err := t.native.GridRef(ghostty.Point{Tag: ghostty.PointTagViewport, X: uint16(x), Y: uint32(y)})
 		if err != nil {
@@ -307,7 +302,7 @@ func (t *Terminal) copyCell(i int, visual *visualState) (uv.Cell, NativeCell, er
 			return uv.Cell{}, NativeCell{}, err
 		}
 	}
-	return cell, NativeCell{Raw: *raw, Style: *style, Wide: wide, Selected: native.Selected}, nil
+	return cell, NativeCell{Raw: *raw, Style: style.native, Wide: data.wide, Selected: native.Selected}, nil
 }
 
 // The immutable ASCII string supplies stable single-character strings without

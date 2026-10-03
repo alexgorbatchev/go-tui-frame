@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 20:10
-last_modified: 2026-10-02 21:24
+last_modified: 2026-10-02 22:40
 status: current
 ---
 
@@ -12,6 +12,78 @@ cross-build/linkage checks. Raw logs and temporary mutation copies are local
 ignored artifacts; the source tests linked here are retained in the repository.
 
 ## Whole-repository checks
+
+### Packed native cell capture
+
+The `perf/ghostty-render` worktree captures copied native cells using the linked
+library's published layout manifest. [Cell layout decoding](../../../internal/emulator/cell_layout.go)
+validates the manifest schema, storage, field types and bit ranges once per
+process. Bit positions come from the manifest rather than fixed offsets. The
+supported contract is documented in Ghostty's pinned
+[type API](https://github.com/ghostty-org/ghostty/blob/33da6848d63b3bba2b4f31ab1531d618f2795192/include/ghostty/vt/types.h)
+and [screen API](https://github.com/ghostty-org/ghostty/blob/33da6848d63b3bba2b4f31ab1531d618f2795192/include/ghostty/vt/screen.h).
+
+Plain codepoints, width, style IDs and hyperlink flags no longer require
+individual native getters for every cell. Complex graphemes, nondefault styles
+and hyperlink URIs still use native getters. [Style capture](../../../internal/emulator/cell_style.go)
+reuses each style within a captured row and retains its map storage. Style IDs
+are page-local and can be reused after mutations, so cached entries are cleared
+for each row. The dirty-row compositor and incremental outer renderer remain
+in use.
+
+[Row tests](../../../internal/emulator/row_test.go) compare captured content,
+packed metadata, full styles and hyperlinks with actual native getters. They
+also reject unsupported manifests. Allocation checks measure 9 additional
+allocations for a plain damaged row and 19 for a row with two styles, at each of
+20, 120 and 240 columns. `.tmp/row-allocation-green.log` records the passing
+measurements. `.tmp/native-disabled.log` records the same allocation tests
+failing when a compiler overlay restores the original capture code; plain-row
+overhead grows from 69 to 729 allocations with width. A separate hyperlink
+mutation fails the native comparison in `.tmp/links-disabled.log`. These
+overlays leave maintained source files enabled.
+
+The following medians come from three one-second runs per benchmark on macOS
+arm64, Apple M4 Pro. `.tmp/native-baseline-bench.log` uses the original capture
+code through an overlay; `.tmp/native-final-bench.log` uses packed capture.
+Session benchmarks use a real child PTY and an output file, with outer
+synchronization unsupported:
+
+| Operation | Original time/op | Packed time/op | Original allocations/op | Packed allocations/op |
+| :--- | ---: | ---: | ---: | ---: |
+| Internal capture, one row of a 120×40 viewport | 25.869 µs | 12.367 µs | 443 | 83 |
+| Changing-row capture and repaint, 20×6 | 13.047 µs | 10.580 µs | 173 | 113 |
+| Populated changing-row capture and repaint, 120×40 | 42.860 µs | 25.598 µs | 609 | 249 |
+| Unchanged render | 161.5 ns | 158.8 ns | 0 | 0 |
+
+The populated fixture contains 119 ASCII characters on each row and alternates
+one character per repaint. The incremental renderer emits 9 bytes per change.
+The [native formatter benchmark](../../../internal/emulator/formatter_benchmark_test.go)
+exports the populated snapshot as 4,838 bytes, taking approximately 7 µs for
+the child update and native export. That measurement excludes placement,
+clearing, composition and terminal delivery. `.tmp/native-bench.log` records the formatter
+results; [session benchmarks](../../../performance_test.go) record actual outer
+output sizes. These component measurements do not establish physical terminal
+latency. Changed captures and repaints still allocate; unchanged rendering
+remains allocation-free.
+
+`just check` passes module hygiene, native/library/CLI builds, vet and the full
+race suite. `.tmp/native-check.log` contains:
+
+```text
+ok github.com/alexgorbatchev/go-tui-frame 19.766s
+ok github.com/alexgorbatchev/go-tui-frame/cmd/tui-frame 17.908s
+ok github.com/alexgorbatchev/go-tui-frame/internal/emulator 1.910s
+ok github.com/alexgorbatchev/go-tui-frame/internal/input 1.324s
+ok github.com/alexgorbatchev/go-tui-frame/internal/process 18.665s
+```
+
+A separate native probe exposes an existing blank-cell background mismatch:
+after `SGR 48;2;10;20;30` followed by erase-line, native cells contain RGB
+`10,20,30`, while composed cells use black. `.tmp/background-native.log` and
+`.tmp/background-baseline.log` show the same mismatch with packed capture
+enabled and disabled. The current style-only conversion does not extract
+background colors stored directly in blank packed cells; this issue is outside
+the capture performance change.
 
 ### Repaint performance
 

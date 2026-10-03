@@ -65,6 +65,9 @@ type Terminal struct {
 	scheme                         *ghostty.ColorScheme
 	hostForeground, hostBackground *ghostty.ColorRGB
 	text                           []byte
+	layout                         cellLayout
+	styles                         map[uint16]capturedStyle
+	plainStyle                     capturedStyle
 	style                          ghostty.Style
 	cachedStyle                    uv.Style
 	styleValid                     bool
@@ -84,7 +87,11 @@ func New(opts Options) (*Terminal, error) {
 	if opts.Version == "" {
 		opts.Version = defaultVersion
 	}
-	t := &Terminal{size: opts.Size, defaultStyle: ghostty.DefaultStyle()}
+	layout, err := nativeCellLayout()
+	if err != nil {
+		return nil, err
+	}
+	t := &Terminal{size: opts.Size, layout: layout, defaultStyle: ghostty.DefaultStyle()}
 	if err := t.newRenderState(); err != nil {
 		t.Close()
 		return nil, err
@@ -100,7 +107,6 @@ func New(opts Options) (*Terminal, error) {
 	if opts.ScrollbackMaxLines != nil {
 		nativeOpts = append(nativeOpts, ghostty.WithMaxScrollbackLines(*opts.ScrollbackMaxLines))
 	}
-	var err error
 	t.native, err = ghostty.NewTerminal(nativeOpts...)
 	if err != nil {
 		t.Close()
@@ -236,5 +242,6 @@ func (t *Terminal) Close() {
 	}
 	t.visual = visualState{}
 	t.text = nil
+	t.styles = nil
 	t.defaultStyle = nil
 }

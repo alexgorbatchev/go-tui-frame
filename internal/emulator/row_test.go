@@ -1,0 +1,204 @@
+package emulator
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+	"testing"
+
+	ghostty "go.mitchellh.com/libghostty"
+)
+
+func TestCellLayoutRejectsUnsupportedManifests(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		change func(*packedDescriptor)
+	}{
+		{"storage", func(cell *packedDescriptor) { cell.Underlying = "u32" }},
+		{"missing field", func(cell *packedDescriptor) { delete(cell.Bits, "hyperlink") }},
+		{"field type", func(cell *packedDescriptor) {
+			field := cell.Bits["wide"]
+			field.Type = "bool"
+			cell.Bits["wide"] = field
+		}},
+		{"field width", func(cell *packedDescriptor) {
+			field := cell.Bits["style_id"]
+			field.LSB, field.Width = 0, packedCellBits
+			cell.Bits["style_id"] = field
+		}},
+		{"zero width", func(cell *packedDescriptor) {
+			field := cell.Bits["wide"]
+			field.Width = 0
+			cell.Bits["wide"] = field
+		}},
+		{"overflow", func(cell *packedDescriptor) {
+			field := cell.Bits["wide"]
+			field.LSB = packedCellBits
+			cell.Bits["wide"] = field
+		}},
+		{"content tag", func(cell *packedDescriptor) {
+			field := cell.Bits["content"]
+			field.Tag = "wide"
+			cell.Bits["content"] = field
+		}},
+		{"missing grapheme arm", func(cell *packedDescriptor) {
+			delete(cell.Bits["content"].Arms, "CODEPOINT_GRAPHEME")
+		}},
+		{"nested overflow", func(cell *packedDescriptor) {
+			content := cell.Bits["content"]
+			bits := content.Arms["CODEPOINT"].Bits
+			field := bits["codepoint"]
+			field.LSB = content.Width
+			bits["codepoint"] = field
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var manifest struct {
+				Schema uint
+				Types  map[string]packedDescriptor
+			}
+			if err := json.Unmarshal([]byte(ghostty.TypeJSON()), &manifest); err != nil {
+				t.Fatal(err)
+			}
+			cell := manifest.Types["GhosttyCell"]
+			tt.change(&cell)
+			manifest.Types["GhosttyCell"] = cell
+			data, err := json.Marshal(manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := parseCellLayout(string(data)); err == nil {
+				t.Fatal("unsupported native cell layout was accepted")
+			}
+		})
+	}
+	for _, data := range []string{"{", "{}", `{"schema":2}`} {
+		if _, err := parseCellLayout(data); err == nil {
+			t.Errorf("unsupported manifest %q was accepted", data)
+		}
+	}
+}
+
+func TestRowCaptureAllocationsDoNotScaleWithWidth(t *testing.T) {
+	for _, name := range []string{"plain", "styled"} {
+		for _, cols := range []int{20, 120, 240} {
+			t.Run(fmt.Sprintf("%s/%d", name, cols), func(t *testing.T) {
+				em := newTerminal(t, cols, 3)
+				var state State
+				if err := em.UpdateState(&state); err != nil {
+					t.Fatal(err)
+				}
+				text := []byte("\x1b[Hupdated")
+				limit := 12.0
+				if name == "styled" {
+					text = []byte("\x1b[H\x1b[38;5;33m" + strings.Repeat("x", cols/2) + "\x1b[38;2;11;22;33m" + strings.Repeat("x", cols-cols/2) + "\x1b[0m")
+					limit = 24
+				}
+				capture := func() {
+					if err := em.UpdateState(&state); err != nil {
+						t.Fatal(err)
+					}
+					em.ClearDamage()
+				}
+				unchanged := testing.AllocsPerRun(20, capture)
+				row := testing.AllocsPerRun(20, func() {
+					if _, err := em.Write(text); err != nil {
+						t.Fatal(err)
+					}
+					capture()
+				})
+				t.Logf("unchanged %.0f, damaged row %.0f, additional %.0f allocations", unchanged, row, row-unchanged)
+				// Row iterator queries have a fixed cost; plain cells must not add
+				// allocations as the viewport becomes wider.
+				if extra := row - unchanged; extra > limit {
+					t.Errorf("%d-column row capture added %.0f allocations", cols, extra)
+				}
+			})
+		}
+	}
+}
+
+func TestCaptureMatchesNativeCellData(t *testing.T) {
+	for _, tt := range []struct {
+		name, text string
+	}{
+		{"ASCII", "ASCII \x1b[2;4Hoffset"},
+		{"graphemes and wide spacers", "e\u0301 界 👩🏽‍💻\r\n\x1b[2;8H界"},
+		{"full styles", "\x1b[1;3;53;4:3;38;2;10;20;30;58;2;40;50;60mstyled\x1b[0m\r\nplain"},
+		{"background-only cells", "\x1b[48;2;10;20;30m\x1b[2K\x1b[0m\r\n\x1b[44m\x1b[2K\x1b[0m"},
+		{"hyperlinks", "\x1b]8;;https://example.test/report\x1b\\link界\x1b]8;;\x1b\\ plain"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			em := newTerminal(t, 8, 5)
+			writeTerminal(t, em, tt.text)
+			state := terminalState(t, em)
+			if err := em.render.RowIterator(em.rows); err != nil {
+				t.Fatal(err)
+			}
+			for y := 0; em.rows.Next(); y++ {
+				if err := em.rows.Cells(em.cells); err != nil {
+					t.Fatal(err)
+				}
+				for x := range state.Size.Cols {
+					if err := em.cells.Select(uint16(x)); err != nil {
+						t.Fatal(err)
+					}
+					raw, err := em.cells.Raw()
+					if err != nil {
+						t.Fatal(err)
+					}
+					wide, err := raw.Wide()
+					if err != nil {
+						t.Fatal(err)
+					}
+					codepoint, err := raw.Codepoint()
+					if err != nil {
+						t.Fatal(err)
+					}
+					tag, err := raw.ContentTag()
+					if err != nil {
+						t.Fatal(err)
+					}
+					styled, err := raw.HasStyling()
+					if err != nil {
+						t.Fatal(err)
+					}
+					styleID, err := raw.StyleID()
+					if err != nil {
+						t.Fatal(err)
+					}
+					style, err := em.cells.Style()
+					if err != nil {
+						t.Fatal(err)
+					}
+					graphemes, err := em.cells.AppendGraphemes(nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					content := string(graphemes)
+					if wide == ghostty.CellWideSpacerTail {
+						content = ""
+					} else if content == "" || wide == ghostty.CellWideSpacerHead {
+						content = " "
+					}
+					i := y*state.Size.Cols + x
+					cell, native := state.Cells[i], state.NativeCells[i]
+					if native.Raw != *raw || native.Wide != wide || native.Style != *style || cell.Content != content {
+						t.Fatalf("cell %d,%d differs from native text, width, raw value or full style", x, y)
+					}
+					linked, err := raw.HasHyperlink()
+					if err != nil {
+						t.Fatal(err)
+					}
+					decoded := em.layout.decode(raw.PackedValue())
+					if decoded.codepoint != codepoint || decoded.tag != tag || decoded.wide != wide || decoded.styleID != styleID || (decoded.styleID != 0) != styled || decoded.linked != linked {
+						t.Fatalf("cell %d,%d manifest decode differs from Ghostty's getters", x, y)
+					}
+					if linked != (cell.Link.URL != "") {
+						t.Fatalf("cell %d,%d lost or invented a hyperlink", x, y)
+					}
+				}
+			}
+		})
+	}
+}

@@ -21,6 +21,11 @@ import (
 
 func newRepaintSession(t testing.TB, mode ansi.ModeSetting, draw func(DrawContext[string])) (*session[string], *os.File, *os.File) {
 	t.Helper()
+	return newRepaintSessionSize(t, Size{Cols: 20, Rows: 6}, mode, draw)
+}
+
+func newRepaintSessionSize(t testing.TB, size Size, mode ansi.ModeSetting, draw func(DrawContext[string])) (*session[string], *os.File, *os.File) {
+	t.Helper()
 	if err := os.MkdirAll(".tmp", 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +57,7 @@ func newRepaintSession(t testing.TB, mode ansi.ModeSetting, draw func(DrawContex
 	if draw != nil {
 		f.Header(1, draw)
 	}
-	g, err := f.layout(Size{Cols: 20, Rows: 6})
+	g, err := f.layout(size)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +68,7 @@ func newRepaintSession(t testing.TB, mode ansi.ModeSetting, draw func(DrawContex
 	t.Cleanup(em.Close)
 	c := &console{renderer: uv.NewTerminalRenderer(out, []string{"TERM=xterm-256color"}), entry: map[ansi.DECMode]ansi.ModeSetting{2026: mode}, applied: make(map[ansi.DECMode]bool)}
 	c.renderer.EnterAltScreen()
-	s := &session[string]{frame: f, console: c, terminal: em, geometry: g, screen: uv.NewScreenBuffer(20, 6), fd: int(master.Fd()), snapshot: Snapshot{Child: ChildSnapshot{PID: os.Getpid()}}}
+	s := &session[string]{frame: f, console: c, terminal: em, geometry: g, screen: uv.NewScreenBuffer(size.Cols, size.Rows), fd: int(master.Fd()), snapshot: Snapshot{Child: ChildSnapshot{PID: os.Getpid()}}}
 	if err := s.refresh(true); err != nil {
 		t.Fatal(err)
 	}
