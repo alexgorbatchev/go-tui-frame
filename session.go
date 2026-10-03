@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -19,6 +20,7 @@ import (
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/creack/pty"
+	ghostty "go.mitchellh.com/libghostty"
 	"golang.org/x/sys/unix"
 )
 
@@ -39,7 +41,7 @@ func (f *Frame[T]) Run(ctx context.Context) (result Result, err error) {
 		return result, err
 	}
 	defer f.close()
-	events := newEventDispatcher(f.observe)
+	events := newEventDispatcher(f.observedKinds, f.observe)
 	defer events.close()
 	fd, device, w, err := inspectConsole(f.input, f.output)
 	if err != nil {
@@ -135,6 +137,7 @@ func (f *Frame[T]) Run(ctx context.Context) (result Result, err error) {
 type pendingInput struct {
 	bytes  []byte
 	origin string
+	offset int
 }
 
 type session[T any] struct {
@@ -147,6 +150,12 @@ type session[T any] struct {
 	screen                                                    uv.ScreenBuffer
 	snapshot                                                  Snapshot
 	state                                                     emulator.State
+	nextState, inputState                                     emulator.State
+	statePending, composed                                    bool
+	paintedCursor                                             Cursor
+	paintedNativeCursor                                       ghostty.RenderStateCursor
+	paintedCursorColor                                        ghostty.ColorRGB
+	paintedCursorColorSet                                     bool
 	metadataDirty                                             bool
 	master                                                    *os.File
 	fd                                                        int
@@ -160,6 +169,8 @@ type session[T any] struct {
 	terminationStarted                                        bool
 	waitErr, drainErr                                         error
 	queue                                                     []pendingInput
+	inputBuffers                                              [][]byte
+	inputBufferBytes                                          int
 	queuedBytes                                               int
 	framer                                                    *input.Framer
 	escapeDeadline, holdDeadline, killDeadline, drainDeadline time.Time
@@ -204,54 +215,107 @@ func (s *session[T]) refresh(force bool) error {
 }
 
 func (s *session[T]) refreshState() error {
-	state, err := s.terminal.State()
-	if err != nil {
+	if err := s.terminal.UpdateState(&s.nextState); err != nil {
 		return err
 	}
+	state := s.nextState
 	s.metadataDirty = s.metadataDirty || regionMetadataChanged(s.state, state)
-	s.state = state
+	s.nextState, s.state = s.state, state
+	s.statePending = false
 	s.snapshot.ObservedAt = time.Now()
 	s.snapshot.Terminal = TerminalSnapshot{Title: state.Title, Directory: state.Directory, Size: Size{Cols: state.Size.Cols, Rows: state.Size.Rows}, Cells: state.Cells, Cursor: Cursor{X: int(state.Cursor.ViewportX), Y: int(state.Cursor.ViewportY), Visible: state.Cursor.Visible && state.Cursor.ViewportHasValue}, Alternate: state.Alternate, Native: state}
-	if err = s.console.syncInput(state); err != nil {
+	// Keep separate routing maps: per-read updates must not mutate the last
+	// metadata sample used to decide whether region callbacks need redrawing.
+	input := &s.inputState
+	if input.Modes == nil {
+		input.Modes = make(map[ghostty.Mode]bool, len(state.Modes))
+		input.ModeErrors = make(map[ghostty.Mode]error)
+	}
+	clear(input.Modes)
+	clear(input.ModeErrors)
+	maps.Copy(input.Modes, state.Modes)
+	maps.Copy(input.ModeErrors, state.ModeErrors)
+	input.Size, input.Held = state.Size, state.Held
+	input.KittyKeyboardFlags, input.ModifyOtherKeys2 = state.KittyKeyboardFlags, state.ModifyOtherKeys2
+	input.MouseTracking = state.MouseTracking
+	return s.syncInput()
+}
+
+func (s *session[T]) refreshInput() error {
+	if err := s.terminal.InputState(&s.inputState); err != nil {
 		return err
 	}
-	if state.Held && s.holdDeadline.IsZero() {
+	if err := s.syncInput(); err != nil {
+		return err
+	}
+	// Host protocol changes must reach the terminal before the next input
+	// packet is decoded using the updated profile. Viewport output stays queued.
+	if err := s.console.renderer.Flush(); err != nil {
+		return fmt.Errorf("synchronize outer input modes: %w", err)
+	}
+	return nil
+}
+
+func (s *session[T]) syncInput() error {
+	if err := s.console.syncInput(s.inputState); err != nil {
+		return err
+	}
+	if s.inputState.Held && s.holdDeadline.IsZero() {
 		s.holdDeadline = time.Now().Add(renderHoldTimeout)
 	}
-	if !state.Held {
+	if !s.inputState.Held {
 		s.holdDeadline = time.Time{}
 	}
 	return nil
 }
 
 func (s *session[T]) render(force bool) error {
+	if s.statePending {
+		if err := s.refreshState(); err != nil {
+			return err
+		}
+	}
 	force = force || s.metadataDirty
 	if force || s.frame.regionsDirty() {
 		s.collectMetadata()
 	}
-	s.frame.compose(s.screen, s.geometry, s.snapshot, force)
+	s.frame.compose(&s.screen, s.geometry, s.snapshot, repaintDamage{
+		full: !s.composed, regions: force, rows: s.terminal.DirtyRows(),
+	})
 	c := s.console
-	if err := c.setMode(synchronizedOutputMode, true); err != nil {
-		return err
-	}
-	if err := c.syncCursor(s.snapshot.Terminal.Native); err != nil {
-		return fmt.Errorf("render child cursor: %w", err)
-	}
-	c.renderer.Render(s.screen.RenderBuffer)
 	cursor := s.snapshot.Terminal.Cursor
-	if cursor.Visible {
-		c.renderer.MoveTo(s.geometry.child.Min.X+cursor.X, s.geometry.child.Min.Y+cursor.Y)
-	}
-	if err := c.setMode(25, cursor.Visible); err != nil {
-		return err
-	}
-	if err := c.setMode(synchronizedOutputMode, false); err != nil {
-		return err
+	native := s.snapshot.Terminal.Native
+	appearanceChanged := native.Cursor != s.paintedNativeCursor || native.Colors.Cursor != s.paintedCursorColor || native.Colors.CursorHasValue != s.paintedCursorColorSet
+	cellsChanged := !s.composed || screenChanged(s.screen)
+	if cellsChanged || cursor != s.paintedCursor || appearanceChanged {
+		if err := c.setMode(synchronizedOutputMode, true); err != nil {
+			return err
+		}
+		if err := c.syncCursor(s.snapshot.Terminal.Native); err != nil {
+			return fmt.Errorf("render child cursor: %w", err)
+		}
+		if cellsChanged {
+			c.renderer.Render(s.screen.RenderBuffer)
+		}
+		if cursor.Visible {
+			c.renderer.MoveTo(s.geometry.child.Min.X+cursor.X, s.geometry.child.Min.Y+cursor.Y)
+		}
+		if err := c.setMode(25, cursor.Visible); err != nil {
+			return err
+		}
+		if err := c.setMode(synchronizedOutputMode, false); err != nil {
+			return err
+		}
 	}
 	if err := c.renderer.Flush(); err != nil {
 		return fmt.Errorf("render outer terminal: %w", err)
 	}
 	s.metadataDirty = false
+	s.composed = true
+	s.paintedCursor = cursor
+	s.paintedNativeCursor = native.Cursor
+	s.paintedCursorColor, s.paintedCursorColorSet = native.Colors.Cursor, native.Colors.CursorHasValue
+	s.terminal.ClearDamage()
 	s.renderDeadline = time.Time{}
 	return nil
 }
@@ -264,11 +328,11 @@ func (s *session[T]) route(p input.Packet) error {
 		if _, ok := p.Event.(uv.CellSizeEvent); ok {
 			return s.applyGeometry(s.geometry)
 		}
-		return s.console.syncInput(s.state)
+		return s.console.syncInput(s.inputState)
 	}
 	s.router.viewport = s.geometry.child
 	s.router.host = hostInputProfile{KittyFlags: s.console.kittyFlags, ApplicationCursor: s.console.applied[1], ApplicationKeypad: s.console.applied[66], Backarrow: s.console.applied[67], Numlock: s.console.applied[1035], AltEscPrefix: s.console.applied[1036], AltSendsEsc: s.console.applied[1039], ModifyOtherKeysKnown: s.console.modifySupported, ModifyOtherKeys2: s.console.modifyLevel == 2, MousePixels: s.console.applied[1016], CellWidthPx: s.console.cellWidth, CellHeightPx: s.console.cellHeight}
-	r, err := s.router.route(p, s.state)
+	r, err := s.router.route(p, s.inputState)
 	if err != nil {
 		return err
 	}
@@ -300,9 +364,22 @@ func (s *session[T]) enqueue(data []byte, origin string) error {
 	}
 	n := len(s.queue)
 	if n > 0 && s.queue[n-1].origin == origin {
-		s.queue[n-1].bytes = append(s.queue[n-1].bytes, data...)
+		p := &s.queue[n-1]
+		if p.offset > 0 {
+			copy(p.bytes, p.bytes[p.offset:])
+			p.bytes = p.bytes[:len(p.bytes)-p.offset]
+			p.offset = 0
+		}
+		p.bytes = append(p.bytes, data...)
 	} else {
-		s.queue = append(s.queue, pendingInput{bytes: slices.Clone(data), origin: origin})
+		var buf []byte
+		if n := len(s.inputBuffers); n > 0 {
+			buf = s.inputBuffers[n-1]
+			s.inputBufferBytes -= cap(buf)
+			s.inputBuffers[n-1] = nil
+			s.inputBuffers = s.inputBuffers[:n-1]
+		}
+		s.queue = append(s.queue, pendingInput{bytes: append(buf[:0], data...), origin: origin})
 	}
 	s.queuedBytes += len(data)
 	return nil
@@ -313,16 +390,22 @@ func (s *session[T]) writeInput() error {
 		return nil
 	}
 	p := &s.queue[0]
-	n, err := unix.Write(s.fd, p.bytes)
+	n, err := unix.Write(s.fd, p.bytes[p.offset:])
 	if n > 0 {
-		if e := s.events.emit(Event{Kind: ChildInput, Bytes: p.bytes[:n], Origin: p.origin}); e != nil {
+		if e := s.events.emit(Event{Kind: ChildInput, Bytes: p.bytes[p.offset : p.offset+n], Origin: p.origin}); e != nil {
 			return e
 		}
-		p.bytes = p.bytes[n:]
+		p.offset += n
 		s.queuedBytes -= n
 	}
-	if len(p.bytes) == 0 {
-		s.queue = s.queue[1:]
+	if p.offset == len(p.bytes) {
+		if cap(p.bytes) <= inputQueueLimit-s.inputBufferBytes {
+			s.inputBuffers = append(s.inputBuffers, p.bytes[:0])
+			s.inputBufferBytes += cap(p.bytes)
+		}
+		copy(s.queue, s.queue[1:])
+		s.queue[len(s.queue)-1] = pendingInput{}
+		s.queue = s.queue[:len(s.queue)-1]
 	}
 	if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EINTR) {
 		return nil
@@ -364,16 +447,22 @@ func (s *session[T]) readChild(buf []byte) error {
 		if e := s.effects(); e != nil {
 			return e
 		}
-		if e := s.refreshState(); e != nil {
+		if e := s.refreshInput(); e != nil {
 			return e
 		}
+		s.statePending = true
 		// Keep the first deadline so a continuously writing child cannot postpone
 		// display indefinitely. Protocol replies and observations remain immediate.
 		if s.renderDeadline.IsZero() {
 			s.renderDeadline = time.Now().Add(renderInterval)
 		}
-		if e := s.events.emit(Event{Kind: StateChanged, Snapshot: &s.snapshot}); e != nil {
-			return e
+		if s.events.wants(StateChanged) {
+			if e := s.refreshState(); e != nil {
+				return e
+			}
+			if e := s.events.emit(Event{Kind: StateChanged, Snapshot: &s.snapshot}); e != nil {
+				return e
+			}
 		}
 	}
 	if n == 0 && err == nil || errors.Is(err, unix.EIO) {
@@ -466,6 +555,7 @@ func (s *session[T]) applyGeometry(g geometry) error {
 	}
 	s.geometry = g
 	s.screen = uv.NewScreenBuffer(g.outer.Dx(), g.outer.Dy())
+	s.composed = false
 	s.screen.Method = ansi.WcWidth
 	if s.console.applied[2027] {
 		s.screen.Method = ansi.GraphemeWidth
@@ -609,6 +699,11 @@ func (s *session[T]) reap() error {
 		var exit *exec.ExitError
 		if err != nil && !errors.As(err, &exit) {
 			return fmt.Errorf("wait child: %w", err)
+		}
+		if s.statePending && s.events.wants(Exited) {
+			if err := s.refreshState(); err != nil {
+				return err
+			}
 		}
 		return s.events.emit(Event{Kind: Exited, Snapshot: &s.snapshot})
 	default:

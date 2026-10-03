@@ -22,7 +22,7 @@ func TestCompositionKeepsChildInsideStyledFrameAndClearsOldCells(t *testing.T) {
 	cells[0] = uv.Cell{Content: "C", Width: 1}
 	cells[g.child.Dx()-1] = uv.Cell{Content: "界", Width: 2}
 	snap := Snapshot{Terminal: TerminalSnapshot{Size: Size{Cols: g.child.Dx(), Rows: g.child.Dy()}, Cells: cells}}
-	f.compose(buf, g, snap, true)
+	f.compose(&buf, g, snap, repaintDamage{full: true})
 	for _, point := range []struct {
 		x, y int
 		text string
@@ -37,7 +37,7 @@ func TestCompositionKeepsChildInsideStyledFrameAndClearsOldCells(t *testing.T) {
 		t.Fatal("partial child grapheme reached border")
 	}
 	snap.Terminal.Cells = nil
-	f.compose(buf, g, snap, false)
+	f.compose(&buf, g, snap, repaintDamage{rows: []bool{true, true, true, true}})
 	if cell := buf.CellAt(1, 2); cell != nil && cell.Content == "C" {
 		t.Fatal("cleared child retained an old cell")
 	}

@@ -287,9 +287,16 @@ func (c *console) setMode(m ansi.DECMode, on bool) error {
 	if !c.supports(m) || c.applied[m] == on {
 		return nil
 	}
-	text := ansi.ResetMode(m)
-	if on {
+	var text string
+	if m == synchronizedOutputMode {
+		text = ansi.ResetModeSynchronizedOutput
+		if on {
+			text = ansi.SetModeSynchronizedOutput
+		}
+	} else if on {
 		text = ansi.SetMode(m)
+	} else {
+		text = ansi.ResetMode(m)
 	}
 	if _, err := c.renderer.WriteString(text); err != nil {
 		return err

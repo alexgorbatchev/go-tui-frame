@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 20:10
-last_modified: 2026-10-02 15:17
+last_modified: 2026-10-02 17:28
 status: current
 ---
 
@@ -18,7 +18,16 @@ ignored artifacts; the source tests linked here are retained in the repository.
 The repaint checks use the pinned native archive and the macOS Go toolchain.
 `go test -race ./...`, `go vet ./...`, and `go mod tidy -diff` pass in the
 `fix/repaint-performance` worktree. Logs are retained locally under `.tmp/` as
-`repaint-full-tests.log`, `repaint-vet.log`, and `repaint-tidy.log`.
+`performance-final-race.log`, `performance-final-vet.log`, and
+`performance-final-tidy.log`. The inspected race-test output contains:
+
+```text
+ok github.com/alexgorbatchev/go-tui-frame 15.604s
+ok github.com/alexgorbatchev/go-tui-frame/cmd/tui-frame 9.692s
+ok github.com/alexgorbatchev/go-tui-frame/internal/emulator 1.821s
+ok github.com/alexgorbatchev/go-tui-frame/internal/input (cached)
+ok github.com/alexgorbatchev/go-tui-frame/internal/process 18.386s
+```
 
 [Repaint tests](../../../repaint_test.go) exercise fragmented output through a
 real child PTY, a fixed first repaint deadline, flushing while idle and before
@@ -27,6 +36,16 @@ outer synchronized output, and restoration of an observed entry hold.
 [Damage tests](../../../internal/emulator/damage_test.go)
 exercise consumed native dirty flags, owned snapshots, clean-row retention,
 scrolling, default-color changes, and resize.
+
+[Performance tests](../../../performance_test.go) verify capture deferred until
+repaint, immediate outer input-mode writes, reusable cleared region canvases,
+independent retained drawing snapshots, zero allocations for unchanged rendering
+and warmed input delivery, partial-write compaction, input origins, composition
+limited to damaged rows, selected observation kinds, per-read owned snapshots,
+exit-only snapshot freshness, and synchronized-update checkpoints.
+[Reuse tests](../../../internal/emulator/reuse_test.go) verify stable internal
+viewport storage, damage accumulated across three captures, default-style reuse,
+and selection/full-style agreement with the native getters.
 
 The compiler overlay in `.tmp/repaint-disabled.json` disables chunk batching,
 metadata comparison, synchronized output, and native damage consumption without
@@ -38,17 +57,49 @@ The separate exit-flush overlay in `.tmp/repaint-exit-disabled.json` leaves
 batching enabled and removes the final flush. Its regression fails because the
 pending final text is absent; `.tmp/repaint-exit-disabled.log` records that check.
 
-`BenchmarkStateCapture` measures a 120×40 native viewport, including owned state
-copies, over a 300 ms benchmark interval on an Apple M4 Pro:
+`.tmp/performance-disabled.json` separately substitutes temporary copies that
+disable deferred capture, canvas/input reuse, unchanged-render skipping,
+incremental composition, event selection, style reuse, and accumulated damage.
+The behavioral and allocation regressions fail with these optimizations disabled;
+`.tmp/performance-disabled.log` and `.tmp/performance-native-disabled.log` record
+the failures. The maintained source remains enabled during the passing race run.
 
-| Capture | Full capture | Dirty-row capture |
-| :--- | ---: | ---: |
-| Unchanged viewport | 1.993 ms/op, 43,325 allocations/op | 0.145 ms/op, 84 allocations/op |
-| One-row update | 1.973 ms/op, 43,327 allocations/op | 0.202 ms/op, 1,168 allocations/op |
+`BenchmarkStateCapture` and `BenchmarkBorrowedState` measure a 120×40 native
+viewport with plain ASCII text over one-second benchmark intervals on an Apple M4 Pro. Owned captures
+copy storage for a durable caller; internal captures reuse the viewport and maps:
 
-These component measurements come from `.tmp/repaint-benchmark-before.log` and
-`.tmp/repaint-benchmark-after.log`; they do not measure end-to-end physical
-terminal latency. Snapshot ownership still requires copying viewport arrays.
+| Capture | Time/op | Bytes/op | Allocations/op |
+| :--- | ---: | ---: | ---: |
+| Owned, unchanged | 116.2 µs | 1,010,482 | 84 |
+| Internal, unchanged | 3.484 µs | 2,400 | 74 |
+| Owned, one row | 173.3 µs | 1,011,512 | 451 |
+| Internal, one row | 25.50 µs | 3,424 | 443 |
+| Input modes only | 2.247 µs | 320 | 49 |
+
+The session benchmarks use a 20×6 viewport with a real child PTY and an outer
+output file. They select an unsupported outer synchronization mode; negotiated
+synchronization is covered separately by the behavioral tests. A changing-row
+benchmark alternates a character to require a visible diff each iteration:
+
+| Session operation | Time/op | Bytes/op | Allocations/op |
+| :--- | ---: | ---: | ---: |
+| Unchanged render | 148.6 ns | 0 | 0 |
+| Changing-row capture and repaint | 12.87 µs | 3,256 | 173 |
+| Warmed input delivery | 1.027 µs | 0 | 0 |
+
+These component measurements come from `.tmp/performance-final-bench.log`; they
+do not measure end-to-end physical terminal latency. Snapshot ownership still
+requires independent viewport copies when publishing to a callback. Geometry,
+new graphemes/styles, and native getter calls can allocate.
+
+The final allocation-object profiles are retained as
+`.tmp/borrowed-final-allocations.log` and `.tmp/session-final-allocations.log`.
+They attribute remaining internal-capture allocations to libghostty getters and
+encoding, and changed-frame allocations to those bindings plus UV's renderer and
+cursor encoding. UV's pinned renderer recreates touched-line storage during a
+render; unchanged frames skip that call. The verified native dirty-tracking and
+render-hold contracts are documented in the
+[pinned native render API](https://github.com/ghostty-org/ghostty/blob/33da6848d63b3bba2b4f31ab1531d618f2795192/include/ghostty/vt/render.h).
 
 A separate diagnostic against the original capture source observes a native
 foreground of `#123456` after OSC 10 while captured and painted foregrounds

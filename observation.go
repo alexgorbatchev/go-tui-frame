@@ -1,6 +1,7 @@
 package frame
 
 import (
+	"fmt"
 	"slices"
 	"sync"
 	"time"
@@ -25,6 +26,53 @@ type eventDispatcher struct {
 	bytes    int
 	sequence uint64
 	offsets  map[EventKind]uint64
+	kinds    eventMask
+}
+
+type eventMask uint16
+
+const allEvents eventMask = 1<<10 - 1
+
+func eventBit(kind EventKind) eventMask {
+	switch kind {
+	case OuterInput:
+		return 1 << 0
+	case ChildOutput:
+		return 1 << 1
+	case ChildInput:
+		return 1 << 2
+	case Started:
+		return 1 << 3
+	case Exited:
+		return 1 << 4
+	case Resized:
+		return 1 << 5
+	case Captured:
+		return 1 << 6
+	case StateChanged:
+		return 1 << 7
+	case Protocol:
+		return 1 << 8
+	case Routed:
+		return 1 << 9
+	}
+	return 0
+}
+
+func selectEvents(kinds []EventKind) (eventMask, error) {
+	var mask eventMask
+	for _, kind := range kinds {
+		bit := eventBit(kind)
+		if bit == 0 {
+			return 0, fmt.Errorf("unknown observation kind %q", kind)
+		}
+		mask |= bit
+	}
+	return mask, nil
+}
+
+func (d *eventDispatcher) wants(kind EventKind) bool {
+	return d != nil && d.kinds&eventBit(kind) != 0
 }
 
 type eventRecord struct {
@@ -32,12 +80,12 @@ type eventRecord struct {
 	weight int
 }
 
-func newEventDispatcher(handler func(Event)) *eventDispatcher {
-	if handler == nil {
+func newEventDispatcher(kinds eventMask, handler func(Event)) *eventDispatcher {
+	if handler == nil || kinds == 0 {
 		return nil
 	}
 	d := &eventDispatcher{queue: make(chan eventRecord, observationQueueLimit), done: make(chan struct{}),
-		offsets: make(map[EventKind]uint64)}
+		offsets: make(map[EventKind]uint64), kinds: kinds}
 	go func() {
 		defer close(d.done)
 		for record := range d.queue {
@@ -51,7 +99,7 @@ func newEventDispatcher(handler func(Event)) *eventDispatcher {
 }
 
 func (d *eventDispatcher) emit(ev Event) error {
-	if d == nil {
+	if !d.wants(ev.Kind) {
 		return nil
 	}
 	d.mu.Lock()

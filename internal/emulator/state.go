@@ -51,29 +51,66 @@ type visualState struct {
 	nativeCells []NativeCell
 	cursor      ghostty.RenderStateCursor
 	colors      ghostty.RenderStateColors
+	dirty       []bool
 }
 
 func (t *Terminal) State() (State, error) {
+	var s State
+	if err := t.UpdateState(&s); err != nil {
+		return State{}, err
+	}
+	// UpdateState created these maps and optional values for this caller;
+	// only the visual arrays borrow terminal storage.
+	s.Cells = slices.Clone(s.Cells)
+	s.NativeCells = slices.Clone(s.NativeCells)
+	return s, nil
+}
+
+// UpdateState borrows the terminal's display storage and reuses dst's maps.
+// The owner must serialize use and clone the result before publishing it.
+// Display cells remain valid only until the next capture, resize or close.
+func (t *Terminal) UpdateState(s *State) error {
 	if t == nil || t.native == nil {
-		return State{}, ErrClosed
+		return ErrClosed
 	}
 	if !t.held {
 		if err := t.captureVisual(); err != nil {
-			return State{}, err
+			return err
 		}
 	}
-	s := State{
-		Size: t.size, Cells: slices.Clone(t.visual.cells), NativeCells: slices.Clone(t.visual.nativeCells),
-		Cursor: t.visual.cursor, Colors: t.visual.colors, Held: t.held,
-		Modes: make(map[ghostty.Mode]bool, len(knownModes)), ModeErrors: make(map[ghostty.Mode]error),
+	s.Cells, s.NativeCells = t.visual.cells, t.visual.nativeCells
+	s.Cursor, s.Colors = t.visual.cursor, t.visual.colors
+	if err := t.InputState(s); err != nil {
+		return err
 	}
-	if err := t.readMetadata(&s); err != nil {
-		return State{}, err
+	return t.readMetadata(s)
+}
+
+// InputState observes current routing modes and hold state without capturing
+// the viewport. Other fields are unchanged until UpdateState is called.
+func (t *Terminal) InputState(s *State) error {
+	if t == nil || t.native == nil {
+		return ErrClosed
 	}
+	s.Size, s.Held = t.size, t.held
+	if s.Modes == nil {
+		s.Modes = make(map[ghostty.Mode]bool, len(knownModes))
+	}
+	if s.ModeErrors == nil {
+		s.ModeErrors = make(map[ghostty.Mode]error)
+	}
+	clear(s.Modes)
+	clear(s.ModeErrors)
 	var err error
 	s.ModifyOtherKeys2, err = t.modifyOtherKeys2()
 	if err != nil {
-		return State{}, err
+		return err
+	}
+	if err := errors.Join(
+		read("Kitty keyboard flags", &s.KittyKeyboardFlags, t.native.KittyKeyboardFlags),
+		read("mouse tracking", &s.MouseTracking, t.native.MouseTracking),
+	); err != nil {
+		return err
 	}
 	for _, mode := range knownModes {
 		value, err := t.native.Mode(mode)
@@ -83,8 +120,14 @@ func (t *Terminal) State() (State, error) {
 		}
 		s.Modes[mode] = value
 	}
-	return s, nil
+	return nil
 }
+
+// DirtyRows accumulates captured rows until the compositor acknowledges them.
+// Reading a snapshot must not consume damage needed by a later repaint.
+func (t *Terminal) DirtyRows() []bool { return t.visual.dirty }
+
+func (t *Terminal) ClearDamage() { clear(t.visual.dirty) }
 
 func (t *Terminal) readMetadata(s *State) error {
 	var screen ghostty.TerminalScreen
@@ -92,8 +135,6 @@ func (t *Terminal) readMetadata(s *State) error {
 		read("active screen", &screen, t.native.ActiveScreen),
 		read("title", &s.Title, t.native.Title),
 		read("directory", &s.Directory, t.native.Pwd),
-		read("Kitty keyboard flags", &s.KittyKeyboardFlags, t.native.KittyKeyboardFlags),
-		read("mouse tracking", &s.MouseTracking, t.native.MouseTracking),
 		read("mouse shape", &s.MouseShape, t.native.MouseShape),
 		read("scrollbar", &s.Scrollbar, t.native.Scrollbar),
 		read("scrollback rows", &s.ScrollbackRows, t.native.ScrollbackRows),
@@ -137,7 +178,8 @@ func (t *Terminal) captureVisual() error {
 	}
 	visual := t.visual
 	count := t.size.Cols * t.size.Rows
-	if len(visual.cells) != count || visual.colors != *colors {
+	colorsChanged := visual.colors != *colors
+	if len(visual.cells) != count || colorsChanged {
 		// Colors are resolved into each UV cell; palette/default-color changes
 		// therefore invalidate cached styles even without any text damage.
 		if err := t.render.SetDirty(ghostty.RenderStateDirtyFull); err != nil {
@@ -145,8 +187,14 @@ func (t *Terminal) captureVisual() error {
 		}
 	}
 	if len(visual.cells) != count {
-		visual.cells = make([]uv.Cell, count)
-		visual.nativeCells = make([]NativeCell, count)
+		visual.cells = slices.Grow(visual.cells, max(0, count-len(visual.cells)))[:count]
+		visual.nativeCells = slices.Grow(visual.nativeCells, max(0, count-len(visual.nativeCells)))[:count]
+	}
+	if len(visual.dirty) != t.size.Rows {
+		visual.dirty = slices.Grow(visual.dirty, max(0, t.size.Rows-len(visual.dirty)))[:t.size.Rows]
+	}
+	if colorsChanged {
+		t.styleValid = false
 	}
 	visual.cursor, visual.colors = *cursor, *colors
 	if err := t.render.RowIterator(t.rows); err != nil {
@@ -169,6 +217,7 @@ func (t *Terminal) captureVisual() error {
 		if err := t.copyRow(int(y), &visual); err != nil {
 			return err
 		}
+		visual.dirty[int(y)] = true
 	}
 	if err := t.render.Clean(); err != nil {
 		return fmt.Errorf("consuming native render damage: %w", err)
@@ -178,43 +227,58 @@ func (t *Terminal) captureVisual() error {
 }
 
 func (t *Terminal) copyRow(y int, visual *visualState) error {
-	var text []byte
+	raw, err := t.rows.CellsRaw()
+	if err != nil {
+		return fmt.Errorf("reading native packed cells: %w", err)
+	}
+	if raw.Len() != t.size.Cols {
+		return fmt.Errorf("native row has %d cells, expected %d", raw.Len(), t.size.Cols)
+	}
+	selection, err := t.rows.Selection()
+	if err != nil {
+		return fmt.Errorf("reading native row selection: %w", err)
+	}
 	for x := range t.size.Cols {
 		if err := t.cells.Select(uint16(x)); err != nil {
 			return fmt.Errorf("selecting native cell %d,%d: %w", x, y, err)
 		}
-		cell, native, err := t.copyCell(x, y, visual.colors, &text)
+		i := y*t.size.Cols + x
+		// CellsRaw supplies copied packed values without a native getter per
+		// cell. Store them before using the binding's semantic accessors.
+		visual.nativeCells[i].Raw = *raw.Cell(x)
+		visual.nativeCells[i].Selected = selection != nil && x >= int(selection.StartX) && x <= int(selection.EndX)
+		cell, native, err := t.copyCell(i, visual)
 		if err != nil {
 			return fmt.Errorf("copying native cell %d,%d: %w", x, y, err)
 		}
-		i := y*t.size.Cols + x
 		visual.cells[i], visual.nativeCells[i] = cell, native
 	}
 	return nil
 }
 
-func (t *Terminal) copyCell(x, y int, colors ghostty.RenderStateColors, text *[]byte) (uv.Cell, NativeCell, error) {
-	raw, err := t.cells.Raw()
+func (t *Terminal) copyCell(i int, visual *visualState) (uv.Cell, NativeCell, error) {
+	native := &visual.nativeCells[i]
+	raw := &native.Raw
+	styled, err := t.cells.HasStyling()
 	if err != nil {
 		return uv.Cell{}, NativeCell{}, err
 	}
-	style, err := t.cells.Style()
-	if err != nil {
-		return uv.Cell{}, NativeCell{}, err
+	style := t.defaultStyle
+	if styled {
+		style, err = t.cells.Style()
+		if err != nil {
+			return uv.Cell{}, NativeCell{}, err
+		}
 	}
 	wide, err := raw.Wide()
 	if err != nil {
 		return uv.Cell{}, NativeCell{}, err
 	}
-	selected, err := t.cells.Selected()
+	t.text, err = t.cells.AppendGraphemes(t.text[:0])
 	if err != nil {
 		return uv.Cell{}, NativeCell{}, err
 	}
-	*text, err = t.cells.AppendGraphemes((*text)[:0])
-	if err != nil {
-		return uv.Cell{}, NativeCell{}, err
-	}
-	cell := uv.Cell{Content: string(*text), Style: t.uvStyle(style, colors), Width: 1}
+	cell := uv.Cell{Content: cellText(t.text, visual.cells[i].Content), Style: t.cellStyle(style, visual.colors), Width: 1}
 	switch wide {
 	case ghostty.CellWideWide:
 		cell.Width = 2
@@ -233,6 +297,7 @@ func (t *Terminal) copyCell(x, y int, colors ghostty.RenderStateColors, text *[]
 		return uv.Cell{}, NativeCell{}, err
 	}
 	if linked {
+		x, y := i%t.size.Cols, i/t.size.Cols
 		ref, err := t.native.GridRef(ghostty.Point{Tag: ghostty.PointTagViewport, X: uint16(x), Y: uint32(y)})
 		if err != nil {
 			return uv.Cell{}, NativeCell{}, err
@@ -242,7 +307,29 @@ func (t *Terminal) copyCell(x, y int, colors ghostty.RenderStateColors, text *[]
 			return uv.Cell{}, NativeCell{}, err
 		}
 	}
-	return cell, NativeCell{Raw: *raw, Style: *style, Wide: wide, Selected: selected}, nil
+	return cell, NativeCell{Raw: *raw, Style: *style, Wide: wide, Selected: native.Selected}, nil
+}
+
+// The immutable ASCII string supplies stable single-character strings without
+// allocating; other unchanged graphemes retain their previous owned string.
+const printableASCII = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+
+func cellText(text []byte, previous string) string {
+	if string(text) == previous {
+		return previous
+	}
+	if len(text) == 1 && text[0] >= ' ' && text[0] <= '~' {
+		i := int(text[0] - ' ')
+		return printableASCII[i : i+1]
+	}
+	return string(text)
+}
+
+func (t *Terminal) cellStyle(style *ghostty.Style, colors ghostty.RenderStateColors) uv.Style {
+	if !t.styleValid || t.style != *style {
+		t.style, t.cachedStyle, t.styleValid = *style, t.uvStyle(style, colors), true
+	}
+	return t.cachedStyle
 }
 
 func (t *Terminal) uvStyle(style *ghostty.Style, colors ghostty.RenderStateColors) uv.Style {

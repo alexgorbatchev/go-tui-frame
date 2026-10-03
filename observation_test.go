@@ -1,7 +1,9 @@
 package frame
 
 import (
+	"context"
 	"errors"
+	"os/exec"
 	"sync"
 	"testing"
 	"time"
@@ -89,7 +91,7 @@ func pausedDispatcher(t *testing.T, handler func(Event)) (*eventDispatcher, <-ch
 	t.Helper()
 	entered, resume := make(chan struct{}), make(chan struct{})
 	var started, released sync.Once
-	d := newEventDispatcher(func(ev Event) {
+	d := newEventDispatcher(allEvents, func(ev Event) {
 		started.Do(func() { close(entered); <-resume })
 		handler(ev)
 	})
@@ -99,7 +101,7 @@ func pausedDispatcher(t *testing.T, handler func(Event)) (*eventDispatcher, <-ch
 }
 
 func TestDisabledObservationDoesNotRetainOrDeliver(t *testing.T) {
-	d := newEventDispatcher(nil)
+	d := newEventDispatcher(allEvents, nil)
 	if d != nil {
 		t.Fatal("disabled observer allocated dispatcher")
 	}
@@ -110,7 +112,7 @@ func TestDisabledObservationDoesNotRetainOrDeliver(t *testing.T) {
 }
 
 func TestObserverMutationDoesNotChangeQueueAccounting(t *testing.T) {
-	d := newEventDispatcher(func(ev Event) {
+	d := newEventDispatcher(allEvents, func(ev Event) {
 		ev.Snapshot.Terminal.Title = "a longer observer-owned title"
 		ev.Input.Raw = nil
 	})
@@ -120,5 +122,44 @@ func TestObserverMutationDoesNotChangeQueueAccounting(t *testing.T) {
 	d.close()
 	if d.bytes != 0 {
 		t.Fatalf("consumer mutation changed accounting: %d outstanding bytes", d.bytes)
+	}
+}
+
+func TestObservationSubscriptionsValidateBeforeStarting(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		kinds   []EventKind
+		wantErr bool
+	}{{"empty", nil, false}, {"duplicates", []EventKind{ChildOutput, ChildOutput}, false}, {"unknown", []EventKind{"unknown"}, true}} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := New(exec.Command("sh"), struct{}{}).ObserveEvents(tt.kinds, func(Event) {})
+			if err := f.begin(context.Background()); (err != nil) != tt.wantErr {
+				t.Fatalf("subscription configuration error = %v", err)
+			}
+			d := newEventDispatcher(f.observedKinds, f.observe)
+			if len(tt.kinds) == 0 && d != nil {
+				t.Fatal("empty subscription allocated a dispatcher")
+			}
+			d.close()
+			if f.cmd.Process != nil {
+				t.Fatal("subscription validation started the child")
+			}
+		})
+	}
+}
+
+func TestFilteredEventsDoNotConsumeQueueBudget(t *testing.T) {
+	d := newEventDispatcher(eventBit(ChildOutput), func(Event) {})
+	defer d.close()
+	if err := d.emit(Event{Kind: OuterInput, Bytes: make([]byte, observationByteLimit+1)}); err != nil {
+		t.Fatalf("excluded event consumed queue budget: %v", err)
+	}
+	snap := Snapshot{Terminal: TerminalSnapshot{Cells: []uv.Cell{{Content: "state", Width: 1}}}}
+	if allocs := testing.AllocsPerRun(100, func() {
+		if err := d.emit(Event{Kind: StateChanged, Snapshot: &snap}); err != nil {
+			t.Fatal(err)
+		}
+	}); allocs != 0 {
+		t.Fatalf("excluded event allocated %.0f times", allocs)
 	}
 }

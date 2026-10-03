@@ -17,7 +17,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func newRepaintSession(t *testing.T, mode ansi.ModeSetting, draw func(DrawContext[string])) (*session[string], *os.File, *os.File) {
+func newRepaintSession(t testing.TB, mode ansi.ModeSetting, draw func(DrawContext[string])) (*session[string], *os.File, *os.File) {
 	t.Helper()
 	if err := os.MkdirAll(".tmp", 0700); err != nil {
 		t.Fatal(err)
@@ -77,7 +77,7 @@ func repaintOutput(t *testing.T, out *os.File) []byte {
 	return b
 }
 
-func readRepaintChunk(t *testing.T, s *session[string], slave *os.File, chunk string) {
+func readRepaintChunk(t testing.TB, s *session[string], slave *os.File, chunk string) {
 	t.Helper()
 	if _, err := slave.WriteString(chunk); err != nil {
 		t.Fatal(err)

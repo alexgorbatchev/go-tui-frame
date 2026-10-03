@@ -297,7 +297,7 @@ func TestProbeKeepsPasteFramingAcrossSessionHandoff(t *testing.T) {
 	})
 	var once sync.Once
 	writeErr := make(chan error, 1)
-	events := newEventDispatcher(func(e Event) {
+	events := newEventDispatcher(allEvents, func(e Event) {
 		if e.Kind == OuterInput && strings.Contains(string(e.Bytes), "\x1b[?1049;2$y") {
 			once.Do(func() { writeErr <- h.writeReplies([]byte("\x1b[200~before")) })
 		}

@@ -49,6 +49,7 @@ type Frame[T any] struct {
 	output          *os.File
 	capture         func(Input) Disposition
 	observe         func(Event)
+	observedKinds   eventMask
 	state           phase
 	configErr       error
 	wake            chan struct{}
@@ -150,7 +151,22 @@ func (f *Frame[T]) Capture(handler func(Input) Disposition) *Frame[T] {
 
 // Observe receives durable observations without consuming input.
 func (f *Frame[T]) Observe(handler func(Event)) *Frame[T] {
-	f.configure(func() { f.observe = handler })
+	f.configure(func() { f.observe, f.observedKinds = handler, allEvents })
+	return f
+}
+
+// ObserveEvents receives only the selected event kinds. An empty selection
+// disables observations; unknown kinds fail configuration when Run begins.
+// StateChanged retains one owned snapshot per child-output read when selected.
+func (f *Frame[T]) ObserveEvents(kinds []EventKind, handler func(Event)) *Frame[T] {
+	f.configure(func() {
+		mask, err := selectEvents(kinds)
+		if err != nil {
+			f.configErr = err
+			return
+		}
+		f.observe, f.observedKinds = handler, mask
+	})
 	return f
 }
 

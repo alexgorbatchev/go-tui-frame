@@ -14,13 +14,31 @@ const (
 	borderBottomRight = "╯"
 )
 
-func (f *Frame[T]) compose(dst uv.ScreenBuffer, g geometry, snap Snapshot, force bool) {
-	dst.Clear()
-	f.paintRegions(dst, g, snap, force)
-	if g.child != g.border {
+type repaintDamage struct {
+	full, regions bool
+	rows          []bool
+}
+
+func screenChanged(screen uv.ScreenBuffer) bool {
+	// UV marks consumed lines with (-1, -1); TouchedLines counts those
+	// entries too. Check the ranges before asking its renderer to diff.
+	for _, line := range screen.Touched {
+		if line != nil && (line.FirstCell != -1 || line.LastCell != -1) {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *Frame[T]) compose(dst *uv.ScreenBuffer, g geometry, snap Snapshot, damage repaintDamage) {
+	if damage.full {
+		dst.Clear()
+	}
+	f.paintRegions(dst, g, snap, damage.full || damage.regions)
+	if damage.full && g.child != g.border {
 		paintBorder(dst, g.border)
 	}
-	paintChild(dst, g.child, snap.Terminal)
+	paintChild(dst, g.child, snap.Terminal, damage)
 }
 
 func paintBorder(dst uv.Screen, r uv.Rectangle) {
@@ -39,18 +57,28 @@ func paintBorder(dst uv.Screen, r uv.Rectangle) {
 	put(r.Max.X-1, r.Max.Y-1, borderBottomRight)
 }
 
-func paintChild(dst uv.Screen, area uv.Rectangle, term TerminalSnapshot) {
+func paintChild(dst *uv.ScreenBuffer, area uv.Rectangle, term TerminalSnapshot, damage repaintDamage) {
 	if term.Size.Cols <= 0 || term.Size.Rows <= 0 {
 		return
 	}
 	// Cells form the backend's owned row-major viewport, including width-zero
-	// continuation cells. A shortened snapshot paints its available rows only.
+	// continuation cells. Shortened rows clear their unavailable columns.
 	rows := min(area.Dy(), term.Size.Rows)
-	for y := 0; y < rows && y <= len(term.Cells)/term.Size.Cols; y++ {
+	for y := range rows {
+		if !damage.full && (y >= len(damage.rows) || !damage.rows[y]) {
+			continue
+		}
 		start := y * term.Size.Cols
-		end := min(len(term.Cells)-start, term.Size.Cols, area.Dx())
+		end := max(0, min(len(term.Cells)-start, term.Size.Cols, area.Dx()))
+		if end < area.Dx() {
+			dst.ClearArea(uv.Rect(area.Min.X+end, area.Min.Y+y, area.Dx()-end, 1))
+		}
 		for x := 0; x < end; {
-			x += paintCell(dst, &term.Cells[start+x], area.Min.X+x, area.Min.Y+y, area.Max.X)
+			cell := &term.Cells[start+x]
+			if cell.Width > area.Dx()-x {
+				dst.SetCell(area.Min.X+x, area.Min.Y+y, nil)
+			}
+			x += paintCell(dst, cell, area.Min.X+x, area.Min.Y+y, area.Max.X)
 		}
 	}
 }

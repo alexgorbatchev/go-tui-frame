@@ -22,7 +22,7 @@
 
 1. **The child has a separate terminal display.** Its erase, cursor, reset, and alternate-screen operations stay inside its viewport. That display is combined with your regions before writing to the outer terminal.
 2. **Input follows the child's protocol.** Keyboard bytes stay unchanged when outer and child protocols agree; negotiated differences are converted. Mouse coordinates become child-local coordinates. Input over the frame is not mapped to an invented child position.
-3. **Updates are event-driven.** Initial drawing, application invalidation, relevant child changes, and resize trigger rendering. Child-output bursts share a repaint deadline of about 17 ms. Normal rendering emits only changed cells, with synchronized output when the outer terminal reports support. Idle sessions have no periodic redraw or metadata polling timer.
+3. **Updates are event-driven.** Initial drawing, application invalidation, relevant child changes, and resize trigger rendering. Child-output bursts share a repaint deadline of about 17 ms. Normal rendering updates damaged rows and emits only changed cells, with synchronized output when the outer terminal reports support. Idle sessions have no periodic redraw or metadata polling timer. Input modes and protocol replies take effect without waiting for repaint.
 4. **One session owns terminal I/O.** Construction has no terminal side effects; `Run` blocks. Draw into the supplied canvases and submit updates through the controller. Concurrent terminal writes interfere with the composed display.
 5. **Metadata has limits.** Snapshots own their data, and OS fields report availability and errors. Terminal output reveals the child's display and protocol requests; it cannot reveal an arbitrary application's widget tree or editor buffers.
 
@@ -131,6 +131,7 @@ Each region keeps its own data: updating the header does not update the footer. 
 | `InvalidateLeft`, `InvalidateRight` | `(data T) error` | Replace a side region's data and schedule drawing. |
 | `Capture` | `(handler func(Input) Disposition) *Frame[T]` | Consume selected keyboard events or pass them to the child. |
 | `Observe` | `(handler func(Event)) *Frame[T]` | Receive owned observations without consuming input. |
+| `ObserveEvents` | `(kinds []EventKind, handler func(Event)) *Frame[T]` | Receive only the selected observation kinds. |
 | `Terminal` | `(input, output *os.File) *Frame[T]` | Borrow terminal files; defaults to standard input and output. |
 | `InheritTerminal` | `(enabled bool) *Frame[T]` | Inherit reported terminal preferences and original PTY settings; enabled by default. |
 | `Run` | `(ctx context.Context) (Result, error)` | Execute one session and wait for drain and cleanup. |
@@ -211,6 +212,19 @@ Explicit capture requests distinct key reports through verified Kitty disambigua
 # Child Information
 
 Drawing callbacks receive `Snapshot{Child, Terminal, Viewport, Outer, ObservedAt}`. Use `Observe` for ordered event delivery outside the drawing path.
+
+`Observe` subscribes to every event kind. `ObserveEvents` selects the kinds your
+handler needs, such as `ChildOutput` and `ChildInput` for transport logging. An
+empty selection disables observations; unknown kinds make `Run` fail before
+touching the terminal. Event sequence numbers count delivered events, and byte
+offsets remain local to each selected transport stream.
+
+Selecting `StateChanged` captures an owned terminal snapshot after every child
+output read, including reads coalesced into one repaint. A subscription without
+`StateChanged` captures the viewport when painting or delivering a selected
+lifecycle snapshot. A child synchronized update also checkpoints its last
+complete frame. Use transport events when per-read display state is
+unnecessary to avoid those captures and copies.
 
 | Information | Available data |
 | :--- | :--- |

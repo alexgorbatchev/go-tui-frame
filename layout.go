@@ -74,15 +74,19 @@ func (f *Frame[T]) paintRegions(dst uv.Screen, g geometry, snap Snapshot, force 
 			continue
 		}
 		if paint {
-			buf := uv.NewScreenBuffer(area.Dx(), area.Dy())
-			buf.Method = ansi.GraphemeWidth
-			canvas = &buf
+			if canvas == nil || canvas.Width() != area.Dx() || canvas.Height() != area.Dy() {
+				buf := uv.NewScreenBuffer(area.Dx(), area.Dy())
+				buf.Method = ansi.GraphemeWidth
+				canvas = &buf
+			} else {
+				canvas.Clear()
+			}
 			draw(DrawContext[T]{Term: cloneSnapshot(snap), View: canvas, Data: data})
 			f.mu.Lock()
 			f.regions[e].canvas = canvas
 			f.mu.Unlock()
+			drawClipped(dst, canvas, area)
 		}
-		drawClipped(dst, canvas, area)
 	}
 }
 

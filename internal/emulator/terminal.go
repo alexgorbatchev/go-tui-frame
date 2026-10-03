@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 
+	uv "github.com/charmbracelet/ultraviolet"
 	ghostty "go.mitchellh.com/libghostty"
 )
 
@@ -63,6 +64,11 @@ type Terminal struct {
 	callbackErr                    error
 	scheme                         *ghostty.ColorScheme
 	hostForeground, hostBackground *ghostty.ColorRGB
+	text                           []byte
+	style                          ghostty.Style
+	cachedStyle                    uv.Style
+	styleValid                     bool
+	defaultStyle                   *ghostty.Style
 }
 
 func New(opts Options) (*Terminal, error) {
@@ -78,7 +84,7 @@ func New(opts Options) (*Terminal, error) {
 	if opts.Version == "" {
 		opts.Version = defaultVersion
 	}
-	t := &Terminal{size: opts.Size}
+	t := &Terminal{size: opts.Size, defaultStyle: ghostty.DefaultStyle()}
 	if err := t.newRenderState(); err != nil {
 		t.Close()
 		return nil, err
@@ -229,4 +235,6 @@ func (t *Terminal) Close() {
 		t.native = nil
 	}
 	t.visual = visualState{}
+	t.text = nil
+	t.defaultStyle = nil
 }
