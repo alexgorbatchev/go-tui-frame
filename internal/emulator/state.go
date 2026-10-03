@@ -278,6 +278,14 @@ func (t *Terminal) copyCell(i int, visual *visualState, data cellData) (uv.Cell,
 		t.text = utf8.AppendRune(t.text, rune(data.codepoint))
 	}
 	cell := uv.Cell{Content: cellText(t.text, visual.cells[i].Content), Style: style.visual, Width: 1}
+	// Erased cells store their background in the content union rather than
+	// the style. Resolve it independently of the row's shared style cache.
+	switch data.tag {
+	case ghostty.CellContentBgColorPalette:
+		cell.Style.Bg = rgbColor(visual.colors.Palette[data.palette])
+	case ghostty.CellContentBgColorRGB:
+		cell.Style.Bg = rgbColor(data.rgb)
+	}
 	switch data.wide {
 	case ghostty.CellWideWide:
 		cell.Width = 2

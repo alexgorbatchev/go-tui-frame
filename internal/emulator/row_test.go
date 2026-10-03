@@ -44,6 +44,15 @@ func TestCellLayoutRejectsUnsupportedManifests(t *testing.T) {
 		{"missing grapheme arm", func(cell *packedDescriptor) {
 			delete(cell.Bits["content"].Arms, "CODEPOINT_GRAPHEME")
 		}},
+		{"missing background arm", func(cell *packedDescriptor) {
+			delete(cell.Bits["content"].Arms, "BG_COLOR_RGB")
+		}},
+		{"background channel type", func(cell *packedDescriptor) {
+			bits := cell.Bits["content"].Arms["BG_COLOR_RGB"].Bits
+			field := bits["r"]
+			field.Type = "u16"
+			bits["r"] = field
+		}},
 		{"nested overflow", func(cell *packedDescriptor) {
 			content := cell.Bits["content"]
 			bits := content.Arms["CODEPOINT"].Bits
@@ -183,6 +192,13 @@ func TestCaptureMatchesNativeCellData(t *testing.T) {
 					}
 					i := y*state.Size.Cols + x
 					cell, native := state.Cells[i], state.NativeCells[i]
+					bg, err := em.cells.BgColor()
+					if err != nil {
+						t.Fatal(err)
+					}
+					if bg != nil && cell.Style.Bg != rgbColor(*bg) {
+						t.Fatalf("cell %d,%d background = %#v; native = %#v", x, y, cell.Style.Bg, *bg)
+					}
 					if native.Raw != *raw || native.Wide != wide || native.Style != *style || cell.Content != content {
 						t.Fatalf("cell %d,%d differs from native text, width, raw value or full style", x, y)
 					}

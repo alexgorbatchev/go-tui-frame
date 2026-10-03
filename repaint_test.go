@@ -98,6 +98,51 @@ func readRepaintChunk(t testing.TB, s *session[string], slave *os.File, chunk st
 	}
 }
 
+func TestErasedBackgroundReachesOuterTerminal(t *testing.T) {
+	s, out, slave := newRepaintSession(t, ansi.ModeReset, func(ctx DrawContext[string]) {
+		ctx.View.SetCell(0, 0, &uv.Cell{Content: "H", Width: 1})
+	})
+	s.console.renderer.SetColorProfile(colorprofile.TrueColor)
+	outer, err := emulator.New(emulator.Options{Size: emulator.Size{Cols: 20, Rows: 6}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(outer.Close)
+	before := 0
+	for _, step := range []struct {
+		sequence string
+		bg       color.RGBA
+	}{
+		{"\x1b[48;2;10;20;30m\x1b[2K\x1b[2;1H\x1b[2K> prompt\x1b[0m", color.RGBA{R: 10, G: 20, B: 30, A: 255}},
+		{"\x1b[H\x1b[2K\x1b[2;1H\x1b[2K", color.RGBA{A: 255}},
+	} {
+		readRepaintChunk(t, s, slave, step.sequence)
+		if err := s.render(false); err != nil {
+			t.Fatal(err)
+		}
+		output := repaintOutput(t, out)
+		if _, err := outer.Write(output[before:]); err != nil {
+			t.Fatal(err)
+		}
+		painted, err := outer.State()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for y := 1; y <= 2; y++ {
+			for x := range painted.Size.Cols {
+				cell := painted.Cells[y*painted.Size.Cols+x]
+				if cell.Style.Bg != step.bg {
+					t.Fatalf("outer background at %d,%d = %#v; want %#v", x, y, cell.Style.Bg, step.bg)
+				}
+			}
+		}
+		if painted.Cells[0].Content != "H" || painted.Cells[0].Style.Bg == step.bg && step.bg.R != 0 {
+			t.Fatal("child background overwrote the header")
+		}
+		before = len(output)
+	}
+}
+
 func TestOSCForegroundRepaintsCleanRowsAndResets(t *testing.T) {
 	s, out, slave := newRepaintSession(t, ansi.ModeReset, nil)
 	// The capture file cannot advertise the outer terminal's color support.

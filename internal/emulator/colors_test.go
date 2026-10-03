@@ -8,6 +8,36 @@ import (
 	ghostty "go.mitchellh.com/libghostty"
 )
 
+func TestErasedCellsKeepBackground(t *testing.T) {
+	for _, tt := range []struct {
+		name, sgr string
+	}{
+		{"RGB", "48;2;10;20;30"},
+		{"palette", "48;5;33"},
+	} {
+		for _, erase := range []string{"\x1b[K", "\x1b[2K", "\x1b[J", "\x1b[2J"} {
+			t.Run(tt.name+"/"+fmt.Sprintf("%q", erase), func(t *testing.T) {
+				em := newTerminal(t, 12, 3)
+				writeTerminal(t, em, "\x1b["+tt.sgr+"m"+erase+"\x1b[2;1H> prompt\x1b[0m")
+				state := terminalState(t, em)
+				want := state.Cells[state.Size.Cols].Style.Bg
+				for x, cell := range state.Cells[:state.Size.Cols] {
+					if cell.Content != " " || cell.Style.Bg != want {
+						t.Fatalf("erased cell %d = %#v; want blank with background %#v", x, cell, want)
+					}
+				}
+				writeTerminal(t, em, "\x1b[H\x1b[2K")
+				reset := terminalState(t, em)
+				for x, cell := range reset.Cells[:reset.Size.Cols] {
+					if cell.Style.Bg != rgbColor(reset.Colors.Background) {
+						t.Fatalf("reset erased cell %d retained background %#v", x, cell.Style.Bg)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestOSCDefaultColorsRepaintExistingCells(t *testing.T) {
 	for _, tt := range []struct {
 		name, change, reset string

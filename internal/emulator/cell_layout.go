@@ -35,6 +35,7 @@ func (b cellBits) value(raw uint64) uint64 { return raw >> b.shift & b.mask }
 type cellLayout struct {
 	tag, content, wide, style, linked cellBits
 	codepoint, grapheme               cellBits
+	palette, red, green, blue         cellBits
 }
 
 type cellData struct {
@@ -43,6 +44,8 @@ type cellData struct {
 	wide      ghostty.CellWide
 	styleID   uint16
 	linked    bool
+	palette   uint8
+	rgb       ghostty.ColorRGB
 }
 
 // The manifest belongs to the linked native library and is immutable for the
@@ -92,18 +95,26 @@ func parseCellLayout(data string) (cellLayout, error) {
 		return cellLayout{}, fmt.Errorf("unsupported GhosttyCell content union: %s tagged by %s", content.Kind, content.Tag)
 	}
 	for _, arm := range []struct {
-		name string
-		dst  *cellBits
-	}{{"CODEPOINT", &layout.codepoint}, {"CODEPOINT_GRAPHEME", &layout.grapheme}} {
+		name, field, typeName string
+		width                 uint
+		dst                   *cellBits
+	}{
+		{"CODEPOINT", "codepoint", "u21", 21, &layout.codepoint},
+		{"CODEPOINT_GRAPHEME", "codepoint", "u21", 21, &layout.grapheme},
+		{"BG_COLOR_PALETTE", "index", "GhosttyColorPaletteIndex", 8, &layout.palette},
+		{"BG_COLOR_RGB", "r", "u8", 8, &layout.red},
+		{"BG_COLOR_RGB", "g", "u8", 8, &layout.green},
+		{"BG_COLOR_RGB", "b", "u8", 8, &layout.blue},
+	} {
 		descriptor := content.Arms[arm.name]
 		if descriptor.Kind != "packed" || descriptor.Width == 0 || descriptor.Width > content.Width {
 			return cellLayout{}, fmt.Errorf("unsupported GhosttyCell %s content arm", arm.name)
 		}
-		codepoint := descriptor.Bits["codepoint"]
-		if codepoint.Type != "u21" || codepoint.Width > 21 {
-			return cellLayout{}, fmt.Errorf("unsupported GhosttyCell %s codepoint type", arm.name)
+		field := descriptor.Bits[arm.field]
+		if field.Type != arm.typeName || field.Width != arm.width {
+			return cellLayout{}, fmt.Errorf("unsupported GhosttyCell %s %s type", arm.name, arm.field)
 		}
-		bits, err := parseCellBits(descriptor.Bits, "codepoint", descriptor.Width)
+		bits, err := parseCellBits(descriptor.Bits, arm.field, descriptor.Width)
 		if err != nil {
 			return cellLayout{}, fmt.Errorf("reading GhosttyCell %s: %w", arm.name, err)
 		}
@@ -130,6 +141,11 @@ func (l cellLayout) decode(packed uint64) cellData {
 		data.codepoint = uint32(l.codepoint.value(l.content.value(packed)))
 	case ghostty.CellContentCodepointGrapheme:
 		data.codepoint = uint32(l.grapheme.value(l.content.value(packed)))
+	case ghostty.CellContentBgColorPalette:
+		data.palette = uint8(l.palette.value(l.content.value(packed)))
+	case ghostty.CellContentBgColorRGB:
+		content := l.content.value(packed)
+		data.rgb = ghostty.ColorRGB{R: uint8(l.red.value(content)), G: uint8(l.green.value(content)), B: uint8(l.blue.value(content))}
 	}
 	return data
 }
