@@ -250,21 +250,42 @@ func TestSessionScopesOuterAlternateScrollToChild(t *testing.T) {
 	}
 }
 
-// The child read that switches screens updates the outer alternate scroll
-// before anything is painted, as it does other host input modes, so a wheel
-// step that arrives next already follows the child's screen.
-func TestChildReadSyncsOuterAlternateScrollBeforePainting(t *testing.T) {
-	s, out, slave := newRepaintSession(t, ansi.ModeReset, nil)
-	reportModes(t, s.console, map[ansi.DECMode]ansi.ModeSetting{alternateScrollMode: ansi.ModeReset})
-	for _, tt := range []struct{ chunk, want string }{
-		{"\x1b[?1049h", ansi.SetMode(alternateScrollMode)},
-		{"\x1b[?1049l", ansi.ResetMode(alternateScrollMode)},
+// Every sample of the child's state decides the outer alternate scroll. The
+// child read that switches screens updates it before anything is painted, as
+// it does other host input modes, so a wheel step that arrives next already
+// follows the child's screen. A full state refresh rebuilds every routing
+// field from its own sample, the active screen included.
+func TestChildStateSyncsOuterAlternateScroll(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		update func(t *testing.T, s *session[string], slave *os.File, chunk string)
+	}{
+		{"child read before painting", func(t *testing.T, s *session[string], slave *os.File, chunk string) {
+			readRepaintChunk(t, s, slave, chunk)
+		}},
+		{"state refresh", func(t *testing.T, s *session[string], _ *os.File, chunk string) {
+			if _, err := s.terminal.Write([]byte(chunk)); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.refresh(false); err != nil {
+				t.Fatal(err)
+			}
+		}},
 	} {
-		before := len(repaintOutput(t, out))
-		readRepaintChunk(t, s, slave, tt.chunk)
-		if got := string(repaintOutput(t, out)[before:]); !strings.Contains(got, tt.want) {
-			t.Errorf("child output %q wrote %q to the outer terminal, want %q", tt.chunk, got, tt.want)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			s, out, slave := newRepaintSession(t, ansi.ModeReset, nil)
+			reportModes(t, s.console, map[ansi.DECMode]ansi.ModeSetting{alternateScrollMode: ansi.ModeReset})
+			for _, step := range []struct{ chunk, want string }{
+				{"\x1b[?1049h", ansi.SetMode(alternateScrollMode)},
+				{"\x1b[?1049l", ansi.ResetMode(alternateScrollMode)},
+			} {
+				before := len(repaintOutput(t, out))
+				tt.update(t, s, slave, step.chunk)
+				if got := string(repaintOutput(t, out)[before:]); !strings.Contains(got, step.want) {
+					t.Errorf("child output %q wrote %q to the outer terminal, want %q", step.chunk, got, step.want)
+				}
+			}
+		})
 	}
 }
 
