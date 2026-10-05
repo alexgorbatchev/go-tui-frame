@@ -125,6 +125,24 @@ func (r *inputRouter) route(packet input.Packet, state emulator.State) (routedIn
 	}
 }
 
+// maxRoutedExpansion bounds the child-input bytes native encoding writes per
+// byte of a converted key or mouse report. A one-byte upper-case letter is the
+// worst case: UV reports it as Shift with its shifted text, and Kitty flags 4
+// and 16 add the shifted alternate and associated text, so "Z" becomes
+// "\x1b[122:90;2;90u". TestRoutedLimitBoundsNativeEncoding checks the bound
+// against the native encoders.
+const maxRoutedExpansion = 14
+
+// routedLimit returns the most bytes route delivers for p. Only key and mouse
+// reports are re-encoded; route forwards or drops every other packet.
+func routedLimit(p input.Packet) int {
+	switch p.Event.(type) {
+	case uv.KeyEvent, uv.MouseEvent:
+		return maxRoutedExpansion * len(p.Raw)
+	}
+	return len(p.Raw)
+}
+
 func routingMode(state emulator.State, mode ghostty.Mode) (bool, error) {
 	if err := state.ModeErrors[mode]; err != nil {
 		return false, fmt.Errorf("read child mode %d for routing: %w", mode.Value(), err)

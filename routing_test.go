@@ -2,6 +2,7 @@ package frame
 
 import (
 	"bytes"
+	"fmt"
 	"image"
 	"runtime"
 	"strings"
@@ -420,6 +421,59 @@ func TestRoutingDropsPixelReportsWithoutMeasuredCells(t *testing.T) {
 	r.host.CellWidthPx = 12
 	if _, err := r.route(routerPackets(t, "\x1b[<0;61;91M")[0], s); err == nil {
 		t.Fatal("pixel report used a cell size the child emulator does not have")
+	}
+}
+
+// The session admits outer input by routedLimit, so it must bound what the
+// native encoders write in every protocol a child can select. The widest
+// expansion must also reach the bound, keeping its documented worst case real.
+func TestRoutedLimitBoundsNativeEncoding(t *testing.T) {
+	var keys []string
+	for b := range 256 {
+		for _, prefix := range []string{"", "\x1b", "\x8f", "\x9b", "\x1bO", "\x1b["} {
+			keys = append(keys, prefix+string([]byte{byte(b)}))
+		}
+	}
+	for r := rune(0x80); r < 0x800; r++ {
+		keys = append(keys, string(r), "\x1b"+string(r))
+	}
+	keys = append(keys, "ࠀ", "�", "\U00010000", "\U0010ffff", "👩‍💻", "\x1b[97;5u", "\x1b[122:90:122;2;90u", "\x1b[27;2;90~", "\x1b[200~paste\x1b[201~", "\x1b]9999;unknown\x1b\\")
+	var mice []string
+	for b := range 256 {
+		// The router's viewport starts at column 2, row 3: these are inside it.
+		mice = append(mice, "\x1b[M"+string([]byte{byte(b), '$', '%'}), fmt.Sprintf("\x1b[<%d;4;5M", b), fmt.Sprintf("\x1b[<%d;4;5m", b), fmt.Sprintf("\x1b[%d;4;5M", b+32))
+	}
+	keyModes := []string{"", "\x1b[?2004h", "\x1b[>4;2m", "\x1b[?1h\x1b[?66h\x1b[?67h\x1b[?1036h", "\x1b[?1035h\x1b[?66h"}
+	for flags := 1; flags < 32; flags++ {
+		keyModes = append(keyModes, fmt.Sprintf("\x1b[>%du", flags))
+	}
+	var mouseModes []string
+	for _, format := range []string{"", "\x1b[?1005h", "\x1b[?1006h", "\x1b[?1015h"} {
+		mouseModes = append(mouseModes, "\x1b[?1003h"+format)
+	}
+	widest := 0.0
+	for _, group := range []struct {
+		modes, inputs []string
+	}{{keyModes, keys}, {mouseModes, mice}} {
+		for _, modes := range group.modes {
+			r, em := newRouterTest(t, nil)
+			s := routerState(t, em, modes)
+			for _, raw := range group.inputs {
+				for _, p := range routerPackets(t, raw) {
+					got, err := r.route(p, s)
+					if err != nil {
+						continue // Unconvertible input delivers nothing.
+					}
+					if len(got.Bytes) > routedLimit(p) {
+						t.Fatalf("modes %q: %q routed to %d bytes %q, over its %d-byte limit", modes, p.Raw, len(got.Bytes), got.Bytes, routedLimit(p))
+					}
+					widest = max(widest, float64(len(got.Bytes))/float64(len(p.Raw)))
+				}
+			}
+		}
+	}
+	if widest != maxRoutedExpansion {
+		t.Fatalf("widest routed expansion %.2f, want the %d-byte bound", widest, maxRoutedExpansion)
 	}
 }
 

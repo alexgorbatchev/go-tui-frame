@@ -32,6 +32,9 @@ const (
 	terminationTimeout = time.Second
 	drainTimeout       = 2 * time.Second
 	maxScreenCells     = 1 << 20
+	// pausedHangupInterval bounds how long a terminal hangup can go unreported
+	// on Darwin while outer input is paused; see pollFDs.
+	pausedHangupInterval = 100 * time.Millisecond
 )
 
 // Run executes the child in a native PTY and owns one outer-terminal session.
@@ -130,10 +133,8 @@ func (f *Frame[T]) Run(ctx context.Context) (result Result, err error) {
 	if err = events.emit(Event{Kind: Started, Snapshot: &s.snapshot}); err != nil {
 		return result, err
 	}
-	for _, p := range saved {
-		if err = s.route(p); err != nil {
-			return result, err
-		}
+	if err = s.hold(saved...); err != nil {
+		return result, err
 	}
 	if s.framer.NeedsDeadline() {
 		s.escapeDeadline = time.Now().Add(escapeTimeout)
@@ -176,6 +177,7 @@ type session[T any] struct {
 	terminationStarted                                        bool
 	waitErr, drainErr                                         error
 	queue                                                     []pendingInput
+	held                                                      []input.Packet
 	inputBuffers                                              [][]byte
 	inputBufferBytes                                          int
 	queuedBytes                                               int
@@ -338,6 +340,58 @@ func (s *session[T]) render(force bool) error {
 	return nil
 }
 
+// hold appends framed outer input behind any input already held and routes
+// what the child input queue can take.
+func (s *session[T]) hold(packets ...input.Packet) error {
+	s.held = append(s.held, packets...)
+	return s.routeHeld()
+}
+
+// routeHeld routes held outer input in order while the child input queue has
+// room for each packet's worst-case routing. Input that does not fit stays
+// held, and outer reads stay paused, until the child drains the queue.
+func (s *session[T]) routeHeld() error {
+	var err error
+	n := 0
+	for err == nil && n < len(s.held) && s.admits(s.held[n]) {
+		err = s.route(s.held[n])
+		n++
+	}
+	kept := copy(s.held, s.held[n:])
+	clear(s.held[kept:])
+	s.held = s.held[:kept]
+	return err
+}
+
+// releaseHeld routes held input after the child drained part of its queue.
+// Outer reads resume once nothing is held. A pending Escape then gets a fresh
+// deadline because bytes completing its sequence may have waited unread.
+func (s *session[T]) releaseHeld() error {
+	if !s.inputPaused() {
+		return nil
+	}
+	if err := s.routeHeld(); err != nil {
+		return err
+	}
+	if !s.inputPaused() && !s.escapeDeadline.IsZero() {
+		s.escapeDeadline = time.Now().Add(escapeTimeout)
+	}
+	return nil
+}
+
+// inputPaused reports whether framed outer input waits for queue room, which
+// stops further outer reads.
+func (s *session[T]) inputPaused() bool {
+	return len(s.held) > 0
+}
+
+// admits reports whether routing p cannot overflow the child input queue. A
+// packet whose worst case exceeds the whole queue waits for an empty queue;
+// enqueue still checks the bytes it actually routes.
+func (s *session[T]) admits(p input.Packet) bool {
+	return min(routedLimit(p), inputQueueLimit) <= inputQueueLimit-s.queuedBytes
+}
+
 func (s *session[T]) route(p input.Packet) error {
 	if err := s.updateLayout(); err != nil {
 		return err
@@ -380,6 +434,10 @@ func (s *session[T]) enqueue(data []byte, origin string) error {
 	if len(data) == 0 || s.waited {
 		return nil
 	}
+	// Outer input is admitted only within its worst-case room, so for it this
+	// guards an invariant. Terminal replies bypass admission: holding them back
+	// would mean pausing child output, and a child blocked writing output may
+	// never read its input.
 	if len(data) > inputQueueLimit-s.queuedBytes {
 		return fmt.Errorf("child input exceeded %d-byte queue", inputQueueLimit)
 	}
@@ -517,10 +575,8 @@ func (s *session[T]) readOuter(buf []byte) error {
 	if err != nil {
 		return err
 	}
-	for _, p := range packets {
-		if err := s.route(p); err != nil {
-			return err
-		}
+	if err := s.hold(packets...); err != nil {
+		return err
 	}
 	s.escapeDeadline = time.Time{}
 	if s.framer.NeedsDeadline() {
@@ -716,6 +772,11 @@ func (s *session[T]) reap() error {
 		if err != nil && !errors.As(err, &exit) {
 			return fmt.Errorf("wait child: %w", err)
 		}
+		// Held input can no longer reach the child. Route it for capture and
+		// observers as its read would have; enqueue now discards its bytes.
+		if err := s.routeHeld(); err != nil {
+			return err
+		}
 		if s.statePending && s.events.wants(Exited) {
 			if err := s.refreshState(); err != nil {
 				return err
@@ -778,23 +839,7 @@ func (s *session[T]) loop(ctx context.Context) error {
 		if err := s.deadlines(); err != nil {
 			return errors.Join(failure, err)
 		}
-		fds := []unix.PollFd{{Fd: int32(s.wakeReadFD), Events: unix.POLLIN}, {Fd: int32(s.console.fd), Events: unix.POLLIN}, {Fd: int32(s.fd), Events: unix.POLLIN}}
-		if failure != nil || s.waited {
-			fds[1].Fd = -1
-		}
-		if s.ptyEOF {
-			fds[2].Fd = -1
-		}
-		if len(s.queue) > 0 && failure == nil {
-			fds[2].Events |= unix.POLLOUT
-		}
-		if _, err := unix.Poll(fds, s.pollTimeout()); err != nil {
-			if errors.Is(err, unix.EINTR) {
-				continue
-			}
-			return errors.Join(failure, err)
-		}
-		disconnected, err := s.processReady(buf, fds, resizes, failure == nil)
+		disconnected, err := s.await(buf, resizes, failure)
 		if err != nil {
 			return errors.Join(failure, err)
 		}
@@ -802,6 +847,44 @@ func (s *session[T]) loop(ctx context.Context) error {
 			failure = errors.New("outer terminal disconnected")
 		}
 	}
+}
+
+// pollFDs returns the wake pipe, outer terminal and child PTY descriptors with
+// the events one loop iteration waits for.
+func (s *session[T]) pollFDs(failure error) []unix.PollFd {
+	fds := []unix.PollFd{{Fd: int32(s.wakeReadFD), Events: unix.POLLIN}, {Fd: int32(s.console.fd), Events: unix.POLLIN}, {Fd: int32(s.fd), Events: unix.POLLIN}}
+	switch {
+	case failure != nil || s.waited:
+		fds[1].Fd = -1
+	case s.inputPaused():
+		// Paused input keeps the terminal registered for its hangup. POSIX
+		// ignores POLLHUP in events and Linux reports it regardless. Darwin's
+		// poll registers the read filter that reports hangup only when events
+		// names an input condition such as POLLHUP, never for 0. That one-shot
+		// filter fires silently for unread input and then misses a later
+		// hangup, so pollTimeout bounds the wait while input is paused.
+		fds[1].Events = unix.POLLHUP
+	}
+	if s.ptyEOF {
+		fds[2].Fd = -1
+	}
+	if len(s.queue) > 0 && failure == nil {
+		fds[2].Events |= unix.POLLOUT
+	}
+	return fds
+}
+
+// await waits once for the descriptors of pollFDs and handles every ready one.
+// It reports whether the outer terminal disconnected.
+func (s *session[T]) await(buf []byte, resizes <-chan struct{}, failure error) (bool, error) {
+	fds := s.pollFDs(failure)
+	if _, err := unix.Poll(fds, s.pollTimeout()); err != nil {
+		if errors.Is(err, unix.EINTR) {
+			return false, nil
+		}
+		return false, err
+	}
+	return s.processReady(buf, fds, resizes, failure == nil)
 }
 
 func (s *session[T]) processReady(buf []byte, fds []unix.PollFd, resizes <-chan struct{}, accepting bool) (bool, error) {
@@ -829,6 +912,9 @@ func (s *session[T]) processReady(buf []byte, fds []unix.PollFd, resizes <-chan 
 	disconnected := fds[1].Revents&(unix.POLLHUP|unix.POLLERR|unix.POLLNVAL) != 0 && accepting
 	if fds[2].Revents&unix.POLLOUT != 0 && accepting && !s.waited {
 		if err := s.writeInput(); err != nil {
+			return disconnected, err
+		}
+		if err := s.releaseHeld(); err != nil {
 			return disconnected, err
 		}
 	}
@@ -871,10 +957,12 @@ func (s *session[T]) deadlines() error {
 			return err
 		}
 	}
-	if !s.escapeDeadline.IsZero() && !now.Before(s.escapeDeadline) {
+	// While outer reads are paused, bytes completing an Escape may wait unread
+	// in the terminal; releaseHeld restarts the deadline when reads resume.
+	if !s.escapeDeadline.IsZero() && !now.Before(s.escapeDeadline) && !s.inputPaused() {
 		s.escapeDeadline = time.Time{}
 		if p, ok := s.framer.Flush(); ok {
-			if err := s.route(p); err != nil {
+			if err := s.hold(p); err != nil {
 				return err
 			}
 		}
@@ -905,8 +993,18 @@ func (s *session[T]) deadlines() error {
 }
 
 func (s *session[T]) pollTimeout() int {
+	escape, hangupCheck := s.escapeDeadline, time.Time{}
+	if s.inputPaused() {
+		// deadlines defers the Escape until reads resume. Until termination
+		// stops watching the terminal, a fresh poll reports a hangup that
+		// Darwin's one-shot read filter missed; see pollFDs.
+		escape = time.Time{}
+		if !s.terminationStarted {
+			hangupCheck = time.Now().Add(pausedHangupInterval)
+		}
+	}
 	timeout := -1
-	for _, d := range []time.Time{s.escapeDeadline, s.holdDeadline, s.killDeadline, s.drainDeadline, s.renderDeadline} {
+	for _, d := range []time.Time{escape, s.holdDeadline, s.killDeadline, s.drainDeadline, s.renderDeadline, hangupCheck} {
 		if !d.IsZero() {
 			ms := max(0, int(time.Until(d).Milliseconds()+1))
 			if timeout < 0 || ms < timeout {
