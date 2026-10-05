@@ -145,6 +145,42 @@ func TestRoutingConvertsAltModifiedKeysToChildAltEncoding(t *testing.T) {
 	}
 }
 
+// UV reports no text for a key with a modifier beyond Shift. A converted key
+// still carries the character the user produced: the shifted key the outer
+// terminal reported, or else the upper case Shift or Caps Lock alone selects.
+// Ctrl keeps the unshifted key, so a legacy child still receives its C0 byte.
+func TestRoutingConvertedKeysKeepProducedCharacter(t *testing.T) {
+	const disambiguate = ghostty.KittyKeyDisambiguate
+	for _, tt := range []struct {
+		name, modes, input, want string
+		hostKitty                ghostty.KittyKeyFlags
+		hostModifyOtherKeys2     bool
+	}{
+		{name: "Shift+Alt+b", input: "\x1b[98;4u", want: "\x1bB", hostKitty: disambiguate},
+		{name: "Shift+Alt+b with shifted key", input: "\x1b[98:66;4u", want: "\x1bB", hostKitty: disambiguate},
+		{name: "Shift+Alt+comma with shifted key", input: "\x1b[44:60;4u", want: "\x1b<", hostKitty: disambiguate},
+		{name: "Caps Lock+Alt+b", input: "\x1b[98;67u", want: "\x1bB", hostKitty: disambiguate},
+		{name: "Shift+Caps Lock+Alt+b", input: "\x1b[98;68u", want: "\x1bb", hostKitty: disambiguate},
+		{name: "Shift+Caps Lock+Alt+b with shifted key", input: "\x1b[98:66;68u", want: "\x1bB", hostKitty: disambiguate},
+		{name: "Ctrl+Shift+b", input: "\x1b[98;6u", want: "\x02", hostKitty: disambiguate},
+		{name: "Ctrl+Shift+b with shifted key", input: "\x1b[98:66;6u", want: "\x02", hostKitty: disambiguate},
+		{
+			name: "Shift+Alt+b to modifyOtherKeys child", modes: "\x1b[>4;2m", input: "\x1b[98;4u", want: "\x1b[27;4;66~",
+			hostKitty: disambiguate, hostModifyOtherKeys2: true,
+		},
+		{name: "legacy Alt+B to alternate-key child", modes: "\x1b[>5u", input: "\x1bB", want: "\x1b[98:66;4u"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r, em := newRouterTest(t, nil)
+			s := routerState(t, em, tt.modes)
+			r.host.KittyFlags, r.host.ModifyOtherKeys2 = tt.hostKitty, tt.hostModifyOtherKeys2
+			if got := routeBytes(t, r, s, tt.input); string(got) != tt.want {
+				t.Fatalf("converted %q = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
 // With all keys and associated text reported, an outer terminal whose Option
 // is not Alt still sets the Alt bit and attaches the text Option composed. A
 // child requesting Kitty flags 24 gets host flags 25 under Capture. Every child

@@ -339,7 +339,7 @@ func (r *inputRouter) setKey(event uv.KeyEvent) error {
 	if !ok && key.Code >= ' ' && key.Code <= unicode.MaxRune {
 		unshifted = key.Code
 		if text == "" {
-			text = string(key.Code)
+			text = string(producedRune(key))
 		}
 	}
 	if ok {
@@ -354,6 +354,27 @@ func (r *inputRouter) setKey(event uv.KeyEvent) error {
 	}
 	r.key.SetUTF8(text)
 	return nil
+}
+
+// producedRune returns the character a printable key produced when its report
+// carries no text, as UV leaves it for any modifier beyond Shift. Native legacy
+// and modifyOtherKeys encoders write that text, so the unshifted code would
+// turn Alt+Shift+b into Alt+b. The outer terminal's reported shifted key comes
+// first. Otherwise Shift or Caps Lock alone selects the upper case, and both
+// together cancel, as in the xkb ALPHABETIC key type. Ctrl keeps the unshifted
+// key: native ctrlSeq keeps Shift on A to Z, so the upper case would turn
+// Ctrl+Shift+b from the C0 byte a legacy child expects into CSI u.
+func producedRune(key uv.Key) rune {
+	if key.Mod.Contains(uv.ModCtrl) {
+		return key.Code
+	}
+	if key.ShiftedCode != 0 {
+		return key.ShiftedCode
+	}
+	if key.Mod.Contains(uv.ModShift) != key.Mod.Contains(uv.ModCapsLock) {
+		return unicode.ToUpper(key.Code)
+	}
+	return key.Code
 }
 
 func (r *inputRouter) releaseKeyText() {
