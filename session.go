@@ -94,7 +94,7 @@ func (f *Frame[T]) Run(ctx context.Context) (result Result, err error) {
 		return result, err
 	}
 	defer router.close()
-	s := &session[T]{frame: f, console: c, terminal: em, router: router, events: events, geometry: g, screen: uv.NewScreenBuffer(g.outer.Dx(), g.outer.Dy()), framer: c.framer}
+	s := &session[T]{frame: f, console: c, terminal: em, router: router, events: events, geometry: g, screen: c.outerScreen(g), framer: c.framer}
 	if err = s.openWake(); err != nil {
 		return result, err
 	}
@@ -123,10 +123,6 @@ func (f *Frame[T]) Run(ctx context.Context) (result Result, err error) {
 	s.snapshot = Snapshot{Child: ChildSnapshot{PID: f.cmd.Process.Pid, Executable: f.cmd.Path, Args: slices.Clone(f.cmd.Args), Environment: slices.Clone(f.cmd.Env), Directory: f.cmd.Dir, StartedAt: time.Now()}, Outer: Size{Cols: g.outer.Dx(), Rows: g.outer.Dy()}, Viewport: Size{Cols: g.child.Dx(), Rows: g.child.Dy()}}
 	if err = c.enter(); err != nil {
 		return result, fmt.Errorf("enter terminal session: %w", err)
-	}
-	s.screen.Method = ansi.WcWidth
-	if c.applied[2027] {
-		s.screen.Method = ansi.GraphemeWidth
 	}
 	if err = s.refresh(true); err != nil {
 		return result, err
@@ -216,6 +212,17 @@ func (c *console) childSize(g geometry) emulator.Size {
 
 func (c *console) childWinsize(g geometry) *pty.Winsize {
 	return &pty.Winsize{Cols: uint16(g.child.Dx()), Rows: uint16(g.child.Dy()), X: uint16(min(uint32(g.child.Dx())*c.cellWidth, 65535)), Y: uint16(min(uint32(g.child.Dy())*c.cellHeight, 65535))}
+}
+
+// outerScreen allocates the outer composition buffer, measuring text the way
+// the outer terminal does.
+func (c *console) outerScreen(g geometry) uv.ScreenBuffer {
+	screen := uv.NewScreenBuffer(g.outer.Dx(), g.outer.Dy())
+	screen.Method = ansi.WcWidth
+	if c.graphemeWidth() {
+		screen.Method = ansi.GraphemeWidth
+	}
+	return screen
 }
 
 func (s *session[T]) refresh(force bool) error {
@@ -565,12 +572,8 @@ func (s *session[T]) applyGeometry(g geometry) error {
 		return err
 	}
 	s.geometry = g
-	s.screen = uv.NewScreenBuffer(g.outer.Dx(), g.outer.Dy())
+	s.screen = s.console.outerScreen(g)
 	s.composed = false
-	s.screen.Method = ansi.WcWidth
-	if s.console.applied[2027] {
-		s.screen.Method = ansi.GraphemeWidth
-	}
 	s.console.renderer.Resize(g.outer.Dx(), g.outer.Dy())
 	s.snapshot.Outer = Size{Cols: g.outer.Dx(), Rows: g.outer.Dy()}
 	s.snapshot.Viewport = Size{Cols: g.child.Dx(), Rows: g.child.Dy()}

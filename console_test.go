@@ -177,6 +177,176 @@ func TestConsolePreservesOnlySolicitedReplies(t *testing.T) {
 	}
 }
 
+// reportModes decodes DECRPM replies through the probe's reply path, so the
+// console records them exactly as it does during negotiation.
+func reportModes(t *testing.T, c *console, reports map[ansi.DECMode]ansi.ModeSetting) {
+	t.Helper()
+	c.pending = make(map[ansi.DECMode]bool, len(reports))
+	var replies string
+	for m, v := range reports {
+		c.pending[m] = true
+		replies += ansi.ReportMode(m, v)
+	}
+	packets, err := input.New().Feed([]byte(replies))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range packets {
+		if !c.consumeReply(p) {
+			t.Fatalf("mode report %q was not consumed", p.Raw)
+		}
+	}
+	if len(c.pending) != 0 {
+		t.Fatalf("mode reports were not decoded: %v", c.pending)
+	}
+}
+
+func TestConsoleKeepsReportedGraphemeWidth(t *testing.T) {
+	const enable, disable = "\x1b[?2027h", "\x1b[?2027l"
+	for _, tt := range []struct {
+		name              string
+		report            ansi.ModeSetting
+		grapheme, enables bool
+	}{
+		{"switchable", ansi.ModeReset, true, true},
+		{"permanently set", ansi.ModePermanentlySet, true, false},
+		{"permanently reset", ansi.ModePermanentlyReset, false, false},
+		{"unrecognized", ansi.ModeNotRecognized, false, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s, out, _ := newRepaintSession(t, ansi.ModeReset, nil)
+			c := s.console
+			reportModes(t, c, map[ansi.DECMode]ansi.ModeSetting{2027: tt.report})
+			// The child emulator is created before the session enters the screen.
+			if got := c.childOptions(c.childSize(s.geometry)).GraphemeWidth; got != tt.grapheme {
+				t.Errorf("child emulator grapheme width = %v, want %v", got, tt.grapheme)
+			}
+			before := len(repaintOutput(t, out))
+			if err := c.enter(); err != nil {
+				t.Fatal(err)
+			}
+			written := string(repaintOutput(t, out)[before:])
+			if tt.enables {
+				if strings.LastIndex(written, enable) <= strings.LastIndex(written, disable) {
+					t.Errorf("enter did not leave grapheme width on: %q", written)
+				}
+			} else if strings.Contains(written, enable) || strings.Contains(written, disable) {
+				t.Errorf("enter switched a mode the terminal cannot switch: %q", written)
+			}
+			if c.applied[2027] != tt.grapheme {
+				t.Errorf("applied grapheme width = %v, want %v", c.applied[2027], tt.grapheme)
+			}
+			if err := s.applyGeometry(s.geometry); err != nil {
+				t.Fatal(err)
+			}
+			want := ansi.WcWidth
+			if tt.grapheme {
+				want = ansi.GraphemeWidth
+			}
+			if s.screen.Method != want {
+				t.Errorf("outer screen width method = %v, want %v", s.screen.Method, want)
+			}
+		})
+	}
+}
+
+func TestConsoleKeepsPermanentInputModes(t *testing.T) {
+	type modes = map[ansi.DECMode]ansi.ModeSetting
+	for _, tt := range []struct {
+		name            string
+		reports         modes
+		child           string
+		written, absent []string
+		applied         map[ansi.DECMode]bool
+		cursor, pixels  bool
+		outer, routed   string
+	}{
+		{
+			name: "cursor keys permanently reset", reports: modes{1: ansi.ModePermanentlyReset},
+			child: "\x1b[?1h", absent: []string{"\x1b[?1h"}, applied: map[ansi.DECMode]bool{1: false},
+			outer: "\x1b[A", routed: "\x1bOA",
+		},
+		{
+			name: "cursor keys permanently set", reports: modes{1: ansi.ModePermanentlySet},
+			child: "\x1b[?1l", absent: []string{"\x1b[?1l"}, applied: map[ansi.DECMode]bool{1: true}, cursor: true,
+			outer: "\x1bOA", routed: "\x1b[A",
+		},
+		{
+			name: "pixel mouse switchable", reports: modes{1006: ansi.ModeReset, 1016: ansi.ModeReset},
+			child: "\x1b[?1000;1016h", written: []string{"\x1b[?1016h"}, absent: []string{"\x1b[?1006h"},
+			applied: map[ansi.DECMode]bool{1006: false, 1016: true}, pixels: true,
+			outer: "\x1b[<0;61;91M", routed: "\x1b[<0;61;91M",
+		},
+		{
+			name: "pixel mouse permanently reset", reports: modes{1006: ansi.ModeReset, 1016: ansi.ModePermanentlyReset},
+			child: "\x1b[?1000;1016h", written: []string{"\x1b[?1006h"}, absent: []string{"\x1b[?1016h"},
+			applied: map[ansi.DECMode]bool{1006: true, 1016: false},
+			outer:   "a", routed: "a",
+		},
+		{
+			name: "pixel mouse permanently set", reports: modes{1006: ansi.ModeReset, 1016: ansi.ModePermanentlySet},
+			child: "\x1b[?1000;1006h", written: []string{"\x1b[?1006h"}, absent: []string{"\x1b[?1016l"},
+			applied: map[ansi.DECMode]bool{1006: true, 1016: true}, pixels: true,
+			outer: "\x1b[<0;61;91M", routed: "\x1b[<0;7;5M",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s, out, slave := newRepaintSession(t, ansi.ModeReset, nil)
+			c := s.console
+			c.cellWidth, c.cellHeight = harnessCellWidth, harnessCellHeight
+			router, err := newInputRouter(s.terminal, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(router.close)
+			s.router = router
+			reportModes(t, c, tt.reports)
+			before := len(repaintOutput(t, out))
+			// Measured cells reach the child emulator, as after a cell-size reply.
+			if err := s.applyGeometry(s.geometry); err != nil {
+				t.Fatal(err)
+			}
+			readRepaintChunk(t, s, slave, tt.child)
+			written := string(repaintOutput(t, out)[before:])
+			for _, seq := range tt.written {
+				if !strings.Contains(written, seq) {
+					t.Errorf("outer terminal did not receive %q: %q", seq, written)
+				}
+			}
+			for _, seq := range tt.absent {
+				if strings.Contains(written, seq) {
+					t.Errorf("outer terminal received %q for a mode it cannot switch: %q", seq, written)
+				}
+			}
+			for m, want := range tt.applied {
+				if c.applied[m] != want {
+					t.Errorf("applied[%d] = %v, want %v", m, c.applied[m], want)
+				}
+			}
+			queued := len(s.queue)
+			packets, err := input.New().Feed([]byte(tt.outer))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, p := range packets {
+				if err := s.route(p); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if host := s.router.host; host.ApplicationCursor != tt.cursor || host.MousePixels != tt.pixels {
+				t.Errorf("host profile cursor=%v pixels=%v, want cursor=%v pixels=%v", host.ApplicationCursor, host.MousePixels, tt.cursor, tt.pixels)
+			}
+			var routed []byte
+			for _, p := range s.queue[queued:] {
+				routed = append(routed, p.bytes[p.offset:]...)
+			}
+			if string(routed) != tt.routed {
+				t.Errorf("child received %q for outer %q, want %q", routed, tt.outer, tt.routed)
+			}
+		})
+	}
+}
+
 func TestConsoleAppliesAndRestoresReportedModifyOtherKeys(t *testing.T) {
 	h := newHarness(t)
 	h.mu.Lock()

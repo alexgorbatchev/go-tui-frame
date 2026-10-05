@@ -238,7 +238,7 @@ func (p *terminalPreferences) consumePalette(values []byte) bool {
 }
 
 func (c *console) childOptions(size emulator.Size) emulator.Options {
-	opts := emulator.Options{Size: size, TerminfoName: "xterm-256color", GraphemeWidth: c.supports(2027)}
+	opts := emulator.Options{Size: size, TerminfoName: "xterm-256color", GraphemeWidth: c.graphemeWidth()}
 	if !c.inherit {
 		return opts
 	}

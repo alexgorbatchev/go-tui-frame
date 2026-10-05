@@ -324,7 +324,7 @@ func TestConsoleProbesSynchronizedOutput(t *testing.T) {
 	if _, err := c.probe(ctx, nil); err != nil {
 		t.Fatal(err)
 	}
-	if !c.supports(2026) {
+	if !c.switchable(2026) {
 		t.Fatal("outer synchronized-output support was not negotiated")
 	}
 }

@@ -201,6 +201,8 @@ func (c *console) consumeReply(p input.Packet) bool {
 		}
 		delete(c.pending, m)
 		c.entry[m] = ev.Value
+		// applied is the mode the outer terminal is in. A permanent value is
+		// never switched, so it stays the effective mode for the session.
 		if ev.Value.IsSet() || ev.Value.IsReset() {
 			c.applied[m] = ev.Value.IsSet()
 		}
@@ -262,7 +264,7 @@ func (c *console) enter() error {
 	if err := c.setMode(5, false); err != nil {
 		return err
 	}
-	grapheme := c.supports(2027)
+	grapheme := c.graphemeWidth()
 	if err := c.setMode(2027, grapheme); err != nil {
 		return err
 	}
@@ -273,18 +275,24 @@ func (c *console) enter() error {
 	return c.renderer.Flush()
 }
 
-func (c *console) supports(m ansi.DECMode) bool {
+// switchable reports whether the outer terminal reported m as set or reset
+// (DECRPM Ps 1 or 2). A terminal ignores changes to a permanently set or reset
+// mode, and synchronized output needs both transitions to delimit frames.
+func (c *console) switchable(m ansi.DECMode) bool {
 	v, ok := c.entry[m]
-	if m == synchronizedOutputMode {
-		// Synchronized output needs both transitions; a permanently set or
-		// reset mode cannot delimit frames.
-		return ok && (v == ansi.ModeSet || v == ansi.ModeReset)
-	}
-	return ok && (v.IsSet() || v.IsReset())
+	return ok && (v == ansi.ModeSet || v == ansi.ModeReset)
+}
+
+// graphemeWidth reports whether the outer terminal measures text by grapheme
+// clusters (mode 2027) for the session: enter turns a switchable mode on, and a
+// permanently set mode is already on. It holds before enter, so the child
+// emulator and the outer screen created earlier agree with the terminal.
+func (c *console) graphemeWidth() bool {
+	return c.switchable(2027) || c.entry[2027] == ansi.ModePermanentlySet
 }
 
 func (c *console) setMode(m ansi.DECMode, on bool) error {
-	if !c.supports(m) || c.applied[m] == on {
+	if !c.switchable(m) || c.applied[m] == on {
 		return nil
 	}
 	var text string
@@ -319,7 +327,7 @@ func (c *console) syncInput(s emulator.State) error {
 			return err
 		}
 	}
-	pixels := s.Modes[ghostty.ModeSGRPixelsMouse] && c.cellWidth > 0 && c.cellHeight > 0 && c.supports(1016)
+	pixels := s.Modes[ghostty.ModeSGRPixelsMouse] && c.cellWidth > 0 && c.cellHeight > 0 && c.switchable(1016)
 	for _, m := range []ansi.DECMode{1001, 1005, 1015} {
 		if err := c.setMode(m, false); err != nil {
 			return err
@@ -369,21 +377,18 @@ func (c *console) setModify(level int) error {
 
 func (c *console) writeEntryModes() error {
 	for _, m := range consoleModes {
-		if m == 1049 {
+		if m == 1049 || !c.switchable(m) {
 			continue
 		}
-		v, ok := c.entry[m]
-		if !ok || v != ansi.ModeSet && v != ansi.ModeReset {
-			continue
-		}
+		on := c.entry[m] == ansi.ModeSet
 		text := ansi.ResetMode(m)
-		if v.IsSet() {
+		if on {
 			text = ansi.SetMode(m)
 		}
 		if _, err := c.renderer.WriteString(text); err != nil {
 			return err
 		}
-		c.applied[m] = v.IsSet()
+		c.applied[m] = on
 	}
 	return nil
 }
