@@ -436,6 +436,9 @@ func (r *inputRouter) routeMouse(event uv.MouseEvent, state emulator.State) (rou
 			r.mouseOwners[m.Button] = false
 		}
 		result.Origin = "outside-child"
+		if r.unmeasuredPixels() {
+			result.Origin = "unmeasured-pixel-mouse"
+		}
 		return result, nil
 	}
 	if (release || isMouseDrag(event)) && (!known || !owned) {
@@ -492,9 +495,14 @@ func (r *inputRouter) mousePosition(m uv.Mouse, state emulator.State) (ghostty.M
 	if r.viewport.Empty() {
 		return ghostty.MousePosition{}, false, fmt.Errorf("mouse routing has no child viewport")
 	}
+	if r.unmeasuredPixels() {
+		// The frame requests no mouse reports while it cannot place pixels in
+		// cells, but reports the terminal sent earlier, such as before a resize
+		// cleared the cell size, still arrive. They are outside every cell.
+		return ghostty.MousePosition{}, false, nil
+	}
 	if r.host.MousePixels {
-		if r.host.CellWidthPx == 0 || r.host.CellHeightPx == 0 ||
-			r.host.CellWidthPx != state.Size.CellWidthPx || r.host.CellHeightPx != state.Size.CellHeightPx {
+		if r.host.CellWidthPx != state.Size.CellWidthPx || r.host.CellHeightPx != state.Size.CellHeightPx {
 			return ghostty.MousePosition{}, false, fmt.Errorf("pixel mouse input requires matching measured cell geometry")
 		}
 		// UV's SGR decoder subtracts one from wire coordinates even in pixel
@@ -523,6 +531,12 @@ func (r *inputRouter) mousePosition(m uv.Mouse, state emulator.State) (ghostty.M
 		w, h = 1, 1
 	}
 	return ghostty.MousePosition{X: float32(x) * float32(w), Y: float32(y) * float32(h)}, inside, nil
+}
+
+// unmeasuredPixels reports whether the outer terminal sends pixel mouse
+// reports while no cell size is measured to convert them.
+func (r *inputRouter) unmeasuredPixels() bool {
+	return r.host.MousePixels && (r.host.CellWidthPx == 0 || r.host.CellHeightPx == 0)
 }
 
 func mouseWireBounds(position ghostty.MousePosition, state emulator.State) error {

@@ -3,6 +3,7 @@ package frame
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"github.com/alexgorbatchev/go-tui-frame/internal/emulator"
 	"github.com/alexgorbatchev/go-tui-frame/internal/input"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/creack/pty"
 	ghostty "go.mitchellh.com/libghostty"
 )
 
@@ -260,10 +262,13 @@ func TestConsoleKeepsPermanentInputModes(t *testing.T) {
 		applied         map[ansi.DECMode]bool
 		cursor, pixels  bool
 		outer, routed   string
-		// unmeasured cases start before the cell-size reply arrives; late
-		// sequences must reach the outer terminal only while outer is routed.
-		unmeasured bool
-		late       []string
+		// unmeasured cases start before the cell-size reply arrives. pixelless
+		// cases resize to a winsize without pixels before outer is routed. late
+		// sequences must reach the outer terminal in order after the child
+		// chunk. routeErr is the error routing outer must end with.
+		unmeasured, pixelless bool
+		late                  []string
+		routeErr              string
 	}{
 		{
 			name: "cursor keys permanently reset", reports: modes{1: ansi.ModePermanentlyReset},
@@ -285,7 +290,9 @@ func TestConsoleKeepsPermanentInputModes(t *testing.T) {
 			name: "pixel mouse permanently reset", reports: modes{1006: ansi.ModeReset, 1016: ansi.ModePermanentlyReset},
 			child: "\x1b[?1000;1016h", written: []string{"\x1b[?1006h"}, absent: []string{"\x1b[?1016h"},
 			applied: map[ansi.DECMode]bool{1006: true, 1016: false},
-			outer:   "a", routed: "a",
+			// Unsupported conversion fails explicitly: a cell report cannot
+			// supply the pixel precision the child asked for.
+			outer: "\x1b[<0;7;5M", routeErr: "child pixel mouse requires pixel input from the outer terminal",
 		},
 		{
 			name: "pixel mouse permanently set", reports: modes{1006: ansi.ModeReset, 1016: ansi.ModePermanentlySet},
@@ -299,6 +306,16 @@ func TestConsoleKeepsPermanentInputModes(t *testing.T) {
 			child:   "\x1b[?1000;1006h", absent: []string{"\x1b[?1000h", "\x1b[?1016l"},
 			applied: map[ansi.DECMode]bool{1000: false, 1016: true}, pixels: true,
 			outer: "\x1b[6;20;10t\x1b[<0;61;91M", late: []string{"\x1b[?1000h"}, routed: "\x1b[<0;7;5M",
+		},
+		{
+			// A report the terminal sent before it applied the resize arrives
+			// between the resize and the cell-size reply.
+			name: "pixel mouse permanently set after pixel-less resize", pixelless: true,
+			reports: modes{1000: ansi.ModeReset, 1006: ansi.ModeReset, 1016: ansi.ModePermanentlySet},
+			child:   "\x1b[?1000;1006h", written: []string{"\x1b[?1000h"}, absent: []string{"\x1b[?1016l"},
+			applied: map[ansi.DECMode]bool{1000: true, 1016: true}, pixels: true,
+			outer: "\x1b[<0;61;91M\x1b[6;20;10t\x1b[<0;61;91M", late: []string{"\x1b[16t", "\x1b[?1000l", "\x1b[?1000h"},
+			routed: "\x1b[<0;7;5M",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -338,21 +355,34 @@ func TestConsoleKeepsPermanentInputModes(t *testing.T) {
 					t.Errorf("applied[%d] = %v, want %v", m, c.applied[m], want)
 				}
 			}
+			if tt.pixelless {
+				resizeWithoutPixels(t, s)
+			}
 			queued := len(s.queue)
 			packets, err := input.New().Feed([]byte(tt.outer))
 			if err != nil {
 				t.Fatal(err)
 			}
+			var routeErr error
 			for _, p := range packets {
-				if err := s.route(p); err != nil {
-					t.Fatal(err)
+				if routeErr = s.route(p); routeErr != nil {
+					break
 				}
 			}
+			if tt.routeErr == "" && routeErr != nil {
+				t.Fatalf("routing %q failed: %v", tt.outer, routeErr)
+			}
+			if tt.routeErr != "" && (routeErr == nil || !strings.Contains(routeErr.Error(), tt.routeErr)) {
+				t.Errorf("routing %q returned %v, want error %q", tt.outer, routeErr, tt.routeErr)
+			}
 			late := string(repaintOutput(t, out)[before+len(written):])
-			for _, seq := range tt.late {
-				if !strings.Contains(late, seq) {
-					t.Errorf("outer terminal did not receive %q while routing %q: %q", seq, tt.outer, late)
+			for rest, i := late, 0; i < len(tt.late); i++ {
+				at := strings.Index(rest, tt.late[i])
+				if at < 0 {
+					t.Errorf("outer terminal did not receive %q after %q while routing %q: %q", tt.late[i], tt.late[:i], tt.outer, late)
+					break
 				}
+				rest = rest[at+len(tt.late[i]):]
 			}
 			if host := s.router.host; host.ApplicationCursor != tt.cursor || host.MousePixels != tt.pixels {
 				t.Errorf("host profile cursor=%v pixels=%v, want cursor=%v pixels=%v", host.ApplicationCursor, host.MousePixels, tt.cursor, tt.pixels)
@@ -365,6 +395,30 @@ func TestConsoleKeepsPermanentInputModes(t *testing.T) {
 				t.Errorf("child received %q for outer %q, want %q", routed, tt.outer, tt.routed)
 			}
 		})
+	}
+}
+
+// resizeWithoutPixels resizes the session as a SIGWINCH does when the outer
+// winsize carries cells but no pixel dimensions.
+func resizeWithoutPixels(t *testing.T, s *session[string]) {
+	t.Helper()
+	master, slave, err := pty.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for _, file := range []*os.File{master, slave} {
+			if err := file.Close(); err != nil {
+				t.Error(err)
+			}
+		}
+	})
+	if err := pty.Setsize(slave, &pty.Winsize{Cols: uint16(s.geometry.outer.Dx()), Rows: uint16(s.geometry.outer.Dy())}); err != nil {
+		t.Fatal(err)
+	}
+	s.console.fd = int(slave.Fd())
+	if err := s.resize(); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -389,6 +389,40 @@ func TestRoutingMeasuredPixelsPreserveWireOffsets(t *testing.T) {
 	}
 }
 
+func TestRoutingDropsPixelReportsWithoutMeasuredCells(t *testing.T) {
+	r, em := newRouterTest(t, nil)
+	measure := func(width, height uint32) emulator.State {
+		t.Helper()
+		if err := em.Resize(emulator.Size{Cols: 8, Rows: 5, CellWidthPx: width, CellHeightPx: height}); err != nil {
+			t.Fatal(err)
+		}
+		r.host.MousePixels, r.host.CellWidthPx, r.host.CellHeightPx = true, width, height
+		return routerState(t, em, "")
+	}
+	routerState(t, em, "\x1b[?1002;1006h")
+	s := measure(10, 20)
+	if got := routeBytes(t, r, s, "\x1b[<0;61;91M"); string(got) != "\x1b[<0;5;2M" {
+		t.Fatalf("measured press = %q", got)
+	}
+	// A pixel-less resize clears the cell size while the release is in flight.
+	s = measure(0, 0)
+	got, err := r.route(routerPackets(t, "\x1b[<0;61;91m")[0], s)
+	if err != nil || len(got.Bytes) != 0 || got.Origin != "unmeasured-pixel-mouse" {
+		t.Fatalf("unmeasured release = %#v, %v", got, err)
+	}
+	// The dropped release ends the child's ownership of the button, as an
+	// outside release does, so a later drag is not delivered.
+	s = measure(10, 20)
+	got, err = r.route(routerPackets(t, "\x1b[<32;61;91M")[0], s)
+	if err != nil || len(got.Bytes) != 0 || got.Origin != "unowned-mouse-gesture" {
+		t.Fatalf("drag after unmeasured release = %#v, %v", got, err)
+	}
+	r.host.CellWidthPx = 12
+	if _, err := r.route(routerPackets(t, "\x1b[<0;61;91M")[0], s); err == nil {
+		t.Fatal("pixel report used a cell size the child emulator does not have")
+	}
+}
+
 func TestRoutingNativeTextSurvivesGCAndReleasesBorrow(t *testing.T) {
 	r, em := newRouterTest(t, nil)
 	text := strings.Repeat("界", 256)
