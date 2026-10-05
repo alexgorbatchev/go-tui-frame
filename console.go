@@ -314,20 +314,28 @@ func (c *console) setMode(m ansi.DECMode, on bool) error {
 }
 
 func (c *console) syncInput(s emulator.State) error {
+	measured := c.cellWidth > 0 && c.cellHeight > 0
+	// A terminal that keeps SGR pixel reports (1016) permanently on sends
+	// coordinates the router can localize only with a measured cell size, so
+	// mouse tracking stays off until one arrives. A cell-size reply or resize
+	// runs applyGeometry, which synchronizes these modes again.
+	localizable := measured || c.entry[1016] != ansi.ModePermanentlySet
 	mirror := []struct {
-		host  ansi.DECMode
-		child ghostty.Mode
+		host     ansi.DECMode
+		child    ghostty.Mode
+		tracking bool
 	}{
-		{1, ghostty.ModeDECCKM}, {66, ghostty.ModeKeypadKeys}, {67, ghostty.ModeBackarrowKeyMode},
-		{1035, ghostty.ModeNumlockKeypad}, {1036, ghostty.ModeAltEscPrefix}, {1039, ghostty.ModeAltSendsEsc},
-		{9, ghostty.ModeX10Mouse}, {1000, ghostty.ModeNormalMouse}, {1002, ghostty.ModeButtonMouse}, {1003, ghostty.ModeAnyMouse}, {1004, ghostty.ModeFocusEvent},
+		{1, ghostty.ModeDECCKM, false}, {66, ghostty.ModeKeypadKeys, false}, {67, ghostty.ModeBackarrowKeyMode, false},
+		{1035, ghostty.ModeNumlockKeypad, false}, {1036, ghostty.ModeAltEscPrefix, false}, {1039, ghostty.ModeAltSendsEsc, false},
+		{9, ghostty.ModeX10Mouse, true}, {1000, ghostty.ModeNormalMouse, true}, {1002, ghostty.ModeButtonMouse, true}, {1003, ghostty.ModeAnyMouse, true},
+		{1004, ghostty.ModeFocusEvent, false},
 	}
 	for _, m := range mirror {
-		if err := c.setMode(m.host, s.Modes[m.child]); err != nil {
+		if err := c.setMode(m.host, s.Modes[m.child] && (localizable || !m.tracking)); err != nil {
 			return err
 		}
 	}
-	pixels := s.Modes[ghostty.ModeSGRPixelsMouse] && c.cellWidth > 0 && c.cellHeight > 0 && c.switchable(1016)
+	pixels := s.Modes[ghostty.ModeSGRPixelsMouse] && measured && c.switchable(1016)
 	for _, m := range []ansi.DECMode{1001, 1005, 1015} {
 		if err := c.setMode(m, false); err != nil {
 			return err

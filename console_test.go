@@ -260,6 +260,10 @@ func TestConsoleKeepsPermanentInputModes(t *testing.T) {
 		applied         map[ansi.DECMode]bool
 		cursor, pixels  bool
 		outer, routed   string
+		// unmeasured cases start before the cell-size reply arrives; late
+		// sequences must reach the outer terminal only while outer is routed.
+		unmeasured bool
+		late       []string
 	}{
 		{
 			name: "cursor keys permanently reset", reports: modes{1: ansi.ModePermanentlyReset},
@@ -289,11 +293,22 @@ func TestConsoleKeepsPermanentInputModes(t *testing.T) {
 			applied: map[ansi.DECMode]bool{1006: true, 1016: true}, pixels: true,
 			outer: "\x1b[<0;61;91M", routed: "\x1b[<0;7;5M",
 		},
+		{
+			name: "pixel mouse permanently set without measured cells", unmeasured: true,
+			reports: modes{1000: ansi.ModeReset, 1006: ansi.ModeReset, 1016: ansi.ModePermanentlySet},
+			child:   "\x1b[?1000;1006h", absent: []string{"\x1b[?1000h", "\x1b[?1016l"},
+			applied: map[ansi.DECMode]bool{1000: false, 1016: true}, pixels: true,
+			outer: "\x1b[6;20;10t\x1b[<0;61;91M", late: []string{"\x1b[?1000h"}, routed: "\x1b[<0;7;5M",
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			s, out, slave := newRepaintSession(t, ansi.ModeReset, nil)
 			c := s.console
-			c.cellWidth, c.cellHeight = harnessCellWidth, harnessCellHeight
+			if !tt.unmeasured {
+				c.cellWidth, c.cellHeight = harnessCellWidth, harnessCellHeight
+			}
+			// The probe leaves the cell-size query pending until a reply arrives.
+			c.cellPending = tt.unmeasured
 			router, err := newInputRouter(s.terminal, nil)
 			if err != nil {
 				t.Fatal(err)
@@ -302,7 +317,7 @@ func TestConsoleKeepsPermanentInputModes(t *testing.T) {
 			s.router = router
 			reportModes(t, c, tt.reports)
 			before := len(repaintOutput(t, out))
-			// Measured cells reach the child emulator, as after a cell-size reply.
+			// The console's cell size reaches the child emulator, as after a reply.
 			if err := s.applyGeometry(s.geometry); err != nil {
 				t.Fatal(err)
 			}
@@ -315,7 +330,7 @@ func TestConsoleKeepsPermanentInputModes(t *testing.T) {
 			}
 			for _, seq := range tt.absent {
 				if strings.Contains(written, seq) {
-					t.Errorf("outer terminal received %q for a mode it cannot switch: %q", seq, written)
+					t.Errorf("outer terminal received %q: %q", seq, written)
 				}
 			}
 			for m, want := range tt.applied {
@@ -331,6 +346,12 @@ func TestConsoleKeepsPermanentInputModes(t *testing.T) {
 			for _, p := range packets {
 				if err := s.route(p); err != nil {
 					t.Fatal(err)
+				}
+			}
+			late := string(repaintOutput(t, out)[before+len(written):])
+			for _, seq := range tt.late {
+				if !strings.Contains(late, seq) {
+					t.Errorf("outer terminal did not receive %q while routing %q: %q", seq, tt.outer, late)
 				}
 			}
 			if host := s.router.host; host.ApplicationCursor != tt.cursor || host.MousePixels != tt.pixels {
