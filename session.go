@@ -41,8 +41,19 @@ func (f *Frame[T]) Run(ctx context.Context) (result Result, err error) {
 		return result, err
 	}
 	defer f.close()
-	events := newEventDispatcher(f.observedKinds, f.observe)
-	defer events.close()
+	// An observer panic cancels the session as the caller's context does, so
+	// it ends through the same child termination and terminal restoration.
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	events := newEventDispatcher(f.observedKinds, cancel, f.observe)
+	defer func() {
+		events.close()
+		// A callback can panic while close drains admitted observations, after
+		// the session loop stopped reading its context.
+		if failure := events.failure(); failure != nil && !errors.Is(err, failure) {
+			err = errors.Join(err, failure)
+		}
+	}()
 	fd, device, w, err := inspectConsole(f.input, f.output)
 	if err != nil {
 		return result, err

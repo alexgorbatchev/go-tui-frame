@@ -194,7 +194,7 @@ func TestInputQueueCompactsPartialWritesAndPreservesOrigins(t *testing.T) {
 		t.Fatal("partial write compaction reordered or lost input")
 	}
 	var events []Event
-	s.events = newEventDispatcher(eventBit(ChildInput), func(ev Event) { events = append(events, ev) })
+	s.events = newEventDispatcher(eventBit(ChildInput), sessionCancel(t), func(ev Event) { events = append(events, ev) })
 	t.Cleanup(s.events.close)
 	for _, origin := range []string{"terminal-reply", "user-input"} {
 		if err := s.enqueue([]byte(origin), origin); err != nil {
@@ -344,7 +344,7 @@ func TestObservationSelectionPreservesPerReadSnapshotsAndDamage(t *testing.T) {
 				s.frame.ObserveEvents(tt.kinds, handler)
 				tt.kinds[0] = OuterInput // Configuration owns the subscription.
 			}
-			s.events = newEventDispatcher(s.frame.observedKinds, s.frame.observe)
+			s.events = newEventDispatcher(s.frame.observedKinds, sessionCancel(t), s.frame.observe)
 			t.Cleanup(s.events.close)
 			readRepaintChunk(t, s, slave, "one")
 			if captured := s.snapshot.Terminal.Cells[0].Content == "o"; captured != tt.capture {
@@ -387,7 +387,7 @@ func TestObservationSelectionPreservesPerReadSnapshotsAndDamage(t *testing.T) {
 func TestExitSubscriptionCapturesPendingOutput(t *testing.T) {
 	s, _, slave := newRepaintSession(t, ansi.ModeReset, nil)
 	var got Event
-	s.events = newEventDispatcher(eventBit(Exited), func(ev Event) { got = ev })
+	s.events = newEventDispatcher(eventBit(Exited), sessionCancel(t), func(ev Event) { got = ev })
 	t.Cleanup(s.events.close)
 	readRepaintChunk(t, s, slave, "final")
 	s.wait = make(chan error, 1)

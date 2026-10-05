@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -202,16 +204,17 @@ func TestObserverQueueCountIsBoundedAndShutdownRejects(t *testing.T) {
 
 func pausedDispatcher(t *testing.T, handler func(Event)) (*eventDispatcher, <-chan struct{}, func()) {
 	t.Helper()
-	return pausedSelectedDispatcher(t, allEvents, handler)
+	return pausedSelectedDispatcher(t, allEvents, sessionCancel(t), handler)
 }
 
 // pausedSelectedDispatcher observes kinds and holds the first delivered
 // record's callback until release, so later records meet a non-idle budget.
-func pausedSelectedDispatcher(t *testing.T, kinds eventMask, handler func(Event)) (*eventDispatcher, <-chan struct{}, func()) {
+// A callback panic cancels the session through fail.
+func pausedSelectedDispatcher(t *testing.T, kinds eventMask, fail context.CancelCauseFunc, handler func(Event)) (*eventDispatcher, <-chan struct{}, func()) {
 	t.Helper()
 	entered, resume := make(chan struct{}), make(chan struct{})
 	var started, released sync.Once
-	d := newEventDispatcher(kinds, func(ev Event) {
+	d := newEventDispatcher(kinds, fail, func(ev Event) {
 		started.Do(func() { close(entered); <-resume })
 		handler(ev)
 	})
@@ -220,8 +223,83 @@ func pausedSelectedDispatcher(t *testing.T, kinds eventMask, handler func(Event)
 	return d, entered, release
 }
 
+// sessionCancel returns the session cancellation a dispatcher reports a
+// callback panic through, for tests that never read that cause.
+func sessionCancel(t *testing.T) context.CancelCauseFunc {
+	t.Helper()
+	_, cancel := context.WithCancelCause(t.Context())
+	return cancel
+}
+
+func TestObserverPanicCancelsSessionAndDiscardsLaterRecords(t *testing.T) {
+	// The panicking callbacks are closures of this test, so its name appears in
+	// the recovered stack.
+	test := t.Name()
+	var empty []int
+	for _, tt := range []struct {
+		name  string
+		fault func(Event)
+		want  func(error) bool
+	}{
+		{"value", func(Event) { panic("observer fault") }, func(err error) bool {
+			return strings.Contains(err.Error(), "observer fault")
+		}},
+		{"runtime error", func(ev Event) { _ = empty[len(ev.Bytes)] }, func(err error) bool {
+			var runtimeErr runtime.Error
+			return errors.As(err, &runtimeErr) && strings.Contains(err.Error(), "index out of range")
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancelCause(t.Context())
+			calls := 0
+			d, entered, release := pausedSelectedDispatcher(t, allEvents, cancel, func(ev Event) {
+				calls++
+				tt.fault(ev)
+			})
+			if err := d.emit(Event{Kind: Started}); err != nil {
+				t.Fatal(err)
+			}
+			<-entered
+			for _, data := range []string{"queued", "behind"} {
+				if err := d.emit(Event{Kind: ChildOutput, Bytes: []byte(data)}); err != nil {
+					t.Fatalf("queue rejected a record behind the executing callback: %v", err)
+				}
+			}
+			release()
+			select {
+			case <-ctx.Done():
+			case <-time.After(5 * time.Second):
+				t.Fatal("observer panic did not cancel the session")
+			}
+			cause := context.Cause(ctx)
+			if !tt.want(cause) || !strings.Contains(cause.Error(), test) {
+				t.Fatalf("session cause = %v, want the panic value and its stack", cause)
+			}
+			snap := Snapshot{Terminal: TerminalSnapshot{Cells: []uv.Cell{{Content: "state", Width: 1}}}}
+			// Over the queue limit: a record still copied and queued would overflow.
+			if allocs := testing.AllocsPerRun(observationQueueLimit*2, func() {
+				if err := d.emit(Event{Kind: StateChanged, Snapshot: &snap}); err != nil {
+					t.Fatal(err)
+				}
+			}); allocs != 0 {
+				t.Fatalf("record emitted after the panic allocated %.0f times", allocs)
+			}
+			d.close()
+			if calls != 1 {
+				t.Fatalf("callback ran %d times, want only the call that panicked", calls)
+			}
+			if d.bytes != 0 {
+				t.Fatalf("drained dispatcher holds %d bytes", d.bytes)
+			}
+			if d.failure() != cause {
+				t.Fatalf("dispatcher failure = %v, want the session cause", d.failure())
+			}
+		})
+	}
+}
+
 func TestDisabledObservationDoesNotRetainOrDeliver(t *testing.T) {
-	d := newEventDispatcher(allEvents, nil)
+	d := newEventDispatcher(allEvents, sessionCancel(t), nil)
 	if d != nil {
 		t.Fatal("disabled observer allocated dispatcher")
 	}
@@ -232,7 +310,7 @@ func TestDisabledObservationDoesNotRetainOrDeliver(t *testing.T) {
 }
 
 func TestObserverMutationDoesNotChangeQueueAccounting(t *testing.T) {
-	d := newEventDispatcher(allEvents, func(ev Event) {
+	d := newEventDispatcher(allEvents, sessionCancel(t), func(ev Event) {
 		ev.Snapshot.Terminal.Title = "a longer observer-owned title"
 		ev.Input.Raw = nil
 	})
@@ -256,7 +334,7 @@ func TestObservationSubscriptionsValidateBeforeStarting(t *testing.T) {
 			if err := f.begin(context.Background()); (err != nil) != tt.wantErr {
 				t.Fatalf("subscription configuration error = %v", err)
 			}
-			d := newEventDispatcher(f.observedKinds, f.observe)
+			d := newEventDispatcher(f.observedKinds, sessionCancel(t), f.observe)
 			if len(tt.kinds) == 0 && d != nil {
 				t.Fatal("empty subscription allocated a dispatcher")
 			}
@@ -271,7 +349,7 @@ func TestObservationSubscriptionsValidateBeforeStarting(t *testing.T) {
 func TestFilteredEventsDoNotConsumeQueueBudget(t *testing.T) {
 	// An idle dispatcher admits any lone record, so hold a selected record's
 	// callback: only filtering can then admit an excluded record over budget.
-	d, entered, _ := pausedSelectedDispatcher(t, eventBit(ChildOutput), func(Event) {})
+	d, entered, _ := pausedSelectedDispatcher(t, eventBit(ChildOutput), sessionCancel(t), func(Event) {})
 	if err := d.emit(Event{Kind: ChildOutput, Bytes: []byte("held")}); err != nil {
 		t.Fatal(err)
 	}

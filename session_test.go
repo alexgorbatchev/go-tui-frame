@@ -17,6 +17,7 @@ import (
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/term"
 	"github.com/creack/pty"
+	ghostty "go.mitchellh.com/libghostty"
 	"golang.org/x/sys/unix"
 )
 
@@ -387,18 +388,7 @@ func TestCancellationRestoresTerminalBeforeObserverDrains(t *testing.T) {
 
 func TestCancellationTerminatesAllOwnedSessionGroups(t *testing.T) {
 	h := newHarness(t)
-	dir, err := os.MkdirTemp(".tmp", "session-groups-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := os.RemoveAll(dir); err != nil {
-			t.Error(err)
-		}
-	})
-	file := dir + "/pid"
-	cmd := childCommand(t)
-	cmd.Env = append(cmd.Env, "FRAME_TEST_MODE=groups", "FRAME_TEST_PID_FILE="+file)
+	cmd, file := groupsCommand(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	started := make(chan int, 1)
@@ -417,6 +407,164 @@ func TestCancellationTerminatesAllOwnedSessionGroups(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("leader did not start")
 	}
+	pid := awaitDescendantGroup(t, file, leader)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("cancel result: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("canceled session did not complete")
+	}
+	awaitGone(t, pid, "owned descendant in separate process group survived cancellation")
+}
+
+func TestObserverPanicEndsSessionThroughShutdown(t *testing.T) {
+	h := newHarness(t)
+	before, err := term.GetState(h.slave.Fd())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd, file := groupsCommand(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	fault := errors.New("observer fault on Started")
+	leaders, release := make(chan int, 1), make(chan struct{})
+	// Capture makes the frame enable Kitty disambiguation, a keyboard mode only
+	// restoration can disable on the outer terminal.
+	app := New(cmd, struct{}{}).Terminal(h.slave, h.slave).Capture(func(Input) Disposition { return Pass }).
+		ObserveEvents([]EventKind{Started}, func(e Event) {
+			leaders <- e.Snapshot.Child.PID
+			<-release
+			panic(fault)
+		})
+	type outcome struct {
+		result Result
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() { r, err := app.Run(ctx); done <- outcome{r, err} }()
+	var leader int
+	select {
+	case leader = <-leaders:
+	case <-ctx.Done():
+		t.Fatal("Started was not observed", ctx.Err())
+	}
+	descendant := awaitDescendantGroup(t, file, leader)
+	awaitOuter(t, h, "the framed session's modes", func(s emulator.State) bool {
+		return s.Alternate && s.Modes[ghostty.ModeBracketedPaste] && s.KittyKeyboardFlags&ghostty.KittyKeyDisambiguate != 0
+	})
+	close(release)
+	var got outcome
+	select {
+	case got = <-done:
+	case <-ctx.Done():
+		t.Fatal("Run did not finish after the observer panicked", ctx.Err())
+	}
+	// The stack names the panicking callback, which this test function encloses.
+	if !errors.Is(got.err, fault) || !strings.Contains(got.err.Error(), t.Name()) {
+		t.Fatalf("Run error = %v, want the observer panic value and its stack", got.err)
+	}
+	if got.result.ProcessState == nil {
+		t.Fatal("Run did not wait for the terminated child")
+	}
+	awaitOuter(t, h, "its entry modes", func(s emulator.State) bool {
+		return !s.Alternate && !s.Modes[ghostty.ModeBracketedPaste] && s.KittyKeyboardFlags == 0
+	})
+	after, err := term.GetState(h.slave.Fd())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprintf("%#v", before) != fmt.Sprintf("%#v", after) {
+		t.Fatalf("termios was not restored: before %#v after %#v", before, after)
+	}
+	awaitGone(t, -leader, "launch leader's process group survived the observer panic")
+	awaitGone(t, -descendant, "descendant process group survived the observer panic")
+}
+
+func TestObserverPanicDuringShutdownDrainReachesRun(t *testing.T) {
+	h := newHarness(t)
+	before, err := term.GetState(h.slave.Fd())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	fault := errors.New("observer fault on Exited")
+	exited, release := make(chan struct{}), make(chan struct{})
+	app := New(childCommand(t), struct{}{}).Terminal(h.slave, h.slave).ObserveEvents([]EventKind{Exited}, func(Event) {
+		close(exited)
+		<-release
+		panic(fault)
+	})
+	type outcome struct {
+		result Result
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() { r, err := app.Run(ctx); done <- outcome{r, err} }()
+	awaitText(t, h, "child")
+	if _, err := unix.Write(h.fd, []byte("q")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-exited:
+	case <-ctx.Done():
+		t.Fatal("Exited was not observed", ctx.Err())
+	}
+	// Restored termios proves the session loop has returned, so the panic can
+	// reach Run only through the dispatcher's shutdown drain.
+	for {
+		after, err := term.GetState(h.slave.Fd())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fmt.Sprintf("%#v", before) == fmt.Sprintf("%#v", after) {
+			break
+		}
+		if ctx.Err() != nil {
+			t.Fatal("terminal was not restored while the observer held Exited", ctx.Err())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	close(release)
+	select {
+	case got := <-done:
+		if !errors.Is(got.err, fault) || !strings.Contains(got.err.Error(), t.Name()) {
+			t.Fatalf("Run error = %v, want the observer panic value and its stack", got.err)
+		}
+		if got.result.ProcessState == nil || !got.result.ProcessState.Success() {
+			t.Fatalf("child outcome = %v, want its successful exit", got.result.ProcessState)
+		}
+	case <-ctx.Done():
+		t.Fatal("Run did not finish after the observer panicked", ctx.Err())
+	}
+}
+
+// groupsCommand returns a child whose descendant leads a separate process group
+// inside the owned session and writes its PID to the returned file.
+func groupsCommand(t *testing.T) (*exec.Cmd, string) {
+	t.Helper()
+	dir, err := os.MkdirTemp(".tmp", "session-groups-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Error(err)
+		}
+	})
+	file := dir + "/pid"
+	cmd := childCommand(t)
+	cmd.Env = append(cmd.Env, "FRAME_TEST_MODE=groups", "FRAME_TEST_PID_FILE="+file)
+	return cmd, file
+}
+
+// awaitDescendantGroup reads the PID groupsCommand's descendant records and
+// verifies that it leads its own process group, apart from the launch leader.
+func awaitDescendantGroup(t *testing.T, file string, leader int) int {
+	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	pid := 0
 	for time.Now().Before(deadline) {
@@ -444,21 +592,38 @@ func TestCancellationTerminatesAllOwnedSessionGroups(t *testing.T) {
 	if pgid, err := unix.Getpgid(pid); err != nil || pgid != pid || pgid == leader {
 		t.Fatalf("group = %d, %v; leader=%d descendant=%d", pgid, err, leader, pid)
 	}
-	cancel()
-	select {
-	case err := <-done:
-		if !errors.Is(err, context.Canceled) {
-			t.Errorf("cancel result: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("canceled session did not complete")
-	}
-	deadline = time.Now().Add(3 * time.Second)
+	return pid
+}
+
+// awaitGone waits until kill(2) finds no process for target, a PID or a
+// negated process-group ID.
+func awaitGone(t *testing.T, target int, failure string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if err := unix.Kill(pid, 0); errors.Is(err, unix.ESRCH) {
+		if err := unix.Kill(target, 0); errors.Is(err, unix.ESRCH) {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("owned descendant in separate process group survived cancellation")
+	t.Fatal(failure)
+}
+
+// awaitOuter waits until the outer terminal's native state satisfies ready.
+func awaitOuter(t *testing.T, h *terminalHarness, what string, ready func(emulator.State) bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		h.mu.Lock()
+		s, err := h.em.State()
+		h.mu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ready(s) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("outer terminal did not reach %s", what)
 }

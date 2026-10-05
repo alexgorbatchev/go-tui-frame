@@ -1,7 +1,9 @@
 package frame
 
 import (
+	"context"
 	"fmt"
+	"runtime/debug"
 	"slices"
 	"sync"
 	"time"
@@ -18,12 +20,14 @@ const (
 
 // eventDispatcher separates consumer work from terminal transport. The budget
 // includes the current callback until it returns, as well as queued records;
-// bytes is their combined weight.
+// bytes is their combined weight. err holds the first callback panic, after
+// which no record reaches the callback.
 type eventDispatcher struct {
 	mu       sync.Mutex
 	queue    chan eventRecord
 	done     chan struct{}
 	closed   bool
+	err      error
 	bytes    int
 	sequence uint64
 	offsets  map[EventKind]uint64
@@ -81,7 +85,11 @@ type eventRecord struct {
 	weight int
 }
 
-func newEventDispatcher(kinds eventMask, handler func(Event)) *eventDispatcher {
+// newEventDispatcher delivers selected events to handler on a goroutine that
+// no session defer covers. A handler panic therefore becomes an error that
+// cancels the session through fail, so shutdown still terminates the child and
+// restores the terminal.
+func newEventDispatcher(kinds eventMask, fail context.CancelCauseFunc, handler func(Event)) *eventDispatcher {
 	if handler == nil || kinds == 0 {
 		return nil
 	}
@@ -89,14 +97,54 @@ func newEventDispatcher(kinds eventMask, handler func(Event)) *eventDispatcher {
 		offsets: make(map[EventKind]uint64), kinds: kinds}
 	go func() {
 		defer close(d.done)
+		delivering := true
 		for record := range d.queue {
-			handler(record.event)
+			// Records admitted before a panic are still drained, releasing their
+			// weight, so close joins and the budget stays exact.
+			if delivering {
+				if err := callObserver(handler, record.event); err != nil {
+					delivering = false
+					d.mu.Lock()
+					d.err = err
+					d.mu.Unlock()
+					fail(err)
+				}
+			}
 			d.mu.Lock()
 			d.bytes -= record.weight
 			d.mu.Unlock()
 		}
 	}()
 	return d
+}
+
+// callObserver runs one callback and converts its panic into an error carrying
+// the panic value and the panicking goroutine's stack.
+func callObserver(handler func(Event), ev Event) (err error) {
+	defer func() {
+		if v := recover(); v != nil {
+			err = observerPanicError(v, debug.Stack())
+		}
+	}()
+	handler(ev)
+	return nil
+}
+
+func observerPanicError(value any, stack []byte) error {
+	if err, ok := value.(error); ok {
+		return fmt.Errorf("observer panicked: %w\n\n%s", err, stack)
+	}
+	return fmt.Errorf("observer panicked: %v\n\n%s", value, stack)
+}
+
+// failure returns the callback panic that ended delivery, if any.
+func (d *eventDispatcher) failure() error {
+	if d == nil {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.err
 }
 
 func (d *eventDispatcher) emit(ev Event) error {
@@ -107,6 +155,12 @@ func (d *eventDispatcher) emit(ev Event) error {
 	defer d.mu.Unlock()
 	if d.closed {
 		return ErrSessionClosed
+	}
+	if d.err != nil {
+		// No callback will run again. The session learns of the panic through
+		// its canceled context; copying or queueing the record would only spend
+		// the budget during shutdown.
+		return nil
 	}
 	weight := eventWeight(ev)
 	if !d.admits(weight) {
