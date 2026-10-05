@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 16:06
-last_modified: 2026-10-01 19:45
+last_modified: 2026-10-05 10:16
 status: current
 ---
 
@@ -48,6 +48,14 @@ verifies its SHA-256, and builds only libghostty-vt with:
 ```sh
 zig build -Demit-lib-vt -Demit-xcframework=false -Doptimize=ReleaseFast
 ```
+
+Ghostty's build runs `git` in its source directory to detect its version. The
+extracted archive is not a git repository, so the recipe runs `zig build` with
+[`GIT_CEILING_DIRECTORIES`](https://git-scm.com/docs/git#Documentation/git.txt-GITCEILINGDIRECTORIES)
+set to `.tmp/native`. Git's repository discovery stops there, so Ghostty uses
+the development version it assigns to builds outside a git checkout. Without
+that boundary, git reports this repository's branch, commit, and tag to
+Ghostty, and a tag that is not Ghostty's matching release tag aborts the build.
 
 The recipe supplies absolute installation and cache directories. macOS uses
 `.tmp/native/prefix`. Linux selects the host architecture with just's native
@@ -125,6 +133,8 @@ link contract and is not used by these recipes.
 - [Ghostty binding build requirements](https://github.com/mitchellh/go-libghostty/blob/76867c77a212/README.md)
 - [Pinned native build](https://github.com/ghostty-org/ghostty/blob/33da6848d63b3bba2b4f31ab1531d618f2795192/build.zig)
 - [Pinned native Zig manifest](https://github.com/ghostty-org/ghostty/blob/33da6848d63b3bba2b4f31ab1531d618f2795192/build.zig.zon)
+- [Pinned native git version detection](https://github.com/ghostty-org/ghostty/blob/33da6848d63b3bba2b4f31ab1531d618f2795192/src/build/GitVersion.zig)
+- [Git repository discovery boundary](https://git-scm.com/docs/git#Documentation/git.txt-GITCEILINGDIRECTORIES)
 - [Official Zig versions and checksums](https://ziglang.org/download/index.json)
 - [Zig musl cross-compilation](https://ziglang.org/learn/overview/#cross-compilation)
 - [Go cgo compiler and pkg-config environment](https://pkg.go.dev/cmd/cgo)

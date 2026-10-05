@@ -59,7 +59,10 @@ _native target prefix cache:
         trap - EXIT
     fi
     cd "$source"
-    zig build -Demit-lib-vt -Demit-xcframework=false -Doptimize=ReleaseFast -Dtarget="$1" --prefix "$root/$2" --cache-dir "$root/$3" --global-cache-dir "$root/zig-global-cache"
+    # Ghostty's build runs git in its source directory to detect a version.
+    # The extracted archive is not a repository, so stop git's repository
+    # discovery at $root instead of letting it find this checkout.
+    GIT_CEILING_DIRECTORIES="$root" zig build -Demit-lib-vt -Demit-xcframework=false -Doptimize=ReleaseFast -Dtarget="$1" --prefix "$root/$2" --cache-dir "$root/$3" --global-cache-dir "$root/zig-global-cache"
     PKG_CONFIG_PATH="$root/$2/share/pkgconfig" pkg-config --static --libs --cflags libghostty-vt-static
 
 # Build all packages and the example wrapper after native setup.
