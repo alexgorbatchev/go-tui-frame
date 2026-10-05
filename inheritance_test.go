@@ -1,6 +1,7 @@
 package frame
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -8,12 +9,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/alexgorbatchev/go-tui-frame/internal/emulator"
 	uv "github.com/charmbracelet/ultraviolet"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/term"
 	ghostty "go.mitchellh.com/libghostty"
 	"golang.org/x/sys/unix"
@@ -232,6 +236,65 @@ func TestSessionRendersAndRestoresChildCursor(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("alternate screen was not restored")
+}
+
+// cursorSequence matches the cursor appearance sequences the frame writes:
+// DECSCUSR, OSC 12 and OSC 112.
+var cursorSequence = regexp.MustCompile(`\x1b\[[0-9]* q|\x1b\]1?12(;[^\x07]*)?\x07`)
+
+// An inherited cursor the child leaves alone is already the outer terminal's
+// own appearance. Writing it back would turn the terminal's configured or
+// theme-following cursor into an explicit override that outlives the session.
+func TestSessionWritesOnlyCursorAppearanceTheChildChanged(t *testing.T) {
+	style := 6
+	rgb := ghostty.ColorRGB{R: 0xab, G: 0xcd, B: 0xef}
+	restoreStyle, restoreColor := ansi.SetCursorStyle(style), ansi.SetCursorColor("#abcdef")
+	for _, tt := range []struct {
+		name            string
+		steps           []string
+		session, ending []string
+	}{
+		{name: "unchanged"},
+		{name: "style changed", steps: []string{"\x1b[3 q"}, session: []string{ansi.SetCursorStyle(3)}, ending: []string{restoreStyle}},
+		{name: "color changed", steps: []string{"\x1b]12;#123456\x07"}, session: []string{ansi.SetCursorColor("#123456")}, ending: []string{restoreColor}},
+		{
+			name:    "changed and reset by the child",
+			steps:   []string{"\x1b[3 q\x1b]12;#123456\x07", "\x1b[0 q\x1b]112\x07"},
+			session: []string{ansi.SetCursorStyle(3), ansi.SetCursorColor("#123456"), restoreStyle, restoreColor},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reported := &console{inherit: true, preferences: terminalPreferences{cursorStyle: &style, profile: emulator.Profile{Cursor: &rgb}}}
+			cfg := repaintConfig{size: Size{Cols: 20, Rows: 6}, mode: ansi.ModeReset, host: reported.childOptions(emulator.Size{}).Profile}
+			s, out, slave := newConfiguredRepaintSession(t, cfg, nil)
+			s.console.preferences = reported.preferences
+			// The session composes its first frame with the probed preferences.
+			s.composed = false
+			if err := s.render(false); err != nil {
+				t.Fatal(err)
+			}
+			if frame := repaintOutput(t, out); !bytes.Contains(frame, []byte(ansi.SetModeSynchronizedOutput)) {
+				t.Fatalf("first frame was not painted: %q", frame)
+			}
+			for _, step := range tt.steps {
+				readRepaintChunk(t, s, slave, step)
+				if err := s.render(false); err != nil {
+					t.Fatal(err)
+				}
+			}
+			painted := len(repaintOutput(t, out))
+			if err := s.console.restore(); err != nil {
+				t.Fatal(err)
+			}
+			output := string(repaintOutput(t, out))
+			if got := cursorSequence.FindAllString(output[:painted], -1); !slices.Equal(got, tt.session) {
+				t.Errorf("session cursor writes = %q, want %q", got, tt.session)
+			}
+			if got := cursorSequence.FindAllString(output[painted:], -1); !slices.Equal(got, tt.ending) {
+				t.Errorf("restore cursor writes = %q, want %q", got, tt.ending)
+			}
+		})
+	}
 }
 
 func TestSessionCanDisableTerminalInheritance(t *testing.T) {
