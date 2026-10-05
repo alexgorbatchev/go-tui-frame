@@ -11,6 +11,7 @@ import (
 
 	"github.com/alexgorbatchev/go-tui-frame/internal/emulator"
 	"github.com/alexgorbatchev/go-tui-frame/internal/input"
+	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/creack/pty"
 	ghostty "go.mitchellh.com/libghostty"
@@ -176,6 +177,87 @@ func TestConsolePreservesOnlySolicitedReplies(t *testing.T) {
 		if got := c.consumeReply(p); got != (i == 1) {
 			t.Fatalf("packet %d consumed = %v", i, got)
 		}
+	}
+}
+
+func TestConsoleConsumesEveryCellSizeReply(t *testing.T) {
+	const width, height = 7, 13
+	for _, tt := range []struct {
+		name, reply   string
+		width, height uint32
+	}{
+		{"valid", "\x1b[6;20;10t", 10, 20},
+		{"zero", "\x1b[6;0;0t", width, height},
+		{"zero width", "\x1b[6;20;0t", width, height},
+		{"zero height", "\x1b[6;0;10t", width, height},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			// The probe's reply already cleared cellPending. A later report
+			// answers another query the frame sent, never one from the child.
+			c := &console{cellWidth: width, cellHeight: height}
+			packets, err := input.New().Feed([]byte(tt.reply))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(packets) != 1 {
+				t.Fatalf("decoded %d packets from %q, want 1", len(packets), tt.reply)
+			}
+			if !c.consumeReply(packets[0]) {
+				t.Fatalf("cell-size reply %q was not consumed", tt.reply)
+			}
+			if c.cellWidth != tt.width || c.cellHeight != tt.height {
+				t.Fatalf("cell size after %q = %dx%d, want %dx%d", tt.reply, c.cellWidth, c.cellHeight, tt.width, tt.height)
+			}
+		})
+	}
+}
+
+func TestProbeConsumesZeroCellSizeReply(t *testing.T) {
+	const reply = "\x1b[6;0;0t"
+	// The native outer terminal answers CSI 16 t with zero cell pixels.
+	h := newCellHarness(t, 40, 12, 0, 0)
+	fd, device, _, err := inspectConsole(h.slave, h.slave)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := acquireConsole(h.slave, h.slave, fd, device)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := c.restore(); err != nil {
+			t.Error(err)
+		}
+	})
+	var (
+		mu       sync.Mutex
+		received []byte
+	)
+	events := newEventDispatcher(eventBit(OuterInput), sessionCancel(t), func(e Event) {
+		mu.Lock()
+		received = append(received, e.Bytes...)
+		mu.Unlock()
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	saved, err := c.probe(ctx, events)
+	events.close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !strings.Contains(string(received), reply) {
+		t.Fatalf("outer terminal did not answer the probe with %q: %q", reply, received)
+	}
+	// Run routes every saved packet to the child after entering the session.
+	for _, p := range saved {
+		if _, ok := p.Event.(uv.CellSizeEvent); ok {
+			t.Fatalf("probe saved cell-size reply %q for the child", p.Raw)
+		}
+	}
+	if c.cellWidth != 0 || c.cellHeight != 0 {
+		t.Fatalf("zero reply measured cells %dx%d", c.cellWidth, c.cellHeight)
 	}
 }
 

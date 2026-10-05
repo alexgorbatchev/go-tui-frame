@@ -342,8 +342,11 @@ func (s *session[T]) route(p input.Packet) error {
 	if err := s.updateLayout(); err != nil {
 		return err
 	}
+	width, height := s.console.cellWidth, s.console.cellHeight
 	if s.console.consumeReply(p) {
-		if _, ok := p.Event.(uv.CellSizeEvent); ok {
+		// A zero or repeated cell-size report leaves the measured cells, and so
+		// the child's geometry, as they are.
+		if s.console.cellWidth != width || s.console.cellHeight != height {
 			return s.applyGeometry(s.geometry)
 		}
 		return s.console.syncInput(s.inputState)

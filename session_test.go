@@ -88,18 +88,26 @@ func newHarness(t *testing.T) *terminalHarness {
 	return newSizedHarness(t, 40, 12)
 }
 
-// newSizedHarness models an outer terminal of the given grid, keeping the PTY
-// pixel size and the emulator answering size queries in agreement.
+// newSizedHarness models an outer terminal of the given grid whose cells
+// measure harnessCellWidth x harnessCellHeight pixels.
 func newSizedHarness(t *testing.T, cols, rows uint16) *terminalHarness {
+	t.Helper()
+	return newCellHarness(t, cols, rows, harnessCellWidth, harnessCellHeight)
+}
+
+// newCellHarness models an outer terminal of the given grid and cell pixels,
+// keeping the PTY pixel size and the emulator answering size queries in
+// agreement. Zero cell pixels model a terminal that cannot measure its cells.
+func newCellHarness(t *testing.T, cols, rows, cellWidth, cellHeight uint16) *terminalHarness {
 	t.Helper()
 	m, s, err := pty.Open()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := pty.Setsize(s, &pty.Winsize{Cols: cols, Rows: rows, X: cols * harnessCellWidth, Y: rows * harnessCellHeight}); err != nil {
+	if err := pty.Setsize(s, &pty.Winsize{Cols: cols, Rows: rows, X: cols * cellWidth, Y: rows * cellHeight}); err != nil {
 		t.Fatal(err)
 	}
-	em, err := emulator.New(emulator.Options{Size: emulator.Size{Cols: int(cols), Rows: int(rows), CellWidthPx: harnessCellWidth, CellHeightPx: harnessCellHeight}, GraphemeWidth: true})
+	em, err := emulator.New(emulator.Options{Size: emulator.Size{Cols: int(cols), Rows: int(rows), CellWidthPx: uint32(cellWidth), CellHeightPx: uint32(cellHeight)}, GraphemeWidth: true})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -235,11 +235,15 @@ func (c *console) consumeReply(p input.Packet) bool {
 		}
 		return true
 	case uv.CellSizeEvent:
-		if c.cellPending && ev.Width > 0 && ev.Height > 0 {
+		// The child's native terminal answers the child's queries, so every
+		// cell-size report from the outer terminal answers one the frame sent,
+		// including duplicates of an earlier answer. Only a positive size is a
+		// measurement; a terminal without one reports zeros.
+		if ev.Width > 0 && ev.Height > 0 {
 			c.cellPending = false
 			c.cellWidth, c.cellHeight = uint32(ev.Width), uint32(ev.Height)
-			return true
 		}
+		return true
 	case uv.ModifyOtherKeysEvent:
 		if !c.modifyPending || ev.Mode < 0 || ev.Mode > 2 {
 			return false
