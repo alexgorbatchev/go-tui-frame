@@ -362,20 +362,22 @@ func (s *session[T]) routeHeld() error {
 	return err
 }
 
-// releaseHeld routes held input after the child drained part of its queue.
-// Outer reads resume once nothing is held. A pending Escape then gets a fresh
-// deadline because bytes completing its sequence may have waited unread.
-func (s *session[T]) releaseHeld() error {
-	if !s.inputPaused() {
-		return nil
+// releaseHeld routes held input after the child drained part of its queue and
+// reports whether it routed any. Outer reads resume once nothing is held. A
+// pending Escape then gets a fresh deadline because bytes completing its
+// sequence may have waited unread.
+func (s *session[T]) releaseHeld() (bool, error) {
+	held := len(s.held)
+	if held == 0 {
+		return false, nil
 	}
 	if err := s.routeHeld(); err != nil {
-		return err
+		return true, err
 	}
 	if !s.inputPaused() && !s.escapeDeadline.IsZero() {
 		s.escapeDeadline = time.Now().Add(escapeTimeout)
 	}
-	return nil
+	return len(s.held) < held, nil
 }
 
 // inputPaused reports whether framed outer input waits for queue room, which
@@ -919,8 +921,16 @@ func (s *session[T]) processReady(buf []byte, fds []unix.PollFd, resizes <-chan 
 		if err := s.writeInput(); err != nil {
 			return disconnected, err
 		}
-		if err := s.releaseHeld(); err != nil {
+		routed, err := s.releaseHeld()
+		if err != nil {
 			return disconnected, err
+		}
+		// As after an outer read, mode changes from routed replies reach the
+		// terminal now rather than at the next repaint.
+		if routed {
+			if err := s.render(false); err != nil {
+				return disconnected, err
+			}
 		}
 	}
 	return disconnected, nil

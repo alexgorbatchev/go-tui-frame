@@ -158,6 +158,39 @@ func TestPausedOuterInputKeepsEscapeSequences(t *testing.T) {
 	}
 }
 
+// A terminal reply held behind a full child queue changes outer modes when it
+// is routed. Those mode bytes reach the terminal at once, as after an outer
+// read, instead of waiting for the next repaint.
+func TestReleasedReplyReachesTerminalWithoutRepaint(t *testing.T) {
+	var out bytes.Buffer
+	// The child reports focus. The terminal's DECRPM reply makes its mode 1004
+	// switchable, so routing the reply mirrors the child's mode there.
+	s, outer, child := newQueueSession(t, "\x1b[?1004h", &out)
+	s.console.pending = map[ansi.DECMode]bool{1004: true}
+	want := fillChild(t, s, inputQueueLimit-10)
+	// The 12-byte reply is wider than the 10 bytes of room left.
+	if _, err := outer.WriteString("\x1b[?1004;2$y"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	wakeAt(t, s, deadline)
+	buf := make([]byte, readBufferSize)
+	if paused, _ := step(t, s, buf); !paused || !s.console.pending[1004] {
+		t.Fatalf("paused=%v, reply pending=%v; want the reply held while the child reads nothing", paused, s.console.pending[1004])
+	}
+	written := out.Len()
+	collectChild(t, s, child, len(want))
+	for s.console.pending[1004] {
+		step(t, s, buf)
+		if time.Now().After(deadline) {
+			t.Fatalf("held reply was not routed; queued %d", s.queuedBytes)
+		}
+	}
+	if sent := out.Bytes()[written:]; !bytes.Contains(sent, []byte("\x1b[?1004h")) {
+		t.Fatalf("routing the held reply wrote %q to the terminal, want focus reporting enabled", sent)
+	}
+}
+
 // newQueueSession builds a session between a real outer terminal PTY, whose
 // master the test writes, and a child PTY whose slave nothing reads until the
 // test collects it. childModes sets the child's native input modes; out
