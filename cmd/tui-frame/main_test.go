@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -120,6 +121,127 @@ func TestExecuteCtrlQStopsItsRealChild(t *testing.T) {
 			t.Fatalf("CLI exited before its child started: %d", got)
 		case <-deadline.C:
 			t.Fatal("CLI did not start its child")
+		}
+	}
+}
+
+// TestCLIQuitChild runs as the framed child of
+// TestExecuteCtrlQReportsShutdownFailures. It outlives the frame's SIGTERM
+// until the outer terminal hangs up, then writes output the frame can no
+// longer paint. It waits for the frame's SIGKILL instead of returning: the
+// test result the binary would print next arrives after the failed paint ends
+// the session, and Darwin does not finish a session leader's exit while its
+// terminal holds unread output.
+func TestCLIQuitChild(t *testing.T) {
+	dir := os.Getenv("FRAME_CLI_QUIT_DIR")
+	if dir == "" {
+		return
+	}
+	terminated := make(chan os.Signal, 1)
+	signal.Notify(terminated, syscall.SIGTERM)
+	if err := os.WriteFile(filepath.Join(dir, "started"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	<-terminated
+	if err := os.WriteFile(filepath.Join(dir, "terminated"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	awaitFile(t, filepath.Join(dir, "hung-up"), nil)
+	if _, err := os.Stdout.WriteString("after-quit"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(sessionTimeout)
+}
+
+// After Ctrl+Q the frame keeps painting the child's output until the child
+// exits, then restores the terminal. Failures in that shutdown are session
+// errors, so the quit request must not hide them.
+func TestExecuteCtrlQReportsShutdownFailures(t *testing.T) {
+	dir := projectTempDir(t)
+	t.Setenv("FRAME_CLI_QUIT_DIR", dir)
+	t.Setenv("AGENT", "0")
+	master, diagnostic := cliTTY(t, "--", os.Args[0], "-test.run=^TestCLIQuitChild$")
+	var code int
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		code = execute()
+	}()
+	t.Cleanup(func() {
+		if err := master.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+			t.Errorf("close CLI terminal: %v", err)
+		}
+		select {
+		case <-exited:
+		case <-time.After(sessionTimeout):
+			t.Error("CLI did not stop after terminal closure")
+		}
+	})
+	awaitFile(t, filepath.Join(dir, "started"), exited)
+	if _, err := master.Write([]byte{0x11}); err != nil {
+		t.Fatal(err)
+	}
+	awaitFile(t, filepath.Join(dir, "terminated"), exited)
+	if err := master.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "hung-up"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-exited:
+	case <-time.After(sessionTimeout):
+		t.Fatal("Ctrl+Q did not finish the CLI")
+	}
+	data, err := os.ReadFile(diagnostic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := string(data)
+	if code != 1 {
+		t.Fatalf("execute returned %d, want 1: %q", code, message)
+	}
+	var reports []string
+	for _, line := range strings.Split(message, "\n") {
+		if report, ok := strings.CutPrefix(line, "[ERROR] "); ok {
+			reports = append(reports, report)
+		}
+	}
+	if len(reports) != 1 || !strings.HasPrefix(reports[0], "run child frame: ") {
+		t.Fatalf("stderr reports %q, want one run child frame error: %q", reports, message)
+	}
+	for _, want := range []string{"render outer terminal: ", "restore terminal modes: "} {
+		if !strings.Contains(message, want) {
+			t.Errorf("stderr %q does not report %q", message, want)
+		}
+	}
+	if strings.Contains(message, errDemoQuit.Error()) {
+		t.Errorf("stderr %q reports the quit request as a failure", message)
+	}
+}
+
+// awaitFile waits until path exists, failing if the CLI exits first. A nil
+// exited channel waits without watching a CLI.
+func awaitFile(t *testing.T, path string, exited <-chan struct{}) {
+	t.Helper()
+	deadline := time.NewTimer(sessionTimeout)
+	defer deadline.Stop()
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		_, err := os.Stat(path)
+		if err == nil {
+			return
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		select {
+		case <-tick.C:
+		case <-exited:
+			t.Fatalf("CLI exited before %s appeared", filepath.Base(path))
+		case <-deadline.C:
+			t.Fatalf("%s did not appear", filepath.Base(path))
 		}
 	}
 }

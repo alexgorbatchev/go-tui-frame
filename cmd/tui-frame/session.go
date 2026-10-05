@@ -31,11 +31,13 @@ func runDemo(ctx context.Context, child *exec.Cmd, showcase, inheritTerminal boo
 		defer stop()
 	}
 	result, err := demo.frame.Run(ctx)
-	if errors.Is(err, errDemoQuit) {
-		return errors.Join(result.DrainError, result.CleanupError)
+	if failure := sessionFailure(err); failure != nil {
+		return failure
 	}
-	if err != nil {
-		return fmt.Errorf("run child frame: %w", err)
+	if errors.Is(err, errDemoQuit) {
+		// The frame terminated the child on request, so its status records that
+		// termination rather than a result of its own.
+		return nil
 	}
 	if result.ProcessState == nil {
 		return errors.New("child frame returned without a process exit state")
@@ -52,6 +54,36 @@ func runDemo(ctx context.Context, child *exec.Cmd, showcase, inheritTerminal boo
 		return &childExit{code: code}
 	}
 	return nil
+}
+
+// sessionFailure reports err, the error Frame.Run returned, without the quit
+// request, or nil when the quit was its only error. Frame.Run joins the
+// context's cause with the later signal, render, deadline, read, drain, and
+// cleanup errors, so a quit fails when any of those fails.
+func sessionFailure(err error) error {
+	if rest := withoutQuit(err); rest != nil {
+		return fmt.Errorf("run child frame: %w", rest)
+	}
+	return nil
+}
+
+// withoutQuit removes the errDemoQuit leaves from the joined errors in err.
+// The quit enters that tree only as the context's cause, a direct member of a
+// join, so wrapping nodes are not searched. Branches without the quit stay
+// intact, keeping their messages and wrapped errors.
+func withoutQuit(err error) error {
+	if err == errDemoQuit {
+		return nil
+	}
+	joined, ok := err.(interface{ Unwrap() []error })
+	if !ok || !errors.Is(err, errDemoQuit) {
+		return err
+	}
+	var rest []error
+	for _, member := range joined.Unwrap() {
+		rest = append(rest, withoutQuit(member))
+	}
+	return errors.Join(rest...)
 }
 
 type demoSession struct {

@@ -9,7 +9,7 @@ description: >-
 author: alexgorbatchev
 metadata:
   created_on: 2026-10-01 13:23
-  last_modified: 2026-10-05 16:38
+  last_modified: 2026-10-05 22:38
   status: current
 ---
 
@@ -172,7 +172,10 @@ trailing topic does not resolve to a subcommand.
 A child exiting normally returns its own exit code;
 a signal termination maps to `128 + signal number`. The status alone reports
 the child's result; the wrapper writes no diagnostic for it. Ctrl+Q returns 0
-when draining and terminal restoration succeed. SIGHUP, SIGINT, or SIGTERM sent
+when no session operation fails. A failure while Ctrl+Q ends the session, such
+as painting the child's final output, signalling its process groups, draining,
+or restoring the terminal, is reported on stderr as `run child frame: <error>`
+and returns a nonzero status. SIGHUP, SIGINT, or SIGTERM sent
 to the wrapper cancels the session and returns `128 + signal number`: 129 for
 SIGHUP, 130 for SIGINT, and 143 for SIGTERM. Stderr reports
 `run child frame: <name> signal received`, where `<name>` is `hangup`,

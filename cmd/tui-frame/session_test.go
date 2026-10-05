@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"image/color"
 	"io"
 	"os"
@@ -418,6 +419,69 @@ func TestDemoQuitPreservesCauseAndReapsChild(t *testing.T) {
 	}
 	if got.result.DrainError != nil || got.result.CleanupError != nil {
 		t.Fatalf("quit failed cleanup: %+v", got.result)
+	}
+}
+
+func TestSessionFailureRemovesOnlyTheQuitRequest(t *testing.T) {
+	// These mirror the library's errors: the loop joins the context's cause with
+	// the SIGTERM and SIGCONT deliveries, then a render, deadline, or read
+	// failure, and Run joins the cleanup outcome on top.
+	signalErr := fmt.Errorf("signal child process group: %w", syscall.EPERM)
+	renderErr := fmt.Errorf("render outer terminal: %w", syscall.EIO)
+	// Run builds CleanupError with errors.Join and joins that same value into
+	// its error, so the filter must keep the node itself.
+	cleanupErr := errors.Join(nil, fmt.Errorf("restore terminal modes: %w", syscall.EIO))
+	interrupted := &signalCause{signal: syscall.SIGINT}
+	tests := []struct {
+		name string
+		err  error
+		// want is the reported message; empty means the run succeeded.
+		want string
+		kept []error
+	}{
+		{"no error", nil, "", nil},
+		{"quit only", errors.Join(errors.Join(errors.Join(errDemoQuit, nil, nil), nil), nil), "", nil},
+		{
+			"quit with a final render failure",
+			errors.Join(errors.Join(errors.Join(errDemoQuit, nil, nil), renderErr), nil),
+			"run child frame: " + renderErr.Error(),
+			[]error{renderErr, syscall.EIO},
+		},
+		{
+			"quit with later failures",
+			errors.Join(errors.Join(errors.Join(errDemoQuit, signalErr), renderErr), cleanupErr),
+			"run child frame: " + signalErr.Error() + "\n" + renderErr.Error() + "\n" + cleanupErr.Error(),
+			[]error{signalErr, renderErr, cleanupErr, syscall.EPERM, syscall.EIO},
+		},
+		{
+			"signal cancellation",
+			errors.Join(errors.Join(errors.Join(interrupted, nil, nil), nil), cleanupErr),
+			"run child frame: interrupt signal received\n" + cleanupErr.Error(),
+			[]error{interrupted, cleanupErr},
+		},
+		{"context cancellation", context.Canceled, "run child frame: context canceled", []error{context.Canceled}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sessionFailure(tt.err)
+			if tt.want == "" {
+				if got != nil {
+					t.Fatalf("sessionFailure = %q, want nil", got)
+				}
+				return
+			}
+			if got == nil || got.Error() != tt.want {
+				t.Fatalf("sessionFailure = %v, want %q", got, tt.want)
+			}
+			if errors.Is(got, errDemoQuit) {
+				t.Fatalf("sessionFailure kept the quit request: %q", got)
+			}
+			for _, kept := range tt.kept {
+				if !errors.Is(got, kept) {
+					t.Errorf("sessionFailure dropped %v: %q", kept, got)
+				}
+			}
+		})
 	}
 }
 
