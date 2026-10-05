@@ -9,7 +9,7 @@ description: >-
 author: alexgorbatchev
 metadata:
   created_on: 2026-10-01 13:23
-  last_modified: 2026-10-05 16:20
+  last_modified: 2026-10-05 16:38
   status: current
 ---
 
@@ -57,12 +57,14 @@ Child mouse coordinates follow the child viewport geometry. The child can
 change terminal modes and responds to terminal resizing through its PTY.
 Ctrl+number controls require a terminal that reports those keys distinctly.
 The capture layer requests Kitty key disambiguation when the terminal reports
-support, or modifyOtherKeys level 2 when its probe confirms support. Legacy
-terminals can collapse Ctrl+1 into `1`, Ctrl+2 into NUL, and Ctrl+3 into Escape;
-those ambiguous bytes retain their child meanings and do not trigger controls.
-The viewport paints terminal cells; it does not render inline graphics. Native
-Kitty graphics storage is disabled, so its capability query does not advertise
-successful image support.
+support, or modifyOtherKeys level 2 when its probe confirms support. When the
+child's own Kitty flags lack disambiguation, it also requests Kitty alternate-key
+reports, so converted Alt+Shift keys keep their shifted character: Alt+Shift+comma
+reaches a legacy child as `ESC <` (M-<). Legacy terminals can collapse Ctrl+1
+into `1`, Ctrl+2 into NUL, and Ctrl+3 into Escape; those ambiguous bytes retain
+their child meanings and do not trigger controls. The viewport paints terminal
+cells; it does not render inline graphics. Native Kitty graphics storage is
+disabled, so its capability query does not advertise successful image support.
 
 ## Play the frame showcase
 
