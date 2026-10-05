@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/charmbracelet/colorprofile"
 	uv "github.com/charmbracelet/ultraviolet"
 	ghostty "go.mitchellh.com/libghostty"
 )
@@ -45,6 +46,18 @@ type Options struct {
 	ScrollbackMaxBytes, ScrollbackMaxLines *uint
 	ClipboardRead                          func(ghostty.ClipboardRead) ghostty.ClipboardReadReply
 	ClipboardWrite                         func(ghostty.ClipboardWrite) ghostty.ClipboardWriteReply
+	// OuterColorProfile is the profile the outer renderer encodes colors
+	// with. Where that renderer would downsample a host-reported palette
+	// entry the child has not redefined, the entry stays a palette index, so
+	// the outer terminal paints its own theme: every entry on ANSI256, entries
+	// 0-15 on ANSI. Other entries and profiles keep the resolved RGB. The
+	// renderer compares colors only by RGBA (charmbracelet/ultraviolet#205):
+	// on ANSI256 an index and a color with the same xterm value can keep the
+	// earlier color when adjacent or when one replaces the other; on ANSI only
+	// entries 7 and 8 and a color of their xterm value can, when either
+	// replaces the other. Both cases include an OSC 4 redefinition to the xterm
+	// value and an OSC 104 reset from it.
+	OuterColorProfile colorprofile.Profile
 }
 
 // Terminal owns native terminal, render state and reusable iterators.
@@ -64,6 +77,9 @@ type Terminal struct {
 	callbackErr                    error
 	scheme                         *ghostty.ColorScheme
 	hostForeground, hostBackground *ghostty.ColorRGB
+	hostPalette                    ghostty.Palette
+	hostPaletteReported            [ghostty.PaletteSize]bool
+	indexedEntries                 int
 	text                           []byte
 	layout                         cellLayout
 	styles                         map[uint16]capturedStyle
@@ -91,7 +107,10 @@ func New(opts Options) (*Terminal, error) {
 	if err != nil {
 		return nil, err
 	}
-	t := &Terminal{size: opts.Size, layout: layout, defaultStyle: ghostty.DefaultStyle()}
+	t := &Terminal{
+		size: opts.Size, layout: layout, defaultStyle: ghostty.DefaultStyle(),
+		indexedEntries: indexedPaletteEntries(opts.OuterColorProfile),
+	}
 	if err := t.newRenderState(); err != nil {
 		t.Close()
 		return nil, err

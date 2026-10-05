@@ -7,7 +7,9 @@ import (
 	"slices"
 	"unicode/utf8"
 
+	"github.com/charmbracelet/colorprofile"
 	uv "github.com/charmbracelet/ultraviolet"
+	"github.com/charmbracelet/x/ansi"
 	ghostty "go.mitchellh.com/libghostty"
 )
 
@@ -282,7 +284,7 @@ func (t *Terminal) copyCell(i int, visual *visualState, data cellData) (uv.Cell,
 	// the style. Resolve it independently of the row's shared style cache.
 	switch data.tag {
 	case ghostty.CellContentBgColorPalette:
-		cell.Style.Bg = rgbColor(visual.colors.Palette[data.palette])
+		cell.Style.Bg = t.paletteColor(&visual.colors.Palette, data.palette)
 	case ghostty.CellContentBgColorRGB:
 		cell.Style.Bg = rgbColor(data.rgb)
 	}
@@ -337,8 +339,8 @@ func (t *Terminal) cellStyle(style *ghostty.Style, colors ghostty.RenderStateCol
 
 func (t *Terminal) uvStyle(style *ghostty.Style, colors ghostty.RenderStateColors) uv.Style {
 	result := uv.Style{
-		Fg: styleColor(style.FgColor(), colors.Palette), Bg: styleColor(style.BgColor(), colors.Palette),
-		UnderlineColor: styleColor(style.UnderlineColor(), colors.Palette),
+		Fg: t.styleColor(style.FgColor(), &colors.Palette), Bg: t.styleColor(style.BgColor(), &colors.Palette),
+		UnderlineColor: t.styleColor(style.UnderlineColor(), &colors.Palette),
 	}
 	// Keep host-matching defaults as default rendition to preserve opacity
 	// and physical-terminal default-color policies. OSC overrides and isolated
@@ -377,17 +379,49 @@ func (t *Terminal) uvStyle(style *ghostty.Style, colors ghostty.RenderStateColor
 	return result
 }
 
-func styleColor(value ghostty.StyleColor, palette ghostty.Palette) color.Color {
-	var rgb ghostty.ColorRGB
+func (t *Terminal) styleColor(value ghostty.StyleColor, palette *ghostty.Palette) color.Color {
 	switch value.Tag {
 	case ghostty.StyleColorRGB:
-		rgb = value.RGB
+		return rgbColor(value.RGB)
 	case ghostty.StyleColorPalette:
-		rgb = palette[value.Palette]
+		return t.paletteColor(palette, value.Palette)
 	default:
 		return nil
 	}
-	return rgbColor(rgb)
+}
+
+// paletteColor keeps an entry the host reported, and the child has not
+// changed, as a palette reference where the outer renderer would otherwise
+// downsample it. The outer terminal then paints its own theme color instead of
+// the nearest 256- or 16-color approximation. Child overrides and unreported
+// entries stay explicit, so rendering agrees with the child's palette queries.
+func (t *Terminal) paletteColor(palette *ghostty.Palette, i uint8) color.Color {
+	if int(i) >= t.indexedEntries || !t.hostPaletteReported[i] || palette[i] != t.hostPalette[i] {
+		return rgbColor(palette[i])
+	}
+	if i <= uint8(ansi.BrightWhite) {
+		return ansi.BasicColor(i)
+	}
+	return ansi.IndexedColor(i)
+}
+
+// indexedPaletteEntries is how many leading palette entries the outer
+// renderer passes through as indexes without losing the host's colors.
+// ANSI256 passes every index. ANSI passes the 16 basic colors and maps higher
+// indexes through a fixed table that ignores the host's RGB, which the RGB
+// approximation preserves. Colorless profiles gain nothing, and a true-color
+// renderer keeps the resolved RGB: Ultraviolet compares colors only by RGBA
+// (charmbracelet/ultraviolet#205), so an index beside or replacing a color
+// with its xterm default value would keep the earlier color.
+func indexedPaletteEntries(p colorprofile.Profile) int {
+	switch p {
+	case colorprofile.ANSI256:
+		return ghostty.PaletteSize
+	case colorprofile.ANSI:
+		return int(ansi.BrightWhite) + 1
+	default:
+		return 0
+	}
 }
 
 func rgbColor(rgb ghostty.ColorRGB) color.RGBA {

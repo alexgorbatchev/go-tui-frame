@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/term"
 	"github.com/creack/pty"
+	ghostty "go.mitchellh.com/libghostty"
 	"golang.org/x/sys/unix"
 )
 
@@ -26,6 +27,24 @@ func newRepaintSession(t testing.TB, mode ansi.ModeSetting, draw func(DrawContex
 
 func newRepaintSessionSize(t testing.TB, size Size, mode ansi.ModeSetting, draw func(DrawContext[string])) (*session[string], *os.File, *os.File) {
 	t.Helper()
+	return newConfiguredRepaintSession(t, repaintConfig{size: size, mode: mode}, draw)
+}
+
+// repaintConfig describes the outer terminal a repaint session paints.
+// host holds the preferences the startup probe reports; nil models
+// InheritTerminal(false). A known colors profile replaces the one detected
+// from the capture file, before the child emulator is created, as the
+// session creates it after the console's renderer.
+type repaintConfig struct {
+	size   Size
+	mode   ansi.ModeSetting
+	host   *emulator.Profile
+	colors colorprofile.Profile
+}
+
+func newConfiguredRepaintSession(t testing.TB, cfg repaintConfig, draw func(DrawContext[string])) (*session[string], *os.File, *os.File) {
+	t.Helper()
+	size := cfg.size
 	if err := os.MkdirAll(".tmp", 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -64,13 +83,17 @@ func newRepaintSessionSize(t testing.TB, size Size, mode ansi.ModeSetting, draw 
 	if err != nil {
 		t.Fatal(err)
 	}
-	em, err := emulator.New(emulator.Options{Size: emulator.Size{Cols: g.child.Dx(), Rows: g.child.Dy()}})
+	c := &console{entry: map[ansi.DECMode]ansi.ModeSetting{2026: cfg.mode}, applied: make(map[ansi.DECMode]bool)}
+	c.attachRenderer(out, []string{"TERM=xterm-256color"})
+	if cfg.colors != colorprofile.Unknown {
+		c.setColorProfile(cfg.colors)
+	}
+	c.renderer.EnterAltScreen()
+	em, err := emulator.New(emulator.Options{Size: emulator.Size{Cols: g.child.Dx(), Rows: g.child.Dy()}, Profile: cfg.host, OuterColorProfile: c.colorProfile})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(em.Close)
-	c := &console{renderer: uv.NewTerminalRenderer(out, []string{"TERM=xterm-256color"}), entry: map[ansi.DECMode]ansi.ModeSetting{2026: mode}, applied: make(map[ansi.DECMode]bool)}
-	c.renderer.EnterAltScreen()
 	s := &session[string]{frame: f, console: c, terminal: em, geometry: g, screen: uv.NewScreenBuffer(size.Cols, size.Rows), fd: masterFD, snapshot: Snapshot{Child: ChildSnapshot{PID: os.Getpid()}}}
 	if err := s.refresh(true); err != nil {
 		t.Fatal(err)
@@ -102,10 +125,12 @@ func readRepaintChunk(t testing.TB, s *session[string], slave *os.File, chunk st
 }
 
 func TestErasedBackgroundReachesOuterTerminal(t *testing.T) {
-	s, out, slave := newRepaintSession(t, ansi.ModeReset, func(ctx DrawContext[string]) {
+	draw := func(ctx DrawContext[string]) {
 		ctx.View.SetCell(0, 0, &uv.Cell{Content: "H", Width: 1})
-	})
-	s.console.renderer.SetColorProfile(colorprofile.TrueColor)
+	}
+	// The capture file cannot advertise the outer terminal's color support.
+	cfg := repaintConfig{size: Size{Cols: 20, Rows: 6}, mode: ansi.ModeReset, colors: colorprofile.TrueColor}
+	s, out, slave := newConfiguredRepaintSession(t, cfg, draw)
 	outer, err := emulator.New(emulator.Options{Size: emulator.Size{Cols: 20, Rows: 6}})
 	if err != nil {
 		t.Fatal(err)
@@ -147,9 +172,9 @@ func TestErasedBackgroundReachesOuterTerminal(t *testing.T) {
 }
 
 func TestOSCForegroundRepaintsCleanRowsAndResets(t *testing.T) {
-	s, out, slave := newRepaintSession(t, ansi.ModeReset, nil)
 	// The capture file cannot advertise the outer terminal's color support.
-	s.console.renderer.SetColorProfile(colorprofile.TrueColor)
+	cfg := repaintConfig{size: Size{Cols: 20, Rows: 6}, mode: ansi.ModeReset, colors: colorprofile.TrueColor}
+	s, out, slave := newConfiguredRepaintSession(t, cfg, nil)
 	outer, err := emulator.New(emulator.Options{Size: emulator.Size{Cols: 20, Rows: 6}})
 	if err != nil {
 		t.Fatal(err)
@@ -194,6 +219,143 @@ func TestOSCForegroundRepaintsCleanRowsAndResets(t *testing.T) {
 			}
 		}
 		before = len(output)
+	}
+}
+
+// themedPalette stands in for host-reported entries: Solarized base02 and red
+// for 0 and 1, a customized 200, all differing from xterm's defaults, and
+// xterm's own value for 16.
+var themedPalette = map[uint8]ghostty.ColorRGB{0: {R: 0x07, G: 0x36, B: 0x42}, 1: {R: 0xdc, G: 0x32, B: 0x2f}, 16: {}, 200: {R: 0x65, G: 0x43, B: 0x21}}
+
+// outerPainting replays a repaint session's frames on a native outer terminal.
+type outerPainting struct {
+	s          *session[string]
+	out, slave *os.File
+	outer      *emulator.Terminal
+	painted    int
+}
+
+func newOuterPainting(t *testing.T, colors colorprofile.Profile) *outerPainting {
+	t.Helper()
+	cfg := repaintConfig{size: Size{Cols: 20, Rows: 6}, mode: ansi.ModeReset, host: &emulator.Profile{Palette: themedPalette}, colors: colors}
+	s, out, slave := newConfiguredRepaintSession(t, cfg, nil)
+	outer, err := emulator.New(emulator.Options{Size: emulator.Size{Cols: 20, Rows: 6}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(outer.Close)
+	// Paint the session's initial frame so each step sees only its own frame.
+	initial := repaintOutput(t, out)
+	if _, err := outer.Write(initial); err != nil {
+		t.Fatal(err)
+	}
+	return &outerPainting{s: s, out: out, slave: slave, outer: outer, painted: len(initial)}
+}
+
+// paint repaints after child output and returns the outer terminal's
+// foreground at cell x with the frame that produced it.
+func (p *outerPainting) paint(t *testing.T, sequence string, x int) (ghostty.StyleColor, []byte) {
+	t.Helper()
+	readRepaintChunk(t, p.s, p.slave, sequence)
+	if err := p.s.render(false); err != nil {
+		t.Fatal(err)
+	}
+	output := repaintOutput(t, p.out)
+	frame := output[p.painted:]
+	p.painted = len(output)
+	if _, err := p.outer.Write(frame); err != nil {
+		t.Fatal(err)
+	}
+	painted, err := p.outer.State()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return painted.NativeCells[x].Style.FgColor(), frame
+}
+
+func paletteForeground(i uint8) ghostty.StyleColor {
+	return ghostty.StyleColor{Tag: ghostty.StyleColorPalette, Palette: i}
+}
+
+func rgbForeground(r, g, b uint8) ghostty.StyleColor {
+	return ghostty.StyleColor{Tag: ghostty.StyleColorRGB, RGB: ghostty.ColorRGB{R: r, G: g, B: b}}
+}
+
+// paletteStep is child output and the outer foreground expected at cell x.
+type paletteStep struct {
+	sequence string
+	x        int
+	want     ghostty.StyleColor
+}
+
+func TestReportedPaletteOnDownsamplingTerminals(t *testing.T) {
+	override := color.RGBA{R: 0x12, G: 0x34, B: 0x56, A: 255}
+	custom := color.RGBA{R: 0x65, G: 0x43, B: 0x21, A: 255}
+	for _, tt := range []struct {
+		colors colorprofile.Profile
+		steps  []paletteStep
+	}{
+		{colorprofile.ANSI256, []paletteStep{
+			{"\x1b[31mX", 0, paletteForeground(1)},
+			// A child override is explicit RGB, downsampled like any other color.
+			{"\x1b]4;1;#123456\a", 0, paletteForeground(uint8(ansi.Convert256(override)))},
+			{"\x1b]104;1\a", 0, paletteForeground(1)},
+		}},
+		{colorprofile.ANSI, []paletteStep{
+			{"\x1b[31mX", 0, paletteForeground(1)},
+			// Entry 200 keeps the host's RGB, which the renderer approximates
+			// with its nearest 16-color entry; a fixed index table would ignore
+			// the host's customization.
+			{"\x1b[38;5;200mY", 1, paletteForeground(uint8(ansi.Convert16(custom)))},
+		}},
+	} {
+		t.Run(tt.colors.String(), func(t *testing.T) {
+			p := newOuterPainting(t, tt.colors)
+			for _, step := range tt.steps {
+				got, frame := p.paint(t, step.sequence, step.x)
+				if got != step.want {
+					t.Fatalf("outer foreground after %q = %+v; want %+v (frame %q)", step.sequence, got, step.want, frame)
+				}
+				// Without an extended foreground, palette entry 1 can only have
+				// arrived as the basic SGR 31 form.
+				if step.want == paletteForeground(1) && bytes.Contains(frame, []byte("38;")) {
+					t.Fatalf("palette entry 1 after %q used an extended foreground: %q", step.sequence, frame)
+				}
+			}
+		})
+	}
+}
+
+func TestTrueColorTerminalReceivesResolvedPaletteRGB(t *testing.T) {
+	// The collision cases pair a palette entry with a color whose xterm
+	// default RGBA is the same; a palette index there would keep the earlier
+	// color, because the renderer compares colors only by RGBA.
+	for _, tt := range []struct {
+		name  string
+		steps []string
+		x     int
+		want  ghostty.StyleColor
+	}{
+		{"reported entry", []string{"\x1b[31mX"}, 0, rgbForeground(0xdc, 0x32, 0x2f)},
+		{"child override", []string{"\x1b[31mX", "\x1b]4;1;#123456\a"}, 0, rgbForeground(0x12, 0x34, 0x56)},
+		{"child reset", []string{"\x1b[31mX", "\x1b]4;1;#123456\a", "\x1b]104;1\a"}, 0, rgbForeground(0xdc, 0x32, 0x2f)},
+		{"SGR 30 beside RGB black", []string{"\x1b[38;2;0;0;0mA\x1b[30mB"}, 1, rgbForeground(0x07, 0x36, 0x42)},
+		{"RGB black replacing SGR 30", []string{"\x1b[30mX", "\x1b[H\x1b[38;2;0;0;0mX"}, 0, rgbForeground(0, 0, 0)},
+		{"entry 1 redefined to its xterm value", []string{"\x1b[31mX", "\x1b]4;1;#800000\a"}, 0, rgbForeground(0x80, 0, 0)},
+		{"38;5;16 beside SGR 30", []string{"\x1b[30mA\x1b[38;5;16mB"}, 1, rgbForeground(0, 0, 0)},
+		{"38;5;16 replacing SGR 30", []string{"\x1b[30mX", "\x1b[H\x1b[38;5;16mX"}, 0, rgbForeground(0, 0, 0)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newOuterPainting(t, colorprofile.TrueColor)
+			var got ghostty.StyleColor
+			var frame []byte
+			for _, sequence := range tt.steps {
+				got, frame = p.paint(t, sequence, tt.x)
+			}
+			if got != tt.want {
+				t.Fatalf("outer foreground at %d = %+v; want %+v (last frame %q)", tt.x, got, tt.want, frame)
+			}
+		})
 	}
 }
 

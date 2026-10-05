@@ -75,6 +75,7 @@ func (t *Terminal) initializeProfile(p *Profile) error {
 	palette := colors.Palette
 	for i, rgb := range p.Palette {
 		palette[i] = rgb
+		t.hostPalette[i], t.hostPaletteReported[i] = rgb, true
 	}
 	if err := t.native.SetColorPalette(&palette); err != nil {
 		return fmt.Errorf("set default palette: %w", err)

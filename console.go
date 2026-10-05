@@ -10,6 +10,7 @@ import (
 
 	"github.com/alexgorbatchev/go-tui-frame/internal/emulator"
 	"github.com/alexgorbatchev/go-tui-frame/internal/input"
+	"github.com/charmbracelet/colorprofile"
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/term"
@@ -47,6 +48,7 @@ type console struct {
 	cellPending                                          bool
 	cellWidth, cellHeight                                uint32
 	renderer                                             *uv.TerminalRenderer
+	colorProfile                                         colorprofile.Profile
 	framer                                               *input.Framer
 }
 
@@ -87,10 +89,24 @@ func acquireConsole(in, out *os.File, fd int, device uint64) (*console, error) {
 		c.releaseOwner()
 		return nil, fmt.Errorf("acquire raw terminal: %w", err)
 	}
-	c.renderer = uv.NewTerminalRenderer(out, os.Environ())
+	c.attachRenderer(out, os.Environ())
 	c.renderer.SetScrollOptim(false)
 	c.renderer.SetTabStops(-1)
 	return c, nil
+}
+
+// attachRenderer creates the outer renderer and records its color profile.
+// The renderer detects the profile from the same output and environment but
+// exposes no getter, so the detected value is set explicitly: the child
+// encodes palette colors for exactly the profile the renderer downsamples to.
+func (c *console) attachRenderer(out *os.File, env []string) {
+	c.renderer = uv.NewTerminalRenderer(out, env)
+	c.setColorProfile(colorprofile.Detect(out, env))
+}
+
+func (c *console) setColorProfile(p colorprofile.Profile) {
+	c.colorProfile = p
+	c.renderer.SetColorProfile(p)
 }
 
 func (c *console) releaseOwner() {

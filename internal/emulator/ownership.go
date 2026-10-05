@@ -8,7 +8,11 @@ import (
 )
 
 // CloneState duplicates mutable storage for another observer. UV colors are
-// immutable RGBA values and native Cell/Style/Colors are copied value snapshots.
+// immutable values: explicit colors are RGBA, and unchanged host-reported
+// palette entries that Options.OuterColorProfile keeps as indexes are
+// ansi.BasicColor or ansi.IndexedColor values whose RGB is Colors.Palette at
+// that index, not the xterm default their RGBA method reports. Native
+// Cell/Style/Colors are copied value snapshots.
 func CloneState(state State) State {
 	state.Cells = slices.Clone(state.Cells)
 	state.NativeCells = slices.Clone(state.NativeCells)

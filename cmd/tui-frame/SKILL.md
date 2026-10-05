@@ -9,7 +9,7 @@ description: >-
 author: alexgorbatchev
 metadata:
   created_on: 2026-10-01 13:23
-  last_modified: 2026-10-02 14:41
+  last_modified: 2026-10-05 12:42
   status: current
 ---
 
@@ -90,7 +90,18 @@ supported preference modes, keyboard settings, and light/dark color scheme seed
 the child emulator. The child PTY receives the outer terminal's original line
 discipline, including control characters, echo, and flow control. Missing or
 invalid probe replies retain native defaults after a 300 ms deadline.
-Default-colored cells use the outer terminal's default rendition.
+Default-colored cells use the outer terminal's default rendition. On a
+256-color outer terminal, cells using an inherited palette entry the child has
+not redefined use the outer terminal's palette index; a 16-color terminal does
+this for entries 0-15. True-color terminals receive resolved RGB colors, and
+colorless terminals, such as `NO_COLOR` or `TERM=dumb`, receive no color. On a
+256-color terminal, two colors with the same xterm RGB value, such as SGR 30
+and `38;2;0;0;0`, can keep the earlier color when adjacent or when one replaces
+the other, including an OSC 4 redefinition to the xterm value or an OSC 104
+reset from it. On a 16-color terminal this affects only entries 7 and 8 and a
+color of their xterm values `#c0c0c0` and `#808080`, when either replaces the
+other, including an OSC 4 redefinition to that value or an OSC 104 reset from
+it (`charmbracelet/ultraviolet#205`).
 
 Use `tui-frame --no-terminal-inheritance -- <command> [args...]` to select
 emulator and PTY defaults. Capability and restoration probes still run. Fonts,

@@ -8,10 +8,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/term"
 	ghostty "go.mitchellh.com/libghostty"
 	"golang.org/x/sys/unix"
@@ -81,6 +83,64 @@ func TestSessionInheritsOuterTerminalDefaults(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
+	}
+}
+
+func TestSessionPaletteEncodingFollowsOuterColorProfile(t *testing.T) {
+	red := ghostty.ColorRGB{R: 0xdc, G: 0x32, B: 0x2f}
+	for _, tt := range []struct {
+		name, colorTerm string
+		want            ghostty.StyleColor
+	}{
+		{"256 colors", "", ghostty.StyleColor{Tag: ghostty.StyleColorPalette, Palette: 1}},
+		{"true color", "truecolor", ghostty.StyleColor{Tag: ghostty.StyleColorRGB, RGB: red}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			// The renderer detects its profile from the process environment.
+			// This 256color TERM has no terminfo entry and names no terminal
+			// that detection treats as true color, so only these variables
+			// decide between ANSI256 and TrueColor.
+			for key, value := range map[string]string{
+				"TERM": "frame-256color", "COLORTERM": tt.colorTerm, "TMUX": "", "NO_COLOR": "",
+				"CLICOLOR_FORCE": "", "TTY_FORCE": "", "WT_SESSION": "", "GOOGLE_CLOUD_SHELL": "",
+			} {
+				t.Setenv(key, value)
+			}
+			h := newHarness(t)
+			h.mu.Lock()
+			_, err := h.em.Write([]byte(fmt.Sprintf("\x1b]4;1;#%02x%02x%02x\x07", red.R, red.G, red.B)))
+			h.mu.Unlock()
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			done := make(chan error, 1)
+			cmd := exec.Command("sh", "-c", `printf '\033[31mpalette\033[0m'; read line`)
+			go func() { _, err := New(cmd, struct{}{}).Terminal(h.slave, h.slave).Run(ctx); done <- err }()
+			awaitText(t, h, "palette")
+			h.mu.Lock()
+			outer, err := h.em.State()
+			h.mu.Unlock()
+			if err != nil {
+				t.Fatal(err)
+			}
+			x := slices.IndexFunc(outer.Cells, func(cell uv.Cell) bool { return cell.Content == "p" })
+			if got := outer.NativeCells[x].Style.FgColor(); got != tt.want {
+				t.Errorf("outer foreground for child SGR 31 = %+v; want %+v", got, tt.want)
+			}
+			if _, err := unix.Write(h.fd, []byte("\r")); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+		})
 	}
 }
 

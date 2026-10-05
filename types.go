@@ -83,6 +83,12 @@ type PTYSnapshot struct {
 }
 
 // TerminalSnapshot owns its cell storage rather than borrowing emulator cells.
+// On a 256-color outer terminal, a cell color that uses an inherited palette
+// entry the child has not redefined is an ansi.BasicColor (entries 0-15) or
+// ansi.IndexedColor index; a 16-color outer terminal does this for entries
+// 0-15 only. Its RGB is Native.Colors.Palette at that index; the index's RGBA
+// method reports the xterm default instead. Other cell colors, including every
+// color on true-color and colorless outer terminals, are resolved RGB values.
 type TerminalSnapshot struct {
 	Title     string
 	Directory string
