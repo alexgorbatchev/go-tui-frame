@@ -44,7 +44,7 @@ func TestWakePipeDeliveryCoalescingAndFailure(t *testing.T) {
 				s.wakeWriteFD = -1
 			}
 			s.wakeLoop()
-			fds := []unix.PollFd{{Fd: int32(s.wakeReadFD), Events: unix.POLLIN}, {Fd: -1}, {Fd: -1}}
+			fds := []unix.PollFd{{Fd: int32(s.wakeReadFD), Events: unix.POLLIN}, {Fd: -1}, {Fd: -1}, {Fd: -1}}
 			if n, err := unix.Poll(fds, 100); err != nil || n == 0 {
 				t.Fatalf("wake did not make Poll ready: %d, %v", n, err)
 			}

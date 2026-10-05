@@ -35,20 +35,12 @@ func TestOuterInputWaitsForBusyChild(t *testing.T) {
 		{name: "Kitty-encoded keys", childModes: "\x1b[>20u", input: bytes.Repeat([]byte("Z"), keys), want: bytes.Repeat([]byte("\x1b[122:90;2;90u"), keys)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			s, outer, child := newQueueSession(t, tt.childModes)
+			s, outer, child := newQueueSession(t, tt.childModes, io.Discard)
 			_, written := feedOuter(t, outer, tt.input)
 			deadline := time.Now().Add(30 * time.Second)
 			wakeAt(t, s, deadline)
 			buf := make([]byte, readBufferSize)
-			for {
-				paused, _ := step(t, s, buf)
-				if paused && inputWaiting(t, s.console.fd) {
-					break
-				}
-				if time.Now().After(deadline) {
-					t.Fatalf("outer reads never paused with input waiting in the terminal; queued %d", s.queuedBytes)
-				}
-			}
+			pauseOuterInput(t, s, buf, deadline)
 			received := collectChild(t, s, child, len(tt.want))
 			for {
 				step(t, s, buf)
@@ -78,20 +70,12 @@ func TestOuterInputWaitsForBusyChild(t *testing.T) {
 // session whose child is not reading. The hangup arrives while the session is
 // already waiting in poll.
 func TestPausedOuterInputReportsHangup(t *testing.T) {
-	s, outer, _ := newQueueSession(t, "\x1b[?2004h")
+	s, outer, _ := newQueueSession(t, "\x1b[?2004h", io.Discard)
 	stop, _ := feedOuter(t, outer, bracketedPaste(2*inputQueueLimit))
 	deadline := time.Now().Add(30 * time.Second)
 	wakeAt(t, s, deadline)
 	buf := make([]byte, readBufferSize)
-	for {
-		paused, _ := step(t, s, buf)
-		if paused && inputWaiting(t, s.console.fd) {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("outer reads never paused with input waiting in the terminal; queued %d", s.queuedBytes)
-		}
-	}
+	pauseOuterInput(t, s, buf, deadline)
 	stop()
 	const limit = time.Second
 	closed := make(chan error, 1)
@@ -101,8 +85,10 @@ func TestPausedOuterInputReportsHangup(t *testing.T) {
 		closed <- outer.Close()
 	}()
 	wakeAt(t, s, start.Add(3*limit))
+	steps := 0
 	for {
 		paused, disconnected := step(t, s, buf)
+		steps++
 		if !paused {
 			t.Fatal("outer reads resumed although the child read nothing")
 		}
@@ -116,6 +102,11 @@ func TestPausedOuterInputReportsHangup(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > limit {
 		t.Fatalf("hangup reported after %v, want under %v", elapsed, limit)
 	}
+	// Starting the watch may report the input already waiting once; otherwise
+	// the paused loop sleeps until the hangup.
+	if steps > 2 {
+		t.Fatalf("paused loop woke %d times before the hangup, want at most 2", steps)
+	}
 	if err := <-closed; err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +117,7 @@ func TestPausedOuterInputReportsHangup(t *testing.T) {
 func TestPausedOuterInputKeepsEscapeSequences(t *testing.T) {
 	// Kitty disambiguation makes a timed-out Escape "\x1b[27u", unlike the
 	// Up arrow "\x1b[A" whose first byte it is.
-	s, outer, child := newQueueSession(t, "\x1b[>1u")
+	s, outer, child := newQueueSession(t, "\x1b[>1u", io.Discard)
 	want := fillChild(t, s, inputQueueLimit-10)
 	want = append(want, "ab\x1b[A"...)
 	if _, err := outer.WriteString("ab\x1b"); err != nil {
@@ -135,11 +126,19 @@ func TestPausedOuterInputKeepsEscapeSequences(t *testing.T) {
 	deadline := time.Now().Add(30 * time.Second)
 	wakeAt(t, s, deadline)
 	buf := make([]byte, readBufferSize)
-	step(t, s, buf)
-	for start := time.Now(); time.Since(start) < 3*escapeTimeout; {
-		if paused, _ := step(t, s, buf); !paused || !s.framer.Pending() {
-			t.Fatalf("paused=%v with pending Escape=%v; want both while the child reads nothing", paused, s.framer.Pending())
-		}
+	if paused, _ := step(t, s, buf); !paused || !s.framer.Pending() {
+		t.Fatalf("after the read: paused=%v, pending Escape=%v; want both while the child reads nothing", paused, s.framer.Pending())
+	}
+	// Let the Escape deadline pass, then wake the loop as a resize or region
+	// invalidation would. The expired deadline must neither spin the paused
+	// loop nor flush the Escape.
+	time.Sleep(3 * escapeTimeout)
+	if timeout := s.pollTimeout(); timeout != -1 {
+		t.Fatalf("paused loop polls with a %d ms timeout, want none", timeout)
+	}
+	s.wakeLoop()
+	if paused, _ := step(t, s, buf); !paused || !s.framer.Pending() {
+		t.Fatalf("after the Escape deadline: paused=%v, pending Escape=%v; want both", paused, s.framer.Pending())
 	}
 	if _, err := outer.WriteString("[A"); err != nil {
 		t.Fatal(err)
@@ -161,8 +160,9 @@ func TestPausedOuterInputKeepsEscapeSequences(t *testing.T) {
 
 // newQueueSession builds a session between a real outer terminal PTY, whose
 // master the test writes, and a child PTY whose slave nothing reads until the
-// test collects it. childModes sets the child's native input modes.
-func newQueueSession(t *testing.T, childModes string) (s *session[struct{}], outer, child *os.File) {
+// test collects it. childModes sets the child's native input modes; out
+// receives what the session writes to the terminal.
+func newQueueSession(t *testing.T, childModes string, out io.Writer) (s *session[struct{}], outer, child *os.File) {
 	t.Helper()
 	outer, outerSlave := rawPTY(t)
 	childMaster, child := rawPTY(t)
@@ -190,7 +190,7 @@ func newQueueSession(t *testing.T, childModes string) (s *session[struct{}], out
 		t.Fatal(err)
 	}
 	t.Cleanup(router.close)
-	c := &console{fd: int(outerSlave.Fd()), framer: input.New(), renderer: uv.NewTerminalRenderer(io.Discard, []string{"TERM=xterm-256color"}),
+	c := &console{fd: int(outerSlave.Fd()), framer: input.New(), renderer: uv.NewTerminalRenderer(out, []string{"TERM=xterm-256color"}),
 		entry: make(map[ansi.DECMode]ansi.ModeSetting), applied: make(map[ansi.DECMode]bool)}
 	s = &session[struct{}]{frame: f, console: c, terminal: em, router: router, geometry: g, screen: c.outerScreen(g), framer: c.framer, fd: childFD}
 	if err := s.openWake(); err != nil {
@@ -198,6 +198,9 @@ func newQueueSession(t *testing.T, childModes string) (s *session[struct{}], out
 	}
 	t.Cleanup(func() {
 		if err := s.closeWake(); err != nil {
+			t.Error(err)
+		}
+		if err := s.hangup.close(); err != nil {
 			t.Error(err)
 		}
 	})
@@ -229,16 +232,14 @@ func rawPTY(t *testing.T) (master, slave *os.File) {
 }
 
 // step runs one iteration of the session loop without a failure: deadlines,
-// one poll, and every ready descriptor. It reports whether the poll watched
-// the outer terminal without requesting its input, and whether the terminal
-// disconnected. Any session error or queue overrun fails the test.
+// one poll, and every ready descriptor. It reports whether the next poll
+// watches the outer terminal without requesting its input, and whether the
+// terminal disconnected. Any session error or queue overrun fails the test.
 func step(t *testing.T, s *session[struct{}], buf []byte) (paused, disconnected bool) {
 	t.Helper()
 	if err := s.deadlines(); err != nil {
 		t.Fatal(err)
 	}
-	fds := s.pollFDs(nil)
-	paused = fds[1].Fd == int32(s.console.fd) && fds[1].Events&unix.POLLIN == 0
 	disconnected, err := s.await(buf, nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -246,7 +247,26 @@ func step(t *testing.T, s *session[struct{}], buf []byte) (paused, disconnected 
 	if s.queuedBytes > inputQueueLimit {
 		t.Fatalf("queued %d child-input bytes, over the %d-byte limit", s.queuedBytes, inputQueueLimit)
 	}
+	fds := s.pollFDs(nil)
+	paused = fds[1].Fd == int32(s.console.fd) && fds[1].Events&unix.POLLIN == 0
 	return paused, disconnected
+}
+
+// pauseOuterInput steps the session until it stops reading the terminal, then
+// waits for the terminal to hold input the session left unread.
+func pauseOuterInput(t *testing.T, s *session[struct{}], buf []byte, deadline time.Time) {
+	t.Helper()
+	for {
+		if paused, _ := step(t, s, buf); paused {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("outer reads never paused; queued %d", s.queuedBytes)
+		}
+	}
+	if !inputWaiting(t, s.console.fd, time.Until(deadline)) {
+		t.Fatal("the terminal holds no unread input while outer reads are paused")
+	}
 }
 
 // wakeAt wakes the session loop at when, so a step blocked in poll returns
@@ -368,14 +388,21 @@ func fillChild(t *testing.T, s *session[struct{}], n int) []byte {
 	return append(fill, top...)
 }
 
-// inputWaiting reports whether bytes wait unread in the terminal's input queue.
-func inputWaiting(t *testing.T, fd int) bool {
+// inputWaiting reports whether bytes wait unread in the terminal's input queue
+// within timeout. It reads nothing.
+func inputWaiting(t *testing.T, fd int, timeout time.Duration) bool {
 	t.Helper()
 	fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
-	if _, err := unix.Poll(fds, 0); err != nil {
-		t.Fatal(err)
+	for {
+		_, err := unix.Poll(fds, int(timeout.Milliseconds()))
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fds[0].Revents&unix.POLLIN != 0
 	}
-	return fds[0].Revents&unix.POLLIN != 0
 }
 
 // bracketedPaste returns a marked paste of at least n bytes. Its numbered lines

@@ -32,9 +32,6 @@ const (
 	terminationTimeout = time.Second
 	drainTimeout       = 2 * time.Second
 	maxScreenCells     = 1 << 20
-	// pausedHangupInterval bounds how long a terminal hangup can go unreported
-	// on Darwin while outer input is paused; see pollFDs.
-	pausedHangupInterval = 100 * time.Millisecond
 )
 
 // Run executes the child in a native PTY and owns one outer-terminal session.
@@ -102,6 +99,7 @@ func (f *Frame[T]) Run(ctx context.Context) (result Result, err error) {
 		return result, err
 	}
 	defer func() { result.CleanupError = errors.Join(result.CleanupError, s.closeWake()) }()
+	defer func() { result.CleanupError = errors.Join(result.CleanupError, s.hangup.close()) }()
 	f.cmd.Env = childEnvironment(f.cmd.Environ())
 	if ctx.Err() != nil {
 		return result, context.Cause(ctx)
@@ -178,6 +176,7 @@ type session[T any] struct {
 	waitErr, drainErr                                         error
 	queue                                                     []pendingInput
 	held                                                      []input.Packet
+	hangup                                                    hangupWatch
 	inputBuffers                                              [][]byte
 	inputBufferBytes                                          int
 	queuedBytes                                               int
@@ -849,21 +848,17 @@ func (s *session[T]) loop(ctx context.Context) error {
 	}
 }
 
-// pollFDs returns the wake pipe, outer terminal and child PTY descriptors with
-// the events one loop iteration waits for.
+// pollFDs returns the wake pipe, outer terminal, child PTY and hangup watch
+// descriptors with the events one loop iteration waits for.
 func (s *session[T]) pollFDs(failure error) []unix.PollFd {
-	fds := []unix.PollFd{{Fd: int32(s.wakeReadFD), Events: unix.POLLIN}, {Fd: int32(s.console.fd), Events: unix.POLLIN}, {Fd: int32(s.fd), Events: unix.POLLIN}}
+	fds := []unix.PollFd{{Fd: int32(s.wakeReadFD), Events: unix.POLLIN}, {Fd: int32(s.console.fd), Events: unix.POLLIN}, {Fd: int32(s.fd), Events: unix.POLLIN}, {Fd: -1}}
 	switch {
 	case failure != nil || s.waited:
 		fds[1].Fd = -1
 	case s.inputPaused():
-		// Paused input keeps the terminal registered for its hangup. POSIX
-		// ignores POLLHUP in events and Linux reports it regardless. Darwin's
-		// poll registers the read filter that reports hangup only when events
-		// names an input condition such as POLLHUP, never for 0. That one-shot
-		// filter fires silently for unread input and then misses a later
-		// hangup, so pollTimeout bounds the wait while input is paused.
-		fds[1].Events = unix.POLLHUP
+		// Paused input stays in the terminal; only its hangup is watched.
+		fds[1].Events = 0
+		fds[3] = s.hangup.pollFD()
 	}
 	if s.ptyEOF {
 		fds[2].Fd = -1
@@ -877,6 +872,9 @@ func (s *session[T]) pollFDs(failure error) []unix.PollFd {
 // await waits once for the descriptors of pollFDs and handles every ready one.
 // It reports whether the outer terminal disconnected.
 func (s *session[T]) await(buf []byte, resizes <-chan struct{}, failure error) (bool, error) {
+	if err := s.hangup.watch(s.console.fd, failure == nil && !s.waited && s.inputPaused()); err != nil {
+		return false, err
+	}
 	fds := s.pollFDs(failure)
 	if _, err := unix.Poll(fds, s.pollTimeout()); err != nil {
 		if errors.Is(err, unix.EINTR) {
@@ -910,6 +908,13 @@ func (s *session[T]) processReady(buf []byte, fds []unix.PollFd, resizes <-chan 
 		}
 	}
 	disconnected := fds[1].Revents&(unix.POLLHUP|unix.POLLERR|unix.POLLNVAL) != 0 && accepting
+	if fds[3].Revents != 0 && accepting {
+		hungUp, err := s.hangup.hungUp()
+		if err != nil {
+			return disconnected, err
+		}
+		disconnected = disconnected || hungUp
+	}
 	if fds[2].Revents&unix.POLLOUT != 0 && accepting && !s.waited {
 		if err := s.writeInput(); err != nil {
 			return disconnected, err
@@ -993,18 +998,12 @@ func (s *session[T]) deadlines() error {
 }
 
 func (s *session[T]) pollTimeout() int {
-	escape, hangupCheck := s.escapeDeadline, time.Time{}
+	escape := s.escapeDeadline
 	if s.inputPaused() {
-		// deadlines defers the Escape until reads resume. Until termination
-		// stops watching the terminal, a fresh poll reports a hangup that
-		// Darwin's one-shot read filter missed; see pollFDs.
-		escape = time.Time{}
-		if !s.terminationStarted {
-			hangupCheck = time.Now().Add(pausedHangupInterval)
-		}
+		escape = time.Time{} // deadlines defers the Escape until reads resume.
 	}
 	timeout := -1
-	for _, d := range []time.Time{escape, s.holdDeadline, s.killDeadline, s.drainDeadline, s.renderDeadline, hangupCheck} {
+	for _, d := range []time.Time{escape, s.holdDeadline, s.killDeadline, s.drainDeadline, s.renderDeadline} {
 		if !d.IsZero() {
 			ms := max(0, int(time.Until(d).Milliseconds()+1))
 			if timeout < 0 || ms < timeout {
