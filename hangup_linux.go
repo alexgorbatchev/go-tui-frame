@@ -8,7 +8,7 @@ import "golang.org/x/sys/unix"
 // the poll set with no events.
 type hangupWatch struct{}
 
-func (*hangupWatch) watch(int, bool) error { return nil }
+func (*hangupWatch) watch(int, bool) (bool, error) { return false, nil }
 
 func (*hangupWatch) pollFD() unix.PollFd { return unix.PollFd{Fd: -1} }
 

@@ -20,14 +20,15 @@ type hangupWatch struct {
 }
 
 // watch registers fd while on is true and removes the registration otherwise.
-func (w *hangupWatch) watch(fd int, on bool) error {
+// A terminal revoked before the watch starts is reported as hung up.
+func (w *hangupWatch) watch(fd int, on bool) (bool, error) {
 	if on == w.watching {
-		return nil
+		return false, nil
 	}
 	if !w.open {
 		kq, err := unix.Kqueue()
 		if err != nil {
-			return fmt.Errorf("create terminal hangup queue: %w", err)
+			return false, fmt.Errorf("create terminal hangup queue: %w", err)
 		}
 		unix.CloseOnExec(kq)
 		w.kq, w.open = kq, true
@@ -43,12 +44,17 @@ func (w *hangupWatch) watch(fd int, on bool) error {
 		if errors.Is(err, unix.EINTR) {
 			continue
 		}
-		// A revoked terminal's filter is one-shot and already removed.
-		if err != nil && (on || !errors.Is(err, unix.ENOENT)) {
-			return fmt.Errorf("watch terminal hangup: %w", err)
+		if errors.Is(err, unix.ENOENT) {
+			// kqueue refuses a filter on a revoked terminal, and removes the
+			// one-shot filter of a terminal revoked while watched.
+			w.watching = false
+			return on, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("watch terminal hangup: %w", err)
 		}
 		w.watching = on
-		return nil
+		return false, nil
 	}
 }
 

@@ -278,7 +278,7 @@ func newQueueSession(t *testing.T, childModes string, out io.Writer) (s *session
 		t.Fatal(err)
 	}
 	t.Cleanup(router.close)
-	c := &console{fd: int(outerSlave.Fd()), framer: input.New(), renderer: uv.NewTerminalRenderer(out, []string{"TERM=xterm-256color"}),
+	c := &console{input: outerSlave, fd: int(outerSlave.Fd()), framer: input.New(), renderer: uv.NewTerminalRenderer(out, []string{"TERM=xterm-256color"}),
 		entry: make(map[ansi.DECMode]ansi.ModeSetting), applied: make(map[ansi.DECMode]bool)}
 	s = &session[struct{}]{frame: f, console: c, terminal: em, router: router, geometry: g, screen: c.outerScreen(g), framer: c.framer, fd: childFD}
 	if err := s.openWake(); err != nil {

@@ -854,10 +854,10 @@ func (s *session[T]) loop(ctx context.Context) error {
 // descriptors with the events one loop iteration waits for.
 func (s *session[T]) pollFDs(failure error) []unix.PollFd {
 	fds := []unix.PollFd{{Fd: int32(s.wakeReadFD), Events: unix.POLLIN}, {Fd: int32(s.console.fd), Events: unix.POLLIN}, {Fd: int32(s.fd), Events: unix.POLLIN}, {Fd: -1}}
-	switch {
-	case failure != nil || s.waited:
+	if failure != nil || s.waited {
 		fds[1].Fd = -1
-	case s.inputPaused():
+	}
+	if s.watchesHangup(failure) {
 		// Paused input stays in the terminal; only its hangup is watched.
 		fds[1].Events = 0
 		fds[3] = s.hangup.pollFD()
@@ -871,11 +871,18 @@ func (s *session[T]) pollFDs(failure error) []unix.PollFd {
 	return fds
 }
 
+// watchesHangup reports whether the loop watches the outer terminal only for
+// its hangup: the session still accepts input, but held input pauses reads.
+func (s *session[T]) watchesHangup(failure error) bool {
+	return failure == nil && !s.waited && s.inputPaused()
+}
+
 // await waits once for the descriptors of pollFDs and handles every ready one.
 // It reports whether the outer terminal disconnected.
 func (s *session[T]) await(buf []byte, resizes <-chan struct{}, failure error) (bool, error) {
-	if err := s.hangup.watch(s.console.fd, failure == nil && !s.waited && s.inputPaused()); err != nil {
-		return false, err
+	hungUp, err := s.hangup.watch(s.console.fd, s.watchesHangup(failure))
+	if err != nil || hungUp {
+		return hungUp, err
 	}
 	fds := s.pollFDs(failure)
 	if _, err := unix.Poll(fds, s.pollTimeout()); err != nil {
