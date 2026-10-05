@@ -125,8 +125,18 @@ func TestCaptureNegotiatesDistinctKeysAndRestoresOuterMode(t *testing.T) {
 // keeps a Kitty keyboard stack per screen and reuses the alternate screen, so
 // flags the session leaves there apply to the next full-screen program.
 func TestLateKittyReplyLeavesOuterKeyboardAsFound(t *testing.T) {
-	const marker = "late-kitty-reply"
+	const marker, seeded = "late-kitty-reply", "seeded-alternate-screen"
+	// An earlier program left its own flags on the outer alternate screen. They
+	// must survive the session, which a reset to 0 would not do.
+	const found = ghostty.KittyKeyReportAlternates
 	h := newHarness(t)
+	seed := ansi.SetModeAltScreenSaveCursor + ansi.KittyKeyboard(int(found), 1) + ansi.ResetModeAltScreenSaveCursor + ansi.SetWindowTitle(seeded)
+	if _, err := h.slave.WriteString(seed); err != nil {
+		t.Fatal(err)
+	}
+	awaitOuter(t, h, "the seeded alternate screen", func(got emulator.State) bool {
+		return got.Title == seeded
+	})
 	s := newProbedSession(t, h)
 	c := s.console
 	if !c.kittySupported {
@@ -177,8 +187,8 @@ func TestLateKittyReplyLeavesOuterKeyboardAsFound(t *testing.T) {
 		outer = got
 		return got.Title == next
 	})
-	if !outer.Alternate || outer.KittyKeyboardFlags != 0 {
-		t.Fatalf("next program's alternate=%v Kitty flags=%d, want alternate flags=0", outer.Alternate, outer.KittyKeyboardFlags)
+	if !outer.Alternate || outer.KittyKeyboardFlags != found {
+		t.Fatalf("next program's alternate=%v Kitty flags=%d, want alternate flags=%d", outer.Alternate, outer.KittyKeyboardFlags, found)
 	}
 }
 
