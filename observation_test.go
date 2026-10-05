@@ -151,12 +151,7 @@ func TestRunDeliversStartedSnapshotLargerThanObservationBudget(t *testing.T) {
 	app := New(childCommand(t), struct{}{}).Terminal(h.slave, h.slave).ObserveEvents([]EventKind{Started}, func(e Event) {
 		weights <- eventWeight(e)
 	})
-	type outcome struct {
-		result Result
-		err    error
-	}
-	done := make(chan outcome, 1)
-	go func() { r, err := app.Run(ctx); done <- outcome{r, err} }()
+	done := startRun(ctx, app)
 	select {
 	case w := <-weights:
 		if w <= observationByteLimit {

@@ -235,10 +235,7 @@ func childCommand(t *testing.T) *exec.Cmd {
 
 func TestRunFramesRealChildAndPushesIdleUpdate(t *testing.T) {
 	h := newHarness(t)
-	before, err := term.GetState(h.slave.Fd())
-	if err != nil {
-		t.Fatal(err)
-	}
+	before := termiosState(t, h)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	observed := make(chan struct{})
@@ -271,12 +268,7 @@ func TestRunFramesRealChildAndPushesIdleUpdate(t *testing.T) {
 			}
 			close(observed)
 		})
-	type outcome struct {
-		result Result
-		err    error
-	}
-	done := make(chan outcome, 1)
-	go func() { r, err := app.Run(ctx); done <- outcome{r, err} }()
+	done := startRun(ctx, app)
 	awaitText(t, h, "Ready")
 	awaitText(t, h, "child")
 	awaitText(t, h, "Child title")
@@ -326,12 +318,8 @@ func TestRunFramesRealChildAndPushesIdleUpdate(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("Run did not finish", ctx.Err())
 	}
-	after, err := term.GetState(h.slave.Fd())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fmt.Sprintf("%#v", before) != fmt.Sprintf("%#v", after) {
-		t.Fatalf("termios was not restored: before %#v after %#v", before, after)
+	if after := termiosState(t, h); after != before {
+		t.Fatalf("termios was not restored: before %s after %s", before, after)
 	}
 	if err := app.InvalidateHeader("closed"); !errors.Is(err, ErrSessionClosed) {
 		t.Fatalf("closed invalidation: %v", err)
@@ -340,10 +328,7 @@ func TestRunFramesRealChildAndPushesIdleUpdate(t *testing.T) {
 
 func TestCancellationRestoresTerminalBeforeObserverDrains(t *testing.T) {
 	h := newHarness(t)
-	before, err := term.GetState(h.slave.Fd())
-	if err != nil {
-		t.Fatal(err)
-	}
+	before := termiosState(t, h)
 	ctx, cancel := context.WithCancelCause(context.Background())
 	started, release := make(chan struct{}), make(chan struct{})
 	app := New(childCommand(t), "Ready").Terminal(h.slave, h.slave).Header(1, func(c DrawContext[string]) { uv.NewStyledString(c.Data).Draw(c.View, c.View.Bounds()) }).Observe(func(e Event) {
@@ -361,16 +346,7 @@ func TestCancellationRestoresTerminalBeforeObserverDrains(t *testing.T) {
 	}
 	cause := errors.New("test cancellation")
 	cancel(cause)
-	deadline := time.Now().Add(3 * time.Second)
-	restored := false
-	for time.Now().Before(deadline) {
-		after, e := term.GetState(h.slave.Fd())
-		if e == nil && fmt.Sprintf("%#v", before) == fmt.Sprintf("%#v", after) {
-			restored = true
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	restored := awaitTermios(h, before, 3*time.Second)
 	closed := errors.Is(app.InvalidateHeader("late"), ErrSessionClosed)
 	close(release)
 	select {
@@ -422,10 +398,7 @@ func TestCancellationTerminatesAllOwnedSessionGroups(t *testing.T) {
 
 func TestObserverPanicEndsSessionThroughShutdown(t *testing.T) {
 	h := newHarness(t)
-	before, err := term.GetState(h.slave.Fd())
-	if err != nil {
-		t.Fatal(err)
-	}
+	before := termiosState(t, h)
 	cmd, file := groupsCommand(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -439,12 +412,7 @@ func TestObserverPanicEndsSessionThroughShutdown(t *testing.T) {
 			<-release
 			panic(fault)
 		})
-	type outcome struct {
-		result Result
-		err    error
-	}
-	done := make(chan outcome, 1)
-	go func() { r, err := app.Run(ctx); done <- outcome{r, err} }()
+	done := startRun(ctx, app)
 	var leader int
 	select {
 	case leader = <-leaders:
@@ -456,28 +424,23 @@ func TestObserverPanicEndsSessionThroughShutdown(t *testing.T) {
 		return s.Alternate && s.Modes[ghostty.ModeBracketedPaste] && s.KittyKeyboardFlags&ghostty.KittyKeyDisambiguate != 0
 	})
 	close(release)
-	var got outcome
+	var got runOutcome
 	select {
 	case got = <-done:
 	case <-ctx.Done():
 		t.Fatal("Run did not finish after the observer panicked", ctx.Err())
 	}
-	// The stack names the panicking callback, which this test function encloses.
-	if !errors.Is(got.err, fault) || !strings.Contains(got.err.Error(), t.Name()) {
-		t.Fatalf("Run error = %v, want the observer panic value and its stack", got.err)
-	}
+	// The loop adopts the panic as its cancellation cause; Run's drain join
+	// must not report it a second time.
+	requireObserverPanic(t, got.err, fault)
 	if got.result.ProcessState == nil {
 		t.Fatal("Run did not wait for the terminated child")
 	}
 	awaitOuter(t, h, "its entry modes", func(s emulator.State) bool {
 		return !s.Alternate && !s.Modes[ghostty.ModeBracketedPaste] && s.KittyKeyboardFlags == 0
 	})
-	after, err := term.GetState(h.slave.Fd())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fmt.Sprintf("%#v", before) != fmt.Sprintf("%#v", after) {
-		t.Fatalf("termios was not restored: before %#v after %#v", before, after)
+	if after := termiosState(t, h); after != before {
+		t.Fatalf("termios was not restored: before %s after %s", before, after)
 	}
 	awaitGone(t, -leader, "launch leader's process group survived the observer panic")
 	awaitGone(t, -descendant, "descendant process group survived the observer panic")
@@ -485,10 +448,7 @@ func TestObserverPanicEndsSessionThroughShutdown(t *testing.T) {
 
 func TestObserverPanicDuringShutdownDrainReachesRun(t *testing.T) {
 	h := newHarness(t)
-	before, err := term.GetState(h.slave.Fd())
-	if err != nil {
-		t.Fatal(err)
-	}
+	before := termiosState(t, h)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	fault := errors.New("observer fault on Exited")
@@ -498,12 +458,7 @@ func TestObserverPanicDuringShutdownDrainReachesRun(t *testing.T) {
 		<-release
 		panic(fault)
 	})
-	type outcome struct {
-		result Result
-		err    error
-	}
-	done := make(chan outcome, 1)
-	go func() { r, err := app.Run(ctx); done <- outcome{r, err} }()
+	done := startRun(ctx, app)
 	awaitText(t, h, "child")
 	if _, err := unix.Write(h.fd, []byte("q")); err != nil {
 		t.Fatal(err)
@@ -514,26 +469,16 @@ func TestObserverPanicDuringShutdownDrainReachesRun(t *testing.T) {
 		t.Fatal("Exited was not observed", ctx.Err())
 	}
 	// Restored termios proves the session loop has returned, so the panic can
-	// reach Run only through the dispatcher's shutdown drain.
-	for {
-		after, err := term.GetState(h.slave.Fd())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if fmt.Sprintf("%#v", before) == fmt.Sprintf("%#v", after) {
-			break
-		}
-		if ctx.Err() != nil {
-			t.Fatal("terminal was not restored while the observer held Exited", ctx.Err())
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	// reach Run only through the dispatcher's shutdown drain. Release the
+	// observer before asserting so a failure cannot leave Run joined forever.
+	restored := awaitTermios(h, before, 5*time.Second)
 	close(release)
 	select {
 	case got := <-done:
-		if !errors.Is(got.err, fault) || !strings.Contains(got.err.Error(), t.Name()) {
-			t.Fatalf("Run error = %v, want the observer panic value and its stack", got.err)
+		if !restored {
+			t.Fatal("terminal was not restored while the observer held Exited")
 		}
+		requireObserverPanic(t, got.err, fault)
 		if got.result.ProcessState == nil || !got.result.ProcessState.Success() {
 			t.Fatalf("child outcome = %v, want its successful exit", got.result.ProcessState)
 		}
@@ -626,4 +571,61 @@ func awaitOuter(t *testing.T, h *terminalHarness, what string, ready func(emulat
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("outer terminal did not reach %s", what)
+}
+
+// runOutcome holds one Run call's return values.
+type runOutcome struct {
+	result Result
+	err    error
+}
+
+// startRun executes app's session on its own goroutine and delivers Run's
+// return values when it returns.
+func startRun[T any](ctx context.Context, app *Frame[T]) <-chan runOutcome {
+	done := make(chan runOutcome, 1)
+	go func() {
+		r, err := app.Run(ctx)
+		done <- runOutcome{r, err}
+	}()
+	return done
+}
+
+// termiosState returns the outer terminal's line discipline in a form that is
+// equal only for identical settings.
+func termiosState(t *testing.T, h *terminalHarness) string {
+	t.Helper()
+	s, err := term.GetState(h.slave.Fd())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprintf("%#v", s)
+}
+
+// awaitTermios reports whether the outer terminal's line discipline returns to
+// want within timeout. It does not fail the test, so a caller can first
+// release a callback that holds the session open.
+func awaitTermios(h *terminalHarness, want string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		s, err := term.GetState(h.slave.Fd())
+		if err == nil && fmt.Sprintf("%#v", s) == want {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
+}
+
+// requireObserverPanic checks that Run reported fault exactly once, with the
+// stack of the panicking callback, which the calling test function encloses.
+func requireObserverPanic(t *testing.T, err, fault error) {
+	t.Helper()
+	if !errors.Is(err, fault) || !strings.Contains(err.Error(), t.Name()) {
+		t.Fatalf("Run error = %v, want the observer panic value and its stack", err)
+	}
+	// Each report of the panic carries the value's text once; the recovered
+	// stack prints argument words, not the value.
+	if n := strings.Count(err.Error(), fault.Error()); n != 1 {
+		t.Fatalf("Run reported the observer panic %d times, want once: %v", n, err)
+	}
 }
