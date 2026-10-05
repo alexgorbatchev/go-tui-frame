@@ -425,8 +425,10 @@ func TestRoutingDropsPixelReportsWithoutMeasuredCells(t *testing.T) {
 }
 
 // The session admits outer input by routedLimit, so it must bound what the
-// native encoders write in every protocol a child can select. The widest
-// expansion must also reach the bound, keeping its documented worst case real.
+// native encoders write for every keyboard protocol and mouse format a child
+// can select, including SGR pixel reports at four-digit coordinates. The
+// widest expansion must also reach the bound, keeping its documented worst
+// case real.
 func TestRoutedLimitBoundsNativeEncoding(t *testing.T) {
 	var keys []string
 	for b := range 256 {
@@ -437,26 +439,41 @@ func TestRoutedLimitBoundsNativeEncoding(t *testing.T) {
 	for r := rune(0x80); r < 0x800; r++ {
 		keys = append(keys, string(r), "\x1b"+string(r))
 	}
-	keys = append(keys, "ࠀ", "�", "\U00010000", "\U0010ffff", "👩‍💻", "\x1b[97;5u", "\x1b[122:90:122;2;90u", "\x1b[27;2;90~", "\x1b[200~paste\x1b[201~", "\x1b]9999;unknown\x1b\\")
-	var mice []string
+	keys = append(keys, "\U00000800", "\U0000fffd", "\U00010000", "\U0010ffff", "\U0001f469\U0000200d\U0001f4bb", "\x1b[97;5u", "\x1b[122:90:122;2;90u", "\x1b[27;2;90~", "\x1b[200~paste\x1b[201~", "\x1b]9999;unknown\x1b\\")
+	var cellMice, pixelMice []string
 	for b := range 256 {
-		// The router's viewport starts at column 2, row 3: these are inside it.
-		mice = append(mice, "\x1b[M"+string([]byte{byte(b), '$', '%'}), fmt.Sprintf("\x1b[<%d;4;5M", b), fmt.Sprintf("\x1b[<%d;4;5m", b), fmt.Sprintf("\x1b[%d;4;5M", b+32))
+		// The cell viewport starts at column 2, row 3: these are inside it.
+		cellMice = append(cellMice, "\x1b[M"+string([]byte{byte(b), '$', '%'}), fmt.Sprintf("\x1b[<%d;4;5M", b), fmt.Sprintf("\x1b[<%d;4;5m", b), fmt.Sprintf("\x1b[%d;4;5M", b+32))
+		// The first and last pixels of the measured viewport's first and last cells.
+		for _, at := range []string{"21;61", "5020;6060"} {
+			pixelMice = append(pixelMice, fmt.Sprintf("\x1b[<%d;%sM", b, at), fmt.Sprintf("\x1b[<%d;%sm", b, at))
+		}
 	}
 	keyModes := []string{"", "\x1b[?2004h", "\x1b[>4;2m", "\x1b[?1h\x1b[?66h\x1b[?67h\x1b[?1036h", "\x1b[?1035h\x1b[?66h"}
 	for flags := 1; flags < 32; flags++ {
 		keyModes = append(keyModes, fmt.Sprintf("\x1b[>%du", flags))
 	}
 	var mouseModes []string
-	for _, format := range []string{"", "\x1b[?1005h", "\x1b[?1006h", "\x1b[?1015h"} {
+	for _, format := range []string{"", "\x1b[?1005h", "\x1b[?1006h", "\x1b[?1015h", "\x1b[?1016h"} {
 		mouseModes = append(mouseModes, "\x1b[?1003h"+format)
 	}
 	widest := 0.0
 	for _, group := range []struct {
 		modes, inputs []string
-	}{{keyModes, keys}, {mouseModes, mice}} {
+		measured      bool
+	}{{keyModes, keys, false}, {mouseModes, cellMice, false}, {mouseModes, pixelMice, true}} {
+		delivered := 0
 		for _, modes := range group.modes {
 			r, em := newRouterTest(t, nil)
+			if group.measured {
+				// A 500x300 grid of 10x20-pixel cells: pixel reports from the
+				// outer terminal reach four-digit coordinates.
+				if err := em.Resize(emulator.Size{Cols: 500, Rows: 300, CellWidthPx: 10, CellHeightPx: 20}); err != nil {
+					t.Fatal(err)
+				}
+				r.viewport = image.Rect(2, 3, 502, 303)
+				r.host.MousePixels, r.host.CellWidthPx, r.host.CellHeightPx = true, 10, 20
+			}
 			s := routerState(t, em, modes)
 			for _, raw := range group.inputs {
 				for _, p := range routerPackets(t, raw) {
@@ -468,8 +485,12 @@ func TestRoutedLimitBoundsNativeEncoding(t *testing.T) {
 						t.Fatalf("modes %q: %q routed to %d bytes %q, over its %d-byte limit", modes, p.Raw, len(got.Bytes), got.Bytes, routedLimit(p))
 					}
 					widest = max(widest, float64(len(got.Bytes))/float64(len(p.Raw)))
+					delivered += len(got.Bytes)
 				}
 			}
+		}
+		if delivered == 0 {
+			t.Fatalf("modes %q delivered nothing to check", group.modes)
 		}
 	}
 	if widest != maxRoutedExpansion {
