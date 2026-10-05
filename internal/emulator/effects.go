@@ -51,11 +51,6 @@ func (t *Terminal) Effects() []Effect {
 }
 
 func (t *Terminal) nativeOptions(opts Options) []ghostty.TerminalOption {
-	var attributes ghostty.DeviceAttributes
-	hasAttributes := opts.DeviceAttributes != nil
-	if hasAttributes {
-		attributes = *opts.DeviceAttributes
-	}
 	return []ghostty.TerminalOption{
 		ghostty.WithWritePty(func(_ *ghostty.Terminal, data []byte) {
 			t.effects = append(t.effects, Effect{Kind: Reply, Bytes: slices.Clone(data)})
@@ -93,7 +88,6 @@ func (t *Terminal) nativeOptions(opts Options) []ghostty.TerminalOption {
 		ghostty.WithSizeReport(func(_ *ghostty.Terminal) (ghostty.SizeReportSize, bool) {
 			return ghostty.SizeReportSize{Rows: uint16(t.size.Rows), Columns: uint16(t.size.Cols), CellWidth: t.size.CellWidthPx, CellHeight: t.size.CellHeightPx}, true
 		}),
-		ghostty.WithDeviceAttributes(func(_ *ghostty.Terminal) (ghostty.DeviceAttributes, bool) { return attributes, hasAttributes }),
 		ghostty.WithClipboardRead(func(_ *ghostty.Terminal, request ghostty.ClipboardRead) ghostty.ClipboardReadReply {
 			observed := request
 			observed.MIMEs = slices.Clone(request.MIMEs)

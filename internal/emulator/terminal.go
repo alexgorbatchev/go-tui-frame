@@ -31,8 +31,12 @@ type Size struct {
 }
 
 // Options configure the native terminal's virtual identity and storage.
-// DeviceAttributes is supplied by the wrapper's supported capability profile;
-// nil suppresses DA replies rather than advertising libghostty's renderer.
+// No device-attributes handler is registered, so DA queries receive
+// libghostty's defaults: CSI ? 62 ; 22 c for DA1, CSI > 1 ; 0 ; 0 c for DA2
+// and DCS ! | 00000000 ST for DA3 at the pinned revision. Programs end probe
+// batches with DA1 and stop reading at its reply, so the child must get one.
+// A handler cannot suppress the replies: despite the binding's documentation,
+// libghostty answers with the same defaults when a handler declines a query.
 // Clipboard handlers run synchronously during Write and must not reenter the
 // terminal. Nil handlers produce Unsupported replies and observable requests.
 type Options struct {
@@ -41,7 +45,6 @@ type Options struct {
 	TerminfoName                           string
 	Version                                string
 	GraphemeWidth                          bool
-	DeviceAttributes                       *ghostty.DeviceAttributes
 	UnknownMaxBytes                        uint
 	ScrollbackMaxBytes, ScrollbackMaxLines *uint
 	ClipboardRead                          func(ghostty.ClipboardRead) ghostty.ClipboardReadReply
@@ -93,9 +96,6 @@ type Terminal struct {
 func New(opts Options) (*Terminal, error) {
 	if err := validSize(opts.Size); err != nil {
 		return nil, err
-	}
-	if opts.DeviceAttributes != nil && (opts.DeviceAttributes.Primary.NumFeatures < 0 || opts.DeviceAttributes.Primary.NumFeatures > len(opts.DeviceAttributes.Primary.Features)) {
-		return nil, errors.New("device attributes have an invalid feature count")
 	}
 	if opts.UnknownMaxBytes == 0 {
 		opts.UnknownMaxBytes = defaultUnknownMaxBytes
