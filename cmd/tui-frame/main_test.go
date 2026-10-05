@@ -1,11 +1,19 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
+	"golang.org/x/term"
 )
 
 func TestExecuteUsesNativeCobraAndChildExitStatuses(t *testing.T) {
@@ -85,6 +93,194 @@ func TestExecuteCtrlQStopsItsRealChild(t *testing.T) {
 			t.Fatal("CLI did not start its child")
 		}
 	}
+}
+
+// TestCLISignalChild runs as the framed child of
+// TestExecuteSignalsCancelTheSession. Its descendant leads a separate process
+// group inside the child's PTY session, so stopping it requires the frame to
+// terminate every group in that session rather than only the leader's.
+func TestCLISignalChild(t *testing.T) {
+	path := os.Getenv("FRAME_CLI_SIGNAL_PID_FILE")
+	if path == "" {
+		return
+	}
+	descendant := exec.Command("sleep", "60")
+	descendant.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := descendant.Start(); err != nil {
+		t.Fatal(err)
+	}
+	// Rename publishes both PIDs to the polling parent in one step.
+	pids := fmt.Sprintf("%d %d", os.Getpid(), descendant.Process.Pid)
+	if err := os.WriteFile(path+".pending", []byte(pids), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path+".pending", path); err != nil {
+		t.Fatal(err)
+	}
+	if err := descendant.Wait(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The wrapper runs as a separate process because an unhandled SIGHUP, SIGINT,
+// or SIGTERM would terminate the test binary itself.
+func TestExecuteSignalsCancelTheSession(t *testing.T) {
+	binary := buildExample(t)
+	for _, tt := range []struct {
+		name string
+		sig  syscall.Signal
+		// closed hangs up the outer PTY before the signal, as closing the
+		// terminal tab does, so restoring it fails during the shutdown.
+		closed bool
+	}{
+		{"hangup", syscall.SIGHUP, false},
+		{"hangup after terminal closed", syscall.SIGHUP, true},
+		{"interrupt", syscall.SIGINT, false},
+		{"terminated", syscall.SIGTERM, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			master, slave := demoTTY(t)
+			before, err := term.GetState(int(slave.Fd()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := projectTempDir(t)
+			diagnostic := filepath.Join(dir, "diagnostic")
+			stderr, err := os.Create(diagnostic)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := stderr.Close(); err != nil {
+					t.Errorf("close wrapper diagnostic: %v", err)
+				}
+			})
+			pidFile := filepath.Join(dir, "pids")
+			wrapper := exec.Command(binary, "--", os.Args[0], "-test.run=^TestCLISignalChild$")
+			wrapper.Env = append(os.Environ(), "FRAME_CLI_SIGNAL_PID_FILE="+pidFile)
+			wrapper.Stdin, wrapper.Stdout, wrapper.Stderr = slave, slave, stderr
+			if err := wrapper.Start(); err != nil {
+				t.Fatal(err)
+			}
+			var waitErr error
+			exited := make(chan struct{})
+			go func() {
+				defer close(exited)
+				waitErr = wrapper.Wait()
+			}()
+			t.Cleanup(func() {
+				select {
+				case <-exited:
+					return
+				default:
+				}
+				if err := wrapper.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+					t.Errorf("kill wrapper: %v", err)
+				}
+				<-exited
+			})
+			leader, descendant := awaitSignalChild(t, pidFile, exited)
+			if tt.closed {
+				if err := master.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := wrapper.Process.Signal(tt.sig); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-exited:
+			case <-time.After(sessionTimeout):
+				t.Fatalf("wrapper did not exit after %v", tt.sig)
+			}
+			message, err := os.ReadFile(diagnostic)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var exit *exec.ExitError
+			if !errors.As(waitErr, &exit) {
+				t.Fatalf("wrapper wait = %v; want its execute status: %s", waitErr, message)
+			}
+			// A handled signal ends the session through execute; the default
+			// action would terminate the wrapper before the frame's shutdown.
+			if status, ok := exit.Sys().(syscall.WaitStatus); !ok || status.Signaled() || status.ExitStatus() != 1 {
+				t.Errorf("wrapper status = %v; want exit status 1 from execute: %s", exit.ProcessState, message)
+			}
+			if tt.closed {
+				if !strings.Contains(string(message), "restore terminal modes") {
+					t.Errorf("wrapper diagnostic %q does not report the failed restoration", message)
+				}
+			} else {
+				if want := tt.sig.String() + " signal received"; !strings.Contains(string(message), want) {
+					t.Errorf("wrapper diagnostic %q does not contain %q", message, want)
+				}
+				if after, err := term.GetState(int(slave.Fd())); err != nil || !reflect.DeepEqual(before, after) {
+					t.Errorf("outer terminal state was not restored after %v: %v", tt.sig, err)
+				}
+			}
+			awaitGone(t, -leader, "child leader's process group survived "+tt.name)
+			awaitGone(t, -descendant, "descendant process group survived "+tt.name)
+		})
+	}
+}
+
+// awaitSignalChild reads the PIDs TestCLISignalChild publishes and verifies
+// that the descendant leads its own process group in the leader's session.
+func awaitSignalChild(t *testing.T, file string, exited <-chan struct{}) (int, int) {
+	t.Helper()
+	deadline := time.NewTimer(sessionTimeout)
+	defer deadline.Stop()
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-tick.C:
+		case <-exited:
+			t.Fatal("wrapper exited before its child started")
+		case <-deadline.C:
+			t.Fatal("framed child did not publish its PIDs")
+		}
+		data, err := os.ReadFile(file)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		var leader, descendant int
+		if _, err := fmt.Sscan(string(data), &leader, &descendant); err != nil {
+			t.Fatalf("parse child PIDs %q: %v", data, err)
+		}
+		for _, pgid := range []int{leader, descendant} {
+			t.Cleanup(func() {
+				if err := unix.Kill(-pgid, syscall.SIGKILL); err != nil && !errors.Is(err, unix.ESRCH) {
+					t.Errorf("kill process group %d: %v", pgid, err)
+				}
+			})
+		}
+		pgid, pgidErr := unix.Getpgid(descendant)
+		sid, sidErr := unix.Getsid(descendant)
+		if pgidErr != nil || sidErr != nil || pgid != descendant || sid != leader {
+			t.Fatalf("descendant %d group=%d (%v) session=%d (%v); want its own group in session %d", descendant, pgid, pgidErr, sid, sidErr, leader)
+		}
+		return leader, descendant
+	}
+}
+
+// awaitGone waits until kill(2) finds no process for target, a PID or a
+// negated process-group ID. Darwin reports EPERM for a group whose only
+// members are unreaped zombies, so only ESRCH proves the group is gone.
+func awaitGone(t *testing.T, target int, failure string) {
+	t.Helper()
+	deadline := time.Now().Add(sessionTimeout)
+	var err error
+	for time.Now().Before(deadline) {
+		if err = unix.Kill(target, 0); errors.Is(err, unix.ESRCH) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Errorf("%s: kill(%d, 0) = %v", failure, target, err)
 }
 
 func cliTTY(t *testing.T, args ...string) (*os.File, string) {

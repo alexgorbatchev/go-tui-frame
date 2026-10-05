@@ -12,7 +12,9 @@ import (
 func main() { os.Exit(execute()) }
 
 func execute() int {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// Losing the controlling terminal delivers SIGHUP. Go's default action would
+	// exit before Frame.Run terminates the child's process groups and reaps it.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGHUP, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	cmd, err := newRootCommand()
 	if err != nil {

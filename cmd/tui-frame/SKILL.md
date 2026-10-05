@@ -9,7 +9,7 @@ description: >-
 author: alexgorbatchev
 metadata:
   created_on: 2026-10-01 13:23
-  last_modified: 2026-10-05 12:42
+  last_modified: 2026-10-05 13:24
   status: current
 ---
 
@@ -169,7 +169,10 @@ paths and displays the selected command's help, including the root when a
 trailing topic does not resolve to a subcommand.
 A child exiting normally returns its own exit code;
 a signal termination maps to `128 + signal number`. Ctrl+Q returns 0 when
-draining and terminal restoration succeed. Startup, terminal, drawing, drain,
+draining and terminal restoration succeed. SIGHUP, SIGINT, or SIGTERM sent to
+the wrapper cancels the session and returns 1; stderr reports
+`run child frame: <name> signal received`, where `<name>` is `hangup`,
+`interrupt`, or `terminated`. Startup, terminal, drawing, drain,
 restoration, cancellation, and output-write failures produce an error and a
 nonzero status. Help rendering errors are reported on stderr through Cobra's
 help callback. A terminal too small for the reserved regions produces the
@@ -182,7 +185,10 @@ the same terminal produces a startup error.
 
 An interactive run starts a child in a PTY, changes terminal modes, paints the
 frame, and restores terminal state on exit. Cancellation terminates observed
-process groups in the owned child session. Normal teardown also terminates
+process groups in the owned child session and waits for the child. Closing the
+terminal window or tab ends terminal input and typically delivers SIGHUP; either
+cancels the session, and restoration failures on the closed terminal are added
+to the reported error. Normal teardown also terminates
 remaining observed groups after the leader exits; detached processes in new
 sessions are excluded. The child retains its ordinary permissions and filesystem
 or network side effects. Metadata commands start no child process. Completion
