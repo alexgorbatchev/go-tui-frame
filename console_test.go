@@ -120,6 +120,68 @@ func TestCaptureNegotiatesDistinctKeysAndRestoresOuterMode(t *testing.T) {
 	}
 }
 
+// A Kitty reply that misses the probe deadline arrives during the session,
+// where the frame consumes it and starts using the reported support. Ghostty
+// keeps a Kitty keyboard stack per screen and reuses the alternate screen, so
+// flags the session leaves there apply to the next full-screen program.
+func TestLateKittyReplyLeavesOuterKeyboardAsFound(t *testing.T) {
+	const marker = "late-kitty-reply"
+	h := newHarness(t)
+	s := newProbedSession(t, h)
+	c := s.console
+	if !c.kittySupported {
+		t.Fatal("native test outer terminal did not report Kitty support")
+	}
+	// Reconstruct the state the probe leaves at its deadline when the outer
+	// terminal has not answered the Kitty query yet.
+	c.kittyPending, c.kittySupported = true, false
+	c.capture = true
+	if err := c.enter(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.route(decodePacket(t, "\x1b[?1u")); err != nil {
+		t.Fatal(err)
+	}
+	var routed []byte
+	for _, p := range s.queue {
+		routed = append(routed, p.bytes[p.offset:]...)
+	}
+	if len(routed) != 0 {
+		t.Errorf("child received %q, want the late Kitty reply consumed", routed)
+	}
+	// A marker after the mode writes proves the native outer parsed them.
+	if _, err := c.renderer.WriteString(ansi.SetWindowTitle(marker)); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.renderer.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	var outer emulator.State
+	awaitOuter(t, h, "the session's Kitty flags after the late reply", func(got emulator.State) bool {
+		outer = got
+		return got.Title == marker
+	})
+	if !outer.Alternate || outer.KittyKeyboardFlags != ghostty.KittyKeyDisambiguate {
+		t.Fatalf("session outer alternate=%v flags=%d, want alternate flags=%d", outer.Alternate, outer.KittyKeyboardFlags, ghostty.KittyKeyDisambiguate)
+	}
+	if err := c.restore(); err != nil {
+		t.Fatal(err)
+	}
+	// The next full-screen program enters the alternate screen the session left.
+	// Its title follows the restoration in the same terminal stream.
+	const next = "next-program"
+	if _, err := h.slave.WriteString(ansi.SetModeAltScreenSaveCursor + ansi.SetWindowTitle(next)); err != nil {
+		t.Fatal(err)
+	}
+	awaitOuter(t, h, "the next program's alternate screen", func(got emulator.State) bool {
+		outer = got
+		return got.Title == next
+	})
+	if !outer.Alternate || outer.KittyKeyboardFlags != 0 {
+		t.Fatalf("next program's alternate=%v Kitty flags=%d, want alternate flags=0", outer.Alternate, outer.KittyKeyboardFlags)
+	}
+}
+
 func TestConsoleRestoresObservedEntryModes(t *testing.T) {
 	h := newHarness(t)
 	h.mu.Lock()

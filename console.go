@@ -275,11 +275,8 @@ func (c *console) enter() error {
 	if err := c.setMode(synchronizedOutputMode, false); err != nil {
 		return err
 	}
-	if c.kittySupported {
-		if _, err := c.renderer.WriteString(ansi.PushKittyKeyboard(0)); err != nil {
-			return err
-		}
-		c.kittyPushed = true
+	if err := c.pushKittyKeyboard(); err != nil {
+		return err
 	}
 	if err := c.setMode(7, true); err != nil {
 		return err
@@ -297,6 +294,23 @@ func (c *console) enter() error {
 		return err
 	}
 	return c.renderer.Flush()
+}
+
+// pushKittyKeyboard gives the session its own entry, with every flag off, on the
+// outer terminal's Kitty keyboard stack once the terminal reports support.
+// Ghostty keeps that stack per screen and reuses the alternate screen, so the
+// session sets flags only in this entry, which restore pops before leaving the
+// alternate screen. Flags another program left there do not apply meanwhile.
+func (c *console) pushKittyKeyboard() error {
+	if !c.kittySupported || c.kittyPushed {
+		return nil
+	}
+	if _, err := c.renderer.WriteString(ansi.PushKittyKeyboard(0)); err != nil {
+		return err
+	}
+	c.kittyPushed = true
+	c.kittyFlags = 0
+	return nil
 }
 
 // switchable reports whether the outer terminal reported m as set or reset
@@ -377,6 +391,10 @@ func (c *console) syncInput(s emulator.State) error {
 	// alternate screen with alternate scroll set and no mouse tracking. Child
 	// tracking turns conversion off even while outer tracking is withheld.
 	if err := c.setMode(alternateScrollMode, s.Alternate && s.Modes[ghostty.ModeAltScroll] && !s.MouseTracking); err != nil {
+		return err
+	}
+	// A Kitty reply that missed the probe deadline reports support after enter.
+	if err := c.pushKittyKeyboard(); err != nil {
 		return err
 	}
 	flags := s.KittyKeyboardFlags

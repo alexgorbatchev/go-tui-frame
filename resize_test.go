@@ -19,6 +19,7 @@ import (
 
 // newProbedSession negotiates with the harness terminal and builds the session
 // Run would enter, with the child's native terminal on a separate real PTY.
+// The console is restored when the test ends unless the test restored it.
 func newProbedSession(t *testing.T, h *terminalHarness) *session[struct{}] {
 	t.Helper()
 	fd, device, w, err := inspectConsole(h.slave, h.slave)
@@ -30,6 +31,14 @@ func newProbedSession(t *testing.T, h *terminalHarness) *session[struct{}] {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
+		// Restoration releases the device. A test that inspects the restored
+		// terminal restores the console itself, and Run restores it only once.
+		consoleOwners.Lock()
+		owned := consoleOwners.devices[device]
+		consoleOwners.Unlock()
+		if !owned {
+			return
+		}
 		if err := c.restore(); err != nil {
 			t.Error(err)
 		}
