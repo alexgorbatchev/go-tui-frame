@@ -238,9 +238,37 @@ func (r *inputRouter) routeKey(packet input.Packet, event uv.KeyEvent, state emu
 		return result, err
 	}
 	defer r.releaseKeyText()
-	result.Bytes, err = r.terminal.EncodeKey(r.key)
+	result.Bytes, err = r.terminal.EncodeKey(r.key, optionAsAlt(event.Key()))
 	result.Origin = "key-protocol"
 	return result, err
+}
+
+// optionAsAlt reads the outer terminal's macOS Option decision from one key
+// report. That terminal has already decided whether Option means Alt: an Alt
+// key arrives with no text, or with the key's own or shifted character. With
+// all keys and associated text reported, a terminal whose Option is not Alt
+// still sets the Alt bit and attaches the text Option composed. Pinned Ghostty
+// reports Option+b on a US layout as CSI 98;3;8747u under Kitty flags 25. The
+// child must then receive that text.
+func optionAsAlt(key uv.Key) ghostty.OptionAsAlt {
+	if key.Mod.Contains(uv.ModAlt) && key.Text != "" && !isOwnKeyText(key) {
+		return ghostty.OptionAsAltFalse
+	}
+	return ghostty.OptionAsAltTrue
+}
+
+// isOwnKeyText reports whether the key's text is its own or shifted character.
+// Without a reported shifted key, Shift and Caps Lock select the upper case,
+// as UV's Kitty decoder does when it derives text.
+func isOwnKeyText(key uv.Key) bool {
+	text, size := utf8.DecodeRuneInString(key.Text)
+	if size != len(key.Text) {
+		return false
+	}
+	if text == key.Code || key.ShiftedCode != 0 && text == key.ShiftedCode {
+		return true
+	}
+	return key.ShiftedCode == 0 && key.Mod&(uv.ModShift|uv.ModCapsLock) != 0 && text == unicode.ToUpper(key.Code)
 }
 
 func nativeMods(mod uv.KeyMod) (ghostty.Mods, error) {

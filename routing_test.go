@@ -110,6 +110,70 @@ func TestRoutingUsesNativeKeyboardEncodingForDifferentModes(t *testing.T) {
 	}
 }
 
+// An outer terminal reports Option that means Alt as Alt with no text, or with
+// the key's own or shifted character, so the child receives its Alt encoding.
+// Host profiles mirror console.syncInput: Capture adds Kitty disambiguation,
+// or modifyOtherKeys mode 2 when Kitty is unavailable.
+// Ghostty applies option-as-alt only on macOS, so these cases go red only there.
+func TestRoutingConvertsAltModifiedKeysToChildAltEncoding(t *testing.T) {
+	const associatedHost = ghostty.KittyKeyDisambiguate | ghostty.KittyKeyReportAssociated
+	for _, tt := range []struct {
+		name, modes, input, want string
+		hostKitty                ghostty.KittyKeyFlags
+		hostModifyOtherKeys2     bool
+	}{
+		{name: "Kitty host to legacy child", input: "\x1b[98;3u", want: "\x1bb", hostKitty: ghostty.KittyKeyDisambiguate},
+		{name: "modifyOtherKeys host to legacy child", input: "\x1b[27;3;98~", want: "\x1bb", hostModifyOtherKeys2: true},
+		{
+			name: "Kitty host to modifyOtherKeys child", modes: "\x1b[>4;2m", input: "\x1b[98;3u", want: "\x1b[27;3;98~",
+			hostKitty: ghostty.KittyKeyDisambiguate, hostModifyOtherKeys2: true,
+		},
+		{name: "Kitty host to associated-text child", modes: "\x1b[>16u", input: "\x1b[98;3u", want: "\x1b[98;3u", hostKitty: associatedHost},
+		{name: "own text to associated-text child", modes: "\x1b[>16u", input: "\x1b[98;3;98u", want: "\x1b[98;3u", hostKitty: associatedHost},
+		{name: "reported shifted text to associated-text child", modes: "\x1b[>16u", input: "\x1b[98:66;4;66u", want: "\x1b[98;4u", hostKitty: associatedHost},
+		{name: "upper-case shifted text to associated-text child", modes: "\x1b[>16u", input: "\x1b[98;4;66u", want: "\x1b[98;4u", hostKitty: associatedHost},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r, em := newRouterTest(t, nil)
+			s := routerState(t, em, tt.modes)
+			r.host.KittyFlags, r.host.ModifyOtherKeys2 = tt.hostKitty, tt.hostModifyOtherKeys2
+			if got := routeBytes(t, r, s, tt.input); string(got) != tt.want {
+				t.Fatalf("converted Alt+b = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// With all keys and associated text reported, an outer terminal whose Option
+// is not Alt still sets the Alt bit and attaches the text Option composed. A
+// child requesting Kitty flags 24 gets host flags 25 under Capture. Every child
+// protocol receives that text, as it did before Option was treated as Alt.
+func TestRoutingKeepsOptionComposedText(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("the native encoder honors option-as-alt only on macOS")
+	}
+	// Option+L on a German layout composes "@"; Option+b on a US layout, "∫".
+	const optionL, optionB = "\x1b[108;3;64u", "\x1b[98;3;8747u"
+	for _, tt := range []struct{ name, modes, input, want string }{
+		{"Kitty child, Option+L", "\x1b[>24u", optionL, optionL},
+		{"Kitty child, Option+b", "\x1b[>24u", optionB, optionB},
+		{"legacy child, Option+L", "", optionL, "@"},
+		{"legacy child, Option+b", "", optionB, "∫"},
+		{"modifyOtherKeys child, Option+L", "\x1b[>4;2m", optionL, "@"},
+		{"modifyOtherKeys child, Option+b", "\x1b[>4;2m", optionB, "∫"},
+		{"Kitty child, text starting with the key", "\x1b[>24u", "\x1b[98;3;98:769u", "\x1b[98;3;98:769u"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r, em := newRouterTest(t, nil)
+			s := routerState(t, em, tt.modes)
+			r.host.KittyFlags = ghostty.KittyKeyDisambiguate | ghostty.KittyKeyReportAll | ghostty.KittyKeyReportAssociated
+			if got := routeBytes(t, r, s, tt.input); string(got) != tt.want {
+				t.Fatalf("converted Option-composed text = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRoutingUnknownHostModifyOtherKeysUsesWireProvenance(t *testing.T) {
 	r, em := newRouterTest(t, nil)
 	r.host.ModifyOtherKeysKnown = false
@@ -332,7 +396,7 @@ func TestRoutingNativeTextSurvivesGCAndReleasesBorrow(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime.GC()
-	got, err := em.EncodeKey(r.key)
+	got, err := em.EncodeKey(r.key, ghostty.OptionAsAltTrue)
 	if err != nil || string(got) != text {
 		t.Fatalf("borrowed native text = %q, %v", got, err)
 	}

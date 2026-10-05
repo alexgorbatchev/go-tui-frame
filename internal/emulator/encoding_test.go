@@ -23,7 +23,7 @@ func TestNativeKeyEncodingFollowsChildModes(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			writeTerminal(t, em, tt.output)
-			got, err := em.EncodeKey(event)
+			got, err := em.EncodeKey(event, ghostty.OptionAsAltTrue)
 			if err != nil || string(got) != tt.want {
 				t.Fatalf("EncodeKey = %q, %v, want %q", got, err, tt.want)
 			}
@@ -35,13 +35,13 @@ func TestNativeKeyEncodingFollowsChildModes(t *testing.T) {
 	event.SetUnshiftedCodepoint('q')
 	event.SetMods(ghostty.ModCtrl)
 	event.SetAction(ghostty.KeyActionRelease)
-	got, err := em.EncodeKey(event)
+	got, err := em.EncodeKey(event, ghostty.OptionAsAltTrue)
 	if err != nil || string(got) != "\x1b[113;5:3u" {
 		t.Fatalf("Kitty release = %q, %v", got, err)
 	}
 	writeTerminal(t, em, "\x1b[<u\x1b[>4;2m")
 	event.SetAction(ghostty.KeyActionPress)
-	got, err = em.EncodeKey(event)
+	got, err = em.EncodeKey(event, ghostty.OptionAsAltTrue)
 	if err != nil || string(got) != "\x1b[27;5;113~" {
 		t.Fatalf("modifyOtherKeys = %q, %v", got, err)
 	}

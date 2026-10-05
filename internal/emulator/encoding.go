@@ -16,8 +16,11 @@ var (
 
 // EncodeKey borrows a live native event and produces an owned wire sequence
 // using the child's current modes, including the native modifyOtherKeys state.
+// optionAsAlt states whether the event's Alt modifier is Alt or the macOS
+// Option key that composed the event's text. Child state cannot express that,
+// so the caller decides it per event; non-macOS encoders always treat Alt as Alt.
 // A nil result means the requested child protocol produces no event.
-func (t *Terminal) EncodeKey(event *ghostty.KeyEvent) ([]byte, error) {
+func (t *Terminal) EncodeKey(event *ghostty.KeyEvent, optionAsAlt ghostty.OptionAsAlt) ([]byte, error) {
 	if t == nil || t.native == nil {
 		return nil, ErrClosed
 	}
@@ -28,6 +31,9 @@ func (t *Terminal) EncodeKey(event *ghostty.KeyEvent) ([]byte, error) {
 		return nil, err
 	}
 	t.keys.SetOptFromTerminal(t.native)
+	// SetOptFromTerminal resets option-as-alt to false, so the caller's
+	// decision must be applied after every load of the child's modes.
+	t.keys.SetOptOptionAsAlt(optionAsAlt)
 	result, err := t.keys.Encode(event)
 	if err != nil {
 		return nil, fmt.Errorf("encoding native key: %w", err)
