@@ -60,9 +60,17 @@ _native target prefix cache:
     fi
     cd "$source"
     # Ghostty's build runs git in its source directory to detect a version.
-    # The extracted archive is not a repository, so stop git's repository
-    # discovery at $root instead of letting it find this checkout.
-    GIT_CEILING_DIRECTORIES="$root" zig build -Demit-lib-vt -Demit-xcframework=false -Doptimize=ReleaseFast -Dtarget="$1" --prefix "$root/$2" --cache-dir "$root/$3" --global-cache-dir "$root/zig-global-cache"
+    # The extracted archive is not a repository. Clear the repository
+    # variables a calling git process exports (hooks, rebase --exec), then
+    # stop git's repository discovery at $root so it cannot find this checkout.
+    git_local_env=''
+    if command -v git >/dev/null; then
+        git_local_env=$(git rev-parse --local-env-vars)
+    fi
+    (
+        unset $git_local_env
+        GIT_CEILING_DIRECTORIES="$root" zig build -Demit-lib-vt -Demit-xcframework=false -Doptimize=ReleaseFast -Dtarget="$1" --prefix "$root/$2" --cache-dir "$root/$3" --global-cache-dir "$root/zig-global-cache"
+    )
     PKG_CONFIG_PATH="$root/$2/share/pkgconfig" pkg-config --static --libs --cflags libghostty-vt-static
 
 # Build all packages and the example wrapper after native setup.

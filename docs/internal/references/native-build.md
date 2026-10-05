@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 16:06
-last_modified: 2026-10-05 10:16
+last_modified: 2026-10-05 10:28
 status: current
 ---
 
@@ -50,12 +50,19 @@ zig build -Demit-lib-vt -Demit-xcframework=false -Doptimize=ReleaseFast
 ```
 
 Ghostty's build runs `git` in its source directory to detect its version. The
-extracted archive is not a git repository, so the recipe runs `zig build` with
+extracted archive is not a git repository, so the recipe runs `zig build`
+without git's repository-local variables and with
 [`GIT_CEILING_DIRECTORIES`](https://git-scm.com/docs/git#Documentation/git.txt-GITCEILINGDIRECTORIES)
-set to `.tmp/native`. Git's repository discovery stops there, so Ghostty uses
-the development version it assigns to builds outside a git checkout. Without
-that boundary, git reports this repository's branch, commit, and tag to
-Ghostty, and a tag that is not Ghostty's matching release tag aborts the build.
+set to `.tmp/native`. It removes the variables that
+[`git rev-parse --local-env-vars`](https://git-scm.com/docs/git-rev-parse#Documentation/git-rev-parse.txt---local-env-vars)
+lists. [Git hooks](https://git-scm.com/docs/githooks) export `GIT_DIR` and
+`GIT_WORK_TREE`, `git rebase --exec` exports `GIT_DIR` in a linked worktree, and
+the ceiling does not apply to an explicit `GIT_DIR`. Git's repository
+discovery then stops at `.tmp/native`, so Ghostty uses the development version
+it assigns to builds outside a git checkout. Without these limits, git reports
+this repository's branch, commit, and tag to Ghostty, and a tag that is not
+Ghostty's matching release tag aborts the build. When `git` is not installed,
+Ghostty uses the same development version.
 
 The recipe supplies absolute installation and cache directories. macOS uses
 `.tmp/native/prefix`. Linux selects the host architecture with just's native
@@ -135,6 +142,7 @@ link contract and is not used by these recipes.
 - [Pinned native Zig manifest](https://github.com/ghostty-org/ghostty/blob/33da6848d63b3bba2b4f31ab1531d618f2795192/build.zig.zon)
 - [Pinned native git version detection](https://github.com/ghostty-org/ghostty/blob/33da6848d63b3bba2b4f31ab1531d618f2795192/src/build/GitVersion.zig)
 - [Git repository discovery boundary](https://git-scm.com/docs/git#Documentation/git.txt-GITCEILINGDIRECTORIES)
+- [Git repository-local environment variables](https://git-scm.com/docs/git-rev-parse#Documentation/git-rev-parse.txt---local-env-vars)
 - [Official Zig versions and checksums](https://ziglang.org/download/index.json)
 - [Zig musl cross-compilation](https://ziglang.org/learn/overview/#cross-compilation)
 - [Go cgo compiler and pkg-config environment](https://pkg.go.dev/cmd/cgo)
