@@ -14,6 +14,13 @@ import (
 
 var errDemoQuit = errors.New("quit requested by frame capture")
 
+// childExit carries a child's nonzero exit status out of the command. The
+// status is the run's result rather than a wrapper failure, so execute returns
+// it as the process status without reporting a diagnostic.
+type childExit struct{ code int }
+
+func (e *childExit) Error() string { return fmt.Sprintf("child exited with status %d", e.code) }
+
 func runDemo(ctx context.Context, child *exec.Cmd, showcase, inheritTerminal bool) error {
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
@@ -42,7 +49,7 @@ func runDemo(ctx context.Context, child *exec.Cmd, showcase, inheritTerminal boo
 		}
 	}
 	if code != 0 {
-		return &exitError{code: code, err: fmt.Errorf("child exited with status %d", code)}
+		return &childExit{code: code}
 	}
 	return nil
 }

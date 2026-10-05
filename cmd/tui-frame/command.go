@@ -26,7 +26,10 @@ func newRootCommand() (*cobra.Command, error) {
 		Short:        "Wrap a terminal application with a live frame",
 		Version:      version,
 		SilenceUsage: true,
-		Args:         commandArgs,
+		// execute reports errors itself so that a child's exit status stays
+		// a status rather than a diagnostic.
+		SilenceErrors: true,
+		Args:          commandArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDemo(cmd.Context(), exec.Command(args[0], args[1:]...), showcase, !noTerminalInheritance)
 		},

@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+
+	"github.com/spf13/cobra"
 )
 
 func main() { os.Exit(execute()) }
@@ -23,21 +25,34 @@ func execute() int {
 		}
 		return 1
 	}
-	if err := cmd.ExecuteContext(ctx); err != nil {
-		var status *exitError
-		if errors.As(err, &status) {
-			return status.code
-		}
-		// The session's own error can precede the signal, as when a closed
-		// terminal ends input before its SIGHUP arrives, so the status comes
-		// from the context's cause rather than from err.
-		var received *signalCause
-		if errors.As(context.Cause(ctx), &received) {
-			return signalExitCode(received.signal)
-		}
-		return 1
+	executed, err := cmd.ExecuteContextC(ctx)
+	return reportStatus(ctx, executed, err)
+}
+
+// reportStatus prints err once on the executed command's stderr with its error
+// prefix, as Cobra does without SilenceErrors, and returns the process status
+// for it. A child's own exit status is returned without a diagnostic.
+func reportStatus(ctx context.Context, cmd *cobra.Command, err error) int {
+	if err == nil {
+		return 0
 	}
-	return 0
+	var child *childExit
+	if errors.As(err, &child) {
+		return child.code
+	}
+	cmd.PrintErrln(cmd.ErrPrefix(), err.Error())
+	var status *exitError
+	if errors.As(err, &status) {
+		return status.code
+	}
+	// The session's own error can precede the signal, as when a closed
+	// terminal ends input before its SIGHUP arrives, so the status comes
+	// from the context's cause rather than from err.
+	var received *signalCause
+	if errors.As(context.Cause(ctx), &received) {
+		return signalExitCode(received.signal)
+	}
+	return 1
 }
 
 // signalCause is the cancellation cause for a received signal.

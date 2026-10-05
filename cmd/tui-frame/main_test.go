@@ -17,31 +17,60 @@ import (
 )
 
 func TestExecuteUsesNativeCobraAndChildExitStatuses(t *testing.T) {
+	const missing = "/nonexistent/go-tui-frame-child"
+	startFailure := "run child frame: start child PTY: fork/exec " + missing + ": no such file or directory"
 	tests := []struct {
 		name string
 		args []string
 		code int
+		// report is the one error line execute writes after the mode's prefix;
+		// empty means stderr stays empty.
+		report string
 	}{
-		{"help", []string{"--help"}, 0},
-		{"version", []string{"--version"}, 0},
-		{"missing child", nil, 2},
-		{"unknown flag", []string{"--bogus"}, 2},
-		{"missing executable", []string{"--", "/nonexistent/go-tui-frame-child"}, 1},
-		{"child success", []string{"--", "sh", "-c", "exit 0"}, 0},
-		{"showcase child success", []string{"--showcase", "--", "sh", "-c", "exit 0"}, 0},
-		{"showcase startup failure", []string{"--showcase", "--", "/nonexistent/go-tui-frame-child"}, 1},
-		{"child failure", []string{"--", "sh", "-c", "exit 17"}, 17},
-		{"child signal", []string{"--", "sh", "-c", "kill -TERM $$"}, 143},
+		{"help", []string{"--help"}, 0, ""},
+		{"version", []string{"--version"}, 0, ""},
+		{"missing child", nil, 2, "put the child command after --, for example: tui-frame -- nvim"},
+		{"unknown flag", []string{"--bogus"}, 2, "unknown flag: --bogus"},
+		{"generated command validation", []string{"completion", "bash", "extra"}, 1, `unknown command "extra" for "tui-frame completion bash"`},
+		{"missing executable", []string{"--", missing}, 1, startFailure},
+		{"child success", []string{"--", "sh", "-c", "exit 0"}, 0, ""},
+		{"showcase child success", []string{"--showcase", "--", "sh", "-c", "exit 0"}, 0, ""},
+		{"showcase startup failure", []string{"--showcase", "--", missing}, 1, startFailure},
+		// A child's own status is a result, not a wrapper failure.
+		{"child failure", []string{"--", "sh", "-c", "exit 17"}, 17, ""},
+		{"child signal", []string{"--", "sh", "-c", "kill -TERM $$"}, 143, ""},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, diagnostic := cliTTY(t, tt.args...)
-			t.Setenv("AGENT", "1")
-			if got := execute(); got != tt.code {
-				message, readErr := os.ReadFile(diagnostic)
-				t.Fatalf("execute returned %d, want %d: %s (%v)", got, tt.code, message, readErr)
-			}
-		})
+	for _, mode := range []struct{ agent, prefix string }{{"1", "ERR:"}, {"0", "[ERROR]"}} {
+		for _, tt := range tests {
+			t.Run("AGENT="+mode.agent+"/"+tt.name, func(t *testing.T) {
+				_, diagnostic := cliTTY(t, tt.args...)
+				t.Setenv("AGENT", mode.agent)
+				got := execute()
+				data, err := os.ReadFile(diagnostic)
+				if err != nil {
+					t.Fatal(err)
+				}
+				message := string(data)
+				if got != tt.code {
+					t.Fatalf("execute returned %d, want %d: %s", got, tt.code, message)
+				}
+				if tt.report == "" {
+					if message != "" {
+						t.Fatalf("stderr = %q, want no diagnostic", message)
+					}
+					return
+				}
+				var reported []string
+				for _, line := range strings.Split(message, "\n") {
+					if report, ok := strings.CutPrefix(line, mode.prefix+" "); ok {
+						reported = append(reported, report)
+					}
+				}
+				if len(reported) != 1 || reported[0] != tt.report {
+					t.Fatalf("stderr reports %q, want only %q after %q: %q", reported, tt.report, mode.prefix, message)
+				}
+			})
+		}
 	}
 }
 
@@ -316,12 +345,5 @@ func TestExecutePreservesEveryChildArgument(t *testing.T) {
 	got, err := os.ReadFile(output)
 	if err != nil || string(got) != strings.Join(want, "\x00")+"\x00" {
 		t.Fatalf("child argv changed: %q, %v", got, err)
-	}
-}
-
-func TestRunDemoReportsItsNativeStartError(t *testing.T) {
-	_, diagnostic, err := executeCommand(t, "--", "/nonexistent/go-tui-frame-child")
-	if err == nil || !strings.Contains(err.Error(), "run child frame") || !strings.Contains(diagnostic, "run child frame") {
-		t.Fatalf("startup error did not preserve context: %v, %q", err, diagnostic)
 	}
 }

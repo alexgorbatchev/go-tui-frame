@@ -9,7 +9,7 @@ description: >-
 author: alexgorbatchev
 metadata:
   created_on: 2026-10-01 13:23
-  last_modified: 2026-10-05 13:48
+  last_modified: 2026-10-05 14:13
   status: current
 ---
 
@@ -168,16 +168,18 @@ arguments return 1 with a diagnostic. Cobra's generated `help` resolves command
 paths and displays the selected command's help, including the root when a
 trailing topic does not resolve to a subcommand.
 A child exiting normally returns its own exit code;
-a signal termination maps to `128 + signal number`. Ctrl+Q returns 0 when
-draining and terminal restoration succeed. SIGHUP, SIGINT, or SIGTERM sent to
-the wrapper cancels the session and returns `128 + signal number`: 129 for
+a signal termination maps to `128 + signal number`. The status alone reports
+the child's result; the wrapper writes no diagnostic for it. Ctrl+Q returns 0
+when draining and terminal restoration succeed. SIGHUP, SIGINT, or SIGTERM sent
+to the wrapper cancels the session and returns `128 + signal number`: 129 for
 SIGHUP, 130 for SIGINT, and 143 for SIGTERM. Stderr reports
 `run child frame: <name> signal received`, where `<name>` is `hangup`,
 `interrupt`, or `terminated`. Startup, terminal, drawing, drain,
-restoration, cancellation, and output-write failures produce an error and a
-nonzero status. Help rendering errors are reported on stderr through Cobra's
-help callback. A terminal too small for the reserved regions produces the
-library's viewport-size error.
+restoration, cancellation, and output-write failures report their error once
+on stderr after the `ERR:` or `[ERROR]` prefix and return a nonzero status.
+Help rendering errors are reported on stderr through Cobra's help callback. A
+terminal too small for the reserved regions produces the library's
+viewport-size error.
 
 The terminal must answer the alternate-screen status probe and report DEC mode
 1049 inactive before the session starts. An unsupported probe, an already active
