@@ -12,10 +12,10 @@ import (
 // the revoked terminal; an error there would skip the child's graceful
 // termination.
 func TestPausedOuterInputReportsRevokedTerminal(t *testing.T) {
-	s, outer, _ := newQueueSession(t, "", io.Discard)
+	s, outer, _ := newQueueSession(t, "\x1b[>20u", io.Discard)
 	fillChild(t, s, inputQueueLimit-10)
-	// Each key needs more than the 10 bytes of room left.
-	if _, err := outer.WriteString("ab"); err != nil {
+	keys, _ := lateRoomKeys()
+	if _, err := outer.Write(keys); err != nil {
 		t.Fatal(err)
 	}
 	buf := make([]byte, readBufferSize)

@@ -34,9 +34,8 @@ func TestOuterInputWaitsForBusyChild(t *testing.T) {
 		input, want      []byte
 	}{
 		{name: "bracketed paste", childModes: "\x1b[?2004h", input: paste, want: paste},
-		// UV reports "Z" as Shift with its shifted text. Kitty alternates and
-		// associated text turn each such byte into 14 child-input bytes.
-		{name: "Kitty-encoded keys", childModes: "\x1b[>20u", input: bytes.Repeat([]byte("Z"), keys), want: bytes.Repeat([]byte("\x1b[122:90;2;90u"), keys)},
+		// Each key turns into 14 child-input bytes.
+		{name: "Kitty-encoded keys", childModes: "\x1b[>20u", input: bytes.Repeat([]byte("Z"), keys), want: bytes.Repeat([]byte(shiftedZ), keys)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			s, outer, child := newQueueSession(t, tt.childModes, io.Discard)
@@ -120,11 +119,15 @@ func TestPausedOuterInputReportsHangup(t *testing.T) {
 // bare Escape while the bytes completing its sequence wait unread.
 func TestPausedOuterInputKeepsEscapeSequences(t *testing.T) {
 	// Kitty disambiguation makes a timed-out Escape "\x1b[27u", unlike the
-	// Up arrow "\x1b[A" whose first byte it is.
-	s, outer, child := newQueueSession(t, "\x1b[>1u", io.Discard)
-	want := fillChild(t, s, inputQueueLimit-10)
+	// Up arrow "\x1b[A" whose first byte it is. Flags 4 and 16 widen the held
+	// keys ahead of it.
+	s, outer, child := newQueueSession(t, "\x1b[>21u", io.Discard)
+	keys, routed := lateRoomKeys()
+	want := append(fillChild(t, s, inputQueueLimit-10), routed...)
 	want = append(want, "ab\x1b[A"...)
-	if _, err := outer.WriteString("ab\x1b"); err != nil {
+	// One small write reaches the session in one read, on Linux as one
+	// line-discipline buffer.
+	if _, err := outer.Write(append(keys, "ab\x1b"...)); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(30 * time.Second)
@@ -168,12 +171,13 @@ func TestPausedOuterInputKeepsEscapeSequences(t *testing.T) {
 func TestReleasedReplyReachesTerminalWithoutRepaint(t *testing.T) {
 	var out bytes.Buffer
 	// The child reports focus. The terminal's DECRPM reply makes its mode 1004
-	// switchable, so routing the reply mirrors the child's mode there.
-	s, outer, child := newQueueSession(t, "\x1b[?1004h", &out)
+	// switchable, so routing the reply mirrors the child's mode there. Kitty
+	// flags 4 and 16 widen the held keys ahead of the reply.
+	s, outer, child := newQueueSession(t, "\x1b[?1004h\x1b[>20u", &out)
 	s.console.pending = map[ansi.DECMode]bool{1004: true}
-	want := fillChild(t, s, inputQueueLimit-10)
-	// The 12-byte reply is wider than the 10 bytes of room left.
-	if _, err := outer.WriteString("\x1b[?1004;2$y"); err != nil {
+	keys, routed := lateRoomKeys()
+	want := append(fillChild(t, s, inputQueueLimit-10), routed...)
+	if _, err := outer.Write(append(keys, "\x1b[?1004;2$y"...)); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(30 * time.Second)
@@ -470,9 +474,26 @@ func pumpPTY(quit <-chan struct{}, fd int, events int16, transfer func() (bool, 
 	}
 }
 
+// shiftedZ is what "Z" routes to for a child with Kitty flags 4 and 16: UV
+// reports it as Shift with its shifted text, which gains the shifted alternate
+// and the associated text.
+const shiftedZ = "\x1b[122:90;2;90u"
+
+// lateRoomKeys returns outer keys whose routing needs more queue room than a
+// child PTY can free after fillChild returns, and the bytes they route to.
+// Linux only queues a PTY write; the kernel later moves it into the slave's
+// 4096-byte line-discipline buffer (N_TTY_BUF_SIZE in drivers/tty/n_tty.c),
+// so up to that much room appears late. 400 keys of 14 routed bytes exceed
+// it. The child must request Kitty flags 4 and 16.
+func lateRoomKeys() (keys, routed []byte) {
+	const n = 400
+	return bytes.Repeat([]byte("Z"), n), bytes.Repeat([]byte(shiftedZ), n)
+}
+
 // fillChild queues n filler bytes and writes them until the child's PTY takes
 // no more, then tops the queue up to n bytes again. It returns every filler
-// byte the child will read.
+// byte the child will read. The PTY may still free room afterwards; see
+// lateRoomKeys.
 func fillChild(t *testing.T, s *session[struct{}], n int) []byte {
 	t.Helper()
 	fill := bytes.Repeat([]byte("x"), n)
