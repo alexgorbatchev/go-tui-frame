@@ -1,6 +1,7 @@
 package frame
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -29,6 +30,9 @@ func TestSessionChild(t *testing.T) {
 	if os.Getenv("FRAME_TEST_MODE") == "sleep" {
 		time.Sleep(30 * time.Second)
 		os.Exit(0)
+	}
+	if os.Getenv("FRAME_TEST_MODE") == "count" {
+		countInput(os.Getenv("FRAME_TEST_COUNT_FILE"))
 	}
 	if os.Getenv("FRAME_TEST_MODE") == "groups" {
 		cmd := exec.Command(os.Args[0], "-test.run=^TestSessionChild$")
@@ -72,6 +76,31 @@ func TestSessionChild(t *testing.T) {
 	}
 }
 
+// countInput runs a child that sends the terminal no queries: it counts the
+// input bytes before "q", records the count in file and exits.
+func countInput(file string) {
+	if _, err := term.MakeRaw(os.Stdin.Fd()); err != nil {
+		os.Exit(91)
+	}
+	if _, err := fmt.Fprint(os.Stdout, "counting"); err != nil {
+		os.Exit(92)
+	}
+	total, buf := 0, make([]byte, 65536)
+	for {
+		n, err := os.Stdin.Read(buf)
+		if err != nil {
+			os.Exit(93)
+		}
+		if i := bytes.IndexByte(buf[:n], 'q'); i >= 0 {
+			if err := os.WriteFile(file, []byte(strconv.Itoa(total+i)), 0600); err != nil {
+				os.Exit(94)
+			}
+			os.Exit(0)
+		}
+		total += n
+	}
+}
+
 type terminalHarness struct {
 	master, slave *os.File
 	fd            int
@@ -79,6 +108,7 @@ type terminalHarness struct {
 	em            *emulator.Terminal
 	stop, done    chan struct{}
 	err           error
+	lead          []byte // Input sent before the first query replies.
 }
 
 const harnessCellWidth, harnessCellHeight = 10, 20
@@ -169,18 +199,34 @@ func (h *terminalHarness) read() {
 				replies = append(replies, e.Bytes...)
 			}
 		}
+		var lead []byte
+		if len(replies) > 0 {
+			lead, h.lead = h.lead, nil
+		}
 		h.mu.Unlock()
 		if err != nil {
 			h.fail(err)
 			return
 		}
 		if len(replies) > 0 {
+			if err := h.writeReplies(lead); err != nil {
+				h.fail(err)
+				return
+			}
 			if err := h.writeReplies(replies); err != nil {
 				h.fail(err)
 				return
 			}
 		}
 	}
+}
+
+// precede makes the terminal send input before it answers its first query, as
+// when a user types or pastes while the frame starts.
+func (h *terminalHarness) precede(input []byte) {
+	h.mu.Lock()
+	h.lead = input
+	h.mu.Unlock()
 }
 
 func (h *terminalHarness) writeReplies(replies []byte) error {

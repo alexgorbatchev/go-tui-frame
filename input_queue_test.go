@@ -2,11 +2,13 @@ package frame
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -188,6 +190,59 @@ func TestReleasedReplyReachesTerminalWithoutRepaint(t *testing.T) {
 	}
 	if sent := out.Bytes()[written:]; !bytes.Contains(sent, []byte("\x1b[?1004h")) {
 		t.Fatalf("routing the held reply wrote %q to the terminal, want focus reporting enabled", sent)
+	}
+}
+
+// More than a queue of input arriving while the frame starts reaches the child
+// once it reads, instead of ending the session as it is routed.
+func TestRunHoldsStartupInputBeyondTheQueue(t *testing.T) {
+	h := newHarness(t)
+	paste := bracketedPaste(inputQueueLimit + readBufferSize)
+	// The terminal answers the frame's capability queries only after the
+	// paste, so the startup probe must read all of it before the loop starts.
+	h.precede(paste)
+	dir, err := os.MkdirTemp(".tmp", "startup-input-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Error(err)
+		}
+	})
+	count := dir + "/count"
+	cmd := childCommand(t)
+	cmd.Env = append(cmd.Env, "FRAME_TEST_MODE=count", "FRAME_TEST_COUNT_FILE="+count)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	done := startRun(ctx, New(cmd, struct{}{}).Terminal(h.slave, h.slave))
+	for !strings.Contains(h.text(), "counting") {
+		select {
+		case got := <-done:
+			t.Fatalf("Run ended before the child read its input: %#v, %v", got.result, got.err)
+		case <-ctx.Done():
+			t.Fatal("child did not start", ctx.Err())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if _, err := unix.Write(h.fd, []byte("q")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-done:
+		if got.err != nil || got.result.ProcessState == nil || !got.result.ProcessState.Success() {
+			t.Fatalf("Run = %#v, %v", got.result, got.err)
+		}
+	case <-ctx.Done():
+		t.Fatal("Run did not finish", ctx.Err())
+	}
+	received, err := os.ReadFile(count)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The child does not request bracketed paste, so its markers are dropped.
+	if want := strconv.Itoa(len(paste) - len("\x1b[200~\x1b[201~")); string(received) != want {
+		t.Fatalf("child received %s pasted bytes, want %s", received, want)
 	}
 }
 
