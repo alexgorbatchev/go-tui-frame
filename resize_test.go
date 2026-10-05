@@ -45,7 +45,7 @@ func newProbedSession(t *testing.T, h *terminalHarness) *session[struct{}] {
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if _, err := c.probe(ctx, nil); err != nil {
+	if _, err := c.probe(ctx, nil, capabilityTimeout); err != nil {
 		t.Fatal(err)
 	}
 	f := New(exec.Command("sh"), struct{}{})

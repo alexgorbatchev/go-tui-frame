@@ -68,13 +68,12 @@ func (f *Frame[T]) Run(ctx context.Context) (result Result, err error) {
 	}
 	c.capture = f.capture != nil
 	c.inherit = f.inheritTerminal
-	c.probeTimeout = f.probeTimeout
 	defer func() {
 		result.CleanupError = errors.Join(result.CleanupError, c.restore())
 		f.close()
 		err = errors.Join(err, result.CleanupError)
 	}()
-	saved, err := c.probe(ctx, events)
+	saved, err := c.probe(ctx, events, f.probeTimeout)
 	if err != nil {
 		return result, err
 	}

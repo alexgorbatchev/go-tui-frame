@@ -45,7 +45,7 @@ func TestCaptureNegotiatesDistinctKeysAndRestoresOuterMode(t *testing.T) {
 			c.capture = tt.capture
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
-			if _, err := c.probe(ctx, nil); err != nil {
+			if _, err := c.probe(ctx, nil, capabilityTimeout); err != nil {
 				t.Fatal(err)
 			}
 			if !c.kittySupported {
@@ -210,7 +210,7 @@ func TestConsoleRestoresObservedEntryModes(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if _, err := c.probe(ctx, nil); err != nil {
+	if _, err := c.probe(ctx, nil, capabilityTimeout); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.enter(); err != nil {
@@ -434,7 +434,7 @@ func TestProbeConsumesZeroCellSizeReply(t *testing.T) {
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	saved, err := c.probe(ctx, events)
+	saved, err := c.probe(ctx, events, capabilityTimeout)
 	events.close()
 	if err != nil {
 		t.Fatal(err)
@@ -714,7 +714,7 @@ func TestConsoleAppliesAndRestoresReportedModifyOtherKeys(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if _, err := c.probe(ctx, nil); err != nil {
+	if _, err := c.probe(ctx, nil, capabilityTimeout); err != nil {
 		t.Fatal(err)
 	}
 	// libghostty-vt does not answer this optional query. Decode a reported
@@ -824,7 +824,7 @@ func TestProbeKeepsPasteFramingAcrossSessionHandoff(t *testing.T) {
 	defer events.close()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if _, err := c.probe(ctx, events); err != nil {
+	if _, err := c.probe(ctx, events, capabilityTimeout); err != nil {
 		t.Fatal(err)
 	}
 	select {

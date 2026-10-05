@@ -483,7 +483,7 @@ func TestConsoleProbesSynchronizedOutput(t *testing.T) {
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if _, err := c.probe(ctx, nil); err != nil {
+	if _, err := c.probe(ctx, nil, capabilityTimeout); err != nil {
 		t.Fatal(err)
 	}
 	if !c.switchable(2026) {
@@ -517,7 +517,7 @@ func TestConsoleRestoresSynchronizedEntryHold(t *testing.T) {
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if _, err := c.probe(ctx, nil); err != nil {
+	if _, err := c.probe(ctx, nil, capabilityTimeout); err != nil {
 		t.Fatal(err)
 	}
 	for _, step := range []struct {
