@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 10:47
-last_modified: 2026-10-05 12:42
+last_modified: 2026-10-05 13:05
 status: current
 ---
 
@@ -30,7 +30,7 @@ flowchart LR
     V -. generated replies .-> I
 ```
 
-The child endpoint needs a coherent identity. Its `TERM`, terminfo entry, device attributes, mode responses, size, and input encodings must describe the virtual terminal actually implemented. The current session assigns `TERM=xterm-256color`, `COLORTERM=truecolor`, and removes physical-terminal vendor/graphics hints. Native DA callbacks suppress feature replies rather than advertising a native renderer the wrapper does not provide. The frame owns the outer alternate screen; child screen switches remain virtual. Native canvases supply clipped frame drawing without competing terminal writers. ([session environment](../session.go), [native options](../internal/emulator/effects.go), [terminfo](https://invisible-island.net/ncurses/man/terminfo.5.html), [kitty screen-specific keyboard state](https://sw.kovidgoyal.net/kitty/keyboard-protocol/).)
+The child endpoint needs a coherent identity. Its `TERM`, terminfo entry, device attributes, mode responses, size, and input encodings must describe the virtual terminal actually implemented. The current session assigns `TERM=xterm-256color`, `COLORTERM=truecolor`, and removes physical-terminal vendor/graphics hints. The emulator registers no device-attributes handler, so DA queries receive libghostty's defaults (DA1 `CSI ? 62 ; 22 c`: VT220 with ANSI color only, advertising no Sixel or other graphics feature). The frame owns the outer alternate screen; child screen switches remain virtual. Native canvases supply clipped frame drawing without competing terminal writers. ([session environment](../session.go), [native options](../internal/emulator/effects.go), [device attributes](../internal/emulator/terminal.go), [terminfo](https://invisible-island.net/ncurses/man/terminfo.5.html), [kitty screen-specific keyboard state](https://sw.kovidgoyal.net/kitty/keyboard-protocol/).)
 
 Prior art confirms the architecture and supplies API precedents, but **an existing multiplexer application is not an embeddable single-child Go library**. GNU Screen's always-visible caption and hardstatus resemble the requested experience. Its default Ctrl-A command prefix differs from the required uncaptured input. tmux's control mode exports pane output and lifecycle notifications, while Zellij's plugin events provide a useful distinction between state snapshots and event subscriptions. Reusing either application as a mandatory backend would introduce its own server/plugin protocol and session concerns. ([GNU Screen captions](https://www.gnu.org/software/screen/manual/html_node/Caption.html), [hardstatus](https://www.gnu.org/software/screen/manual/html_node/Hardstatus.html), [command character](https://www.gnu.org/software/screen/manual/html_node/Command-Character.html), [tmux control mode](https://github.com/tmux/tmux/wiki/Control-Mode), [Zellij events](https://zellij.dev/documentation/plugin-api-events).)
 
