@@ -273,6 +273,12 @@ func TestSessionWritesOnlyCursorAppearanceTheChildChanged(t *testing.T) {
 		{name: "style changed", steps: []string{"\x1b[3 q"}, session: []string{ansi.SetCursorStyle(3)}, ending: []string{resetStyle}},
 		{name: "color changed", steps: []string{"\x1b]12;#123456\x07"}, session: []string{ansi.SetCursorColor("#123456")}, ending: []string{resetColor}},
 		{
+			name:    "changed twice",
+			steps:   []string{"\x1b[3 q\x1b]12;#123456\x07", "\x1b[4 q\x1b]12;#654321\x07"},
+			session: []string{ansi.SetCursorStyle(3), ansi.SetCursorColor("#123456"), ansi.SetCursorStyle(4), ansi.SetCursorColor("#654321")},
+			ending:  []string{resetStyle, resetColor},
+		},
+		{
 			name:    "changed and reset by the child",
 			steps:   []string{"\x1b[3 q\x1b]12;#123456\x07", "\x1b[0 q\x1b]112\x07"},
 			session: []string{ansi.SetCursorStyle(3), ansi.SetCursorColor("#123456"), resetStyle, resetColor},
