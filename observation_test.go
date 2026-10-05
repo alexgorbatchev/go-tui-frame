@@ -202,9 +202,16 @@ func TestObserverQueueCountIsBoundedAndShutdownRejects(t *testing.T) {
 
 func pausedDispatcher(t *testing.T, handler func(Event)) (*eventDispatcher, <-chan struct{}, func()) {
 	t.Helper()
+	return pausedSelectedDispatcher(t, allEvents, handler)
+}
+
+// pausedSelectedDispatcher observes kinds and holds the first delivered
+// record's callback until release, so later records meet a non-idle budget.
+func pausedSelectedDispatcher(t *testing.T, kinds eventMask, handler func(Event)) (*eventDispatcher, <-chan struct{}, func()) {
+	t.Helper()
 	entered, resume := make(chan struct{}), make(chan struct{})
 	var started, released sync.Once
-	d := newEventDispatcher(allEvents, func(ev Event) {
+	d := newEventDispatcher(kinds, func(ev Event) {
 		started.Do(func() { close(entered); <-resume })
 		handler(ev)
 	})
@@ -262,8 +269,13 @@ func TestObservationSubscriptionsValidateBeforeStarting(t *testing.T) {
 }
 
 func TestFilteredEventsDoNotConsumeQueueBudget(t *testing.T) {
-	d := newEventDispatcher(eventBit(ChildOutput), func(Event) {})
-	defer d.close()
+	// An idle dispatcher admits any lone record, so hold a selected record's
+	// callback: only filtering can then admit an excluded record over budget.
+	d, entered, _ := pausedSelectedDispatcher(t, eventBit(ChildOutput), func(Event) {})
+	if err := d.emit(Event{Kind: ChildOutput, Bytes: []byte("held")}); err != nil {
+		t.Fatal(err)
+	}
+	<-entered
 	if err := d.emit(Event{Kind: OuterInput, Bytes: make([]byte, observationByteLimit+1)}); err != nil {
 		t.Fatalf("excluded event consumed queue budget: %v", err)
 	}
