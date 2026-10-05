@@ -1,9 +1,9 @@
 package frame
 
 import (
+	"bytes"
 	"fmt"
 	"strconv"
-	"strings"
 
 	"github.com/alexgorbatchev/go-tui-frame/internal/emulator"
 	"github.com/alexgorbatchev/go-tui-frame/internal/input"
@@ -13,17 +13,28 @@ import (
 )
 
 const cursorStyleQuery = "\x1bP$q q\x1b\\"
+
+// cursorStyleSuffix ends a DECRPSS cursor-style report: the DECSCUSR
+// intermediate and final bytes after the reported style.
+const cursorStyleSuffix = " q"
 const colorSchemeQuery = "\x1b[?996n"
 
-// longestReportedColor is the longest XParseColor rgb: form a terminal
-// reports: four hex digits per channel.
+// oscSeparator separates OSC parameters.
+const oscSeparator = ";"
+
+// longestReportedColor is the longest color form terminals put in color
+// reports: XParseColor rgb: with four hex digits per channel, which is how
+// Ghostty encodes them.
 const longestReportedColor = "rgb:ffff/ffff/ffff"
 
-// replyDataSize bounds the OSC and DCS payload the reply parser collects. The
-// longest solicited reply is an OSC 4 that reports the whole palette in one
-// sequence. The parser drops payload bytes past its buffer without reporting
-// them, so the buffer holds one byte more than that reply, and a payload that
-// fills it may have been cut short.
+// replyDataSize bounds the OSC and DCS payload the reply parser collects.
+// Each palette entry is queried on its own, so a real reply is short, at most
+// 4;255;rgb:ffff/ffff/ffff. The bound is instead the longest reply
+// consumeColor accepts in the form terminals emit: one OSC 4 that reports all
+// 256 entries with three-digit indices. The accepted color syntax itself has
+// no maximum length, because it allows padding. The parser drops payload bytes
+// past its buffer without reporting them, so the buffer holds one byte more
+// than that reply, and a payload that fills it may have been cut short.
 const replyDataSize = len("4") + ghostty.PaletteSize*len(";255;"+longestReportedColor) + 1
 
 type terminalPreferences struct {
@@ -112,7 +123,7 @@ func (c *console) consumePreferenceReply(packet input.Packet) bool {
 		}
 		p.schemePending = false
 		if !p.closed {
-			p.profile.Scheme = &scheme
+			p.profile.Scheme = new(scheme)
 		}
 		return true
 	}
@@ -133,7 +144,7 @@ func (c *console) consumePreferenceString(packet input.Packet) bool {
 }
 
 func (p *terminalPreferences) handleOsc(cmd int, data []byte) {
-	p.consumed = !truncatedReply(data) && p.consumeColor(cmd, string(data))
+	p.consumed = !truncatedReply(data) && p.consumeColor(cmd, data)
 }
 
 func (p *terminalPreferences) handleDcs(cmd ansi.Cmd, params ansi.Params, data []byte) {
@@ -141,21 +152,21 @@ func (p *terminalPreferences) handleDcs(cmd ansi.Cmd, params ansi.Params, data [
 	if !p.cursorPending || cmd != ansi.Cmd(ansi.Command(0, '$', 'r')) || truncatedReply(data) {
 		return
 	}
-	if valid == 0 && (len(data) == 0 || strings.HasSuffix(string(data), " q")) {
+	if valid == 0 && (len(data) == 0 || bytes.HasSuffix(data, []byte(cursorStyleSuffix))) {
 		p.cursorPending = false
 		p.consumed = true
 		return
 	}
-	if !strings.HasSuffix(string(data), " q") {
+	if !bytes.HasSuffix(data, []byte(cursorStyleSuffix)) {
 		return
 	}
-	style, err := strconv.Atoi(strings.TrimSuffix(string(data), " q"))
+	style, err := strconv.Atoi(string(bytes.TrimSuffix(data, []byte(cursorStyleSuffix))))
 	if valid != 1 || err != nil || style < 1 || style > 6 {
 		return
 	}
 	p.cursorPending, p.consumed = false, true
 	if !p.closed {
-		p.cursorStyle = &style
+		p.cursorStyle = new(style)
 	}
 }
 
@@ -165,38 +176,21 @@ func truncatedReply(data []byte) bool {
 	return len(data) >= replyDataSize
 }
 
-func (p *terminalPreferences) consumeColor(cmd int, data string) bool {
-	_, values, ok := strings.Cut(data, ";")
+// consumeColor reads the parser's buffer in place. A color is converted to a
+// string for Ghostty only while its query is pending, so settled and
+// unsolicited reports do not allocate.
+func (p *terminalPreferences) consumeColor(cmd int, data []byte) bool {
+	_, values, ok := bytes.Cut(data, []byte(oscSeparator))
 	if !ok {
 		return false
 	}
 	if cmd == 4 {
-		parts := strings.Split(values, ";")
-		if len(parts)%2 != 0 {
-			return false
-		}
-		consumed := false
-		for i := 0; i < len(parts); i += 2 {
-			index, err := strconv.ParseUint(parts[i], 10, 8)
-			if err != nil || !p.palette[uint8(index)] {
-				continue
-			}
-			rgb, err := ghostty.ParseColor(parts[i+1])
-			if err != nil {
-				continue
-			}
-			delete(p.palette, uint8(index))
-			if !p.closed {
-				p.profile.Palette[uint8(index)] = rgb
-			}
-			consumed = true
-		}
-		return consumed
+		return p.consumePalette(values)
 	}
 	if !p.colors[cmd] {
 		return false
 	}
-	rgb, err := ghostty.ParseColor(values)
+	rgb, err := ghostty.ParseColor(string(values))
 	if err != nil {
 		return false
 	}
@@ -204,14 +198,43 @@ func (p *terminalPreferences) consumeColor(cmd int, data string) bool {
 	if !p.closed {
 		switch cmd {
 		case 10:
-			p.profile.Foreground = &rgb
+			p.profile.Foreground = new(rgb)
 		case 11:
-			p.profile.Background = &rgb
+			p.profile.Background = new(rgb)
 		case 12:
-			p.profile.Cursor = &rgb
+			p.profile.Cursor = new(rgb)
 		}
 	}
 	return true
+}
+
+func (p *terminalPreferences) consumePalette(values []byte) bool {
+	// OSC 4 reports index;color pairs, so an even separator count leaves an
+	// index without a color.
+	separators := bytes.Count(values, []byte(oscSeparator))
+	if separators%2 == 0 || len(p.palette) == 0 {
+		return false
+	}
+	consumed := false
+	for range (separators + 1) / 2 {
+		var field, color []byte
+		field, values, _ = bytes.Cut(values, []byte(oscSeparator))
+		color, values, _ = bytes.Cut(values, []byte(oscSeparator))
+		index, err := strconv.ParseUint(string(field), 10, 8)
+		if err != nil || !p.palette[uint8(index)] {
+			continue
+		}
+		rgb, err := ghostty.ParseColor(string(color))
+		if err != nil {
+			continue
+		}
+		delete(p.palette, uint8(index))
+		if !p.closed {
+			p.profile.Palette[uint8(index)] = rgb
+		}
+		consumed = true
+	}
+	return consumed
 }
 
 func (c *console) childOptions(size emulator.Size) emulator.Options {

@@ -30,29 +30,45 @@ func preferenceReply(t *testing.T, c *console, reply string) bool {
 
 func TestPreferenceParsingDoesNotAllocatePerPacket(t *testing.T) {
 	for _, tt := range []struct {
-		name, raw string
-		event     any
+		name    string
+		inherit bool
+		// settle is a reply consumed before measuring, so raw repeats a
+		// query that is no longer pending.
+		settle, raw string
+		event       any
 	}{
-		{"key", "a", uv.KeyPressEvent{}},
-		{"SGR mouse", "\x1b[<0;10;5M", uv.MouseClickEvent{}},
+		{name: "key", raw: "a", event: uv.KeyPressEvent{}},
+		{name: "SGR mouse", raw: "\x1b[<0;10;5M", event: uv.MouseClickEvent{}},
+		{name: "key while the color scheme is pending", inherit: true, raw: "a", event: uv.KeyPressEvent{}},
+		{name: "settled OSC 11", inherit: true, settle: "\x1b]11;#203040\x07", raw: "\x1b]11;#203040\x07", event: uv.BackgroundColorEvent{}},
+		{name: "settled OSC 4", inherit: true, settle: "\x1b]4;1;#123456\x07", raw: "\x1b]4;1;#123456;1;#654321\x07", event: uv.UnknownOscEvent("")},
+		{name: "unsolicited OSC 10", raw: "\x1b]10;#203040\x07", event: uv.ForegroundColorEvent{}},
+		{name: "unsolicited OSC 4", raw: "\x1b]4;1;#123456\x07", event: uv.UnknownOscEvent("")},
+		{name: "out-of-range DECRPSS cursor style", raw: "\x1bP1$r9 q\x1b\\", event: uv.UnknownDcsEvent("")},
+		// Go converts at most 32 bytes to a string on the stack.
+		{name: "DECRPSS payload over 32 bytes", raw: "\x1bP2$r" + strings.Repeat("a", 40) + "\x1b\\", event: uv.UnknownDcsEvent("")},
+		{name: "declined DECRPSS payload over 32 bytes", raw: "\x1bP0$r" + strings.Repeat("a", 40) + "\x1b\\", event: uv.UnknownDcsEvent("")},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			packet := decodePacket(t, tt.raw)
 			if reflect.TypeOf(packet.Event) != reflect.TypeOf(tt.event) {
 				t.Fatalf("packet %q decoded as %T, want %T", tt.raw, packet.Event, tt.event)
 			}
-			c := &console{}
+			c := &console{inherit: tt.inherit, pending: make(map[ansi.DECMode]bool)}
 			c.preferenceQueries()
-			c.consumePreferenceString(packet)
+			if tt.settle != "" && !preferenceReply(t, c, tt.settle) {
+				t.Fatalf("settling reply %q was not consumed", tt.settle)
+			}
+			c.consumeReply(packet)
 			if allocs := testing.AllocsPerRun(100, func() {
-				if c.consumePreferenceString(packet) {
-					t.Fatalf("%s packet was consumed as a preference reply", tt.name)
+				if c.consumeReply(packet) {
+					t.Fatalf("%s packet was consumed as a reply", tt.name)
 				}
 			}); allocs != 0 {
 				t.Fatalf("parsing a %s packet allocated %.0f times", tt.name, allocs)
 			}
-			if !c.preferences.cursorPending || !c.preferences.colors[12] {
-				t.Fatal("cursor style and color queries must stay pending so every run parses the packet")
+			if !c.preferences.cursorPending || !c.preferences.colors[12] || c.preferences.schemePending != tt.inherit {
+				t.Fatal("cursor and color-scheme queries must stay pending so every run parses the packet")
 			}
 		})
 	}
