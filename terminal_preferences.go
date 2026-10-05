@@ -15,6 +15,17 @@ import (
 const cursorStyleQuery = "\x1bP$q q\x1b\\"
 const colorSchemeQuery = "\x1b[?996n"
 
+// longestReportedColor is the longest XParseColor rgb: form a terminal
+// reports: four hex digits per channel.
+const longestReportedColor = "rgb:ffff/ffff/ffff"
+
+// replyDataSize bounds the OSC and DCS payload the reply parser collects. The
+// longest solicited reply is an OSC 4 that reports the whole palette in one
+// sequence. The parser drops payload bytes past its buffer without reporting
+// them, so the buffer holds one byte more than that reply, and a payload that
+// fills it may have been cut short.
+const replyDataSize = len("4") + ghostty.PaletteSize*len(";255;"+longestReportedColor) + 1
+
 type terminalPreferences struct {
 	profile                              emulator.Profile
 	colors                               map[int]bool
@@ -22,6 +33,13 @@ type terminalPreferences struct {
 	modes                                map[ghostty.Mode]bool
 	cursorPending, schemePending, closed bool
 	cursorStyle                          *int
+	// The reply parser belongs to the console instead of the ansi pool:
+	// resizing a pooled parser shrinks the buffer that later pool users, such
+	// as Ultraviolet's styled-string drawing, collect OSC 8 hyperlinks into.
+	parser *ansi.Parser
+	// consumed records whether the packet being parsed was a solicited reply,
+	// so the handlers installed once on parser need no per-packet closures.
+	consumed bool
 }
 
 func (p *terminalPreferences) pending() bool {
@@ -30,6 +48,9 @@ func (p *terminalPreferences) pending() bool {
 
 func (c *console) preferenceQueries() string {
 	p := &c.preferences
+	p.parser = ansi.NewParser()
+	p.parser.SetDataSize(replyDataSize)
+	p.parser.SetHandler(ansi.Handler{HandleOsc: p.handleOsc, HandleDcs: p.handleDcs})
 	p.colors = map[int]bool{12: true}
 	p.cursorPending = true
 	query := ansi.RequestCursorColor + cursorStyleQuery
@@ -103,37 +124,45 @@ func (c *console) consumePreferenceString(packet input.Packet) bool {
 	if len(p.colors) == 0 && len(p.palette) == 0 && !p.cursorPending {
 		return false
 	}
-	consumed := false
-	parser := ansi.GetParser()
-	defer ansi.PutParser(parser)
-	parser.SetDataSize(len(packet.Raw))
-	parser.SetHandler(ansi.Handler{
-		HandleOsc: func(cmd int, data []byte) { consumed = p.consumeColor(cmd, string(data)) },
-		HandleDcs: func(cmd ansi.Cmd, params ansi.Params, data []byte) {
-			valid, _, _ := params.Param(0, 0)
-			if !p.cursorPending || cmd != ansi.Cmd(ansi.Command(0, '$', 'r')) {
-				return
-			}
-			if valid == 0 && (len(data) == 0 || strings.HasSuffix(string(data), " q")) {
-				p.cursorPending = false
-				consumed = true
-				return
-			}
-			if !strings.HasSuffix(string(data), " q") {
-				return
-			}
-			style, err := strconv.Atoi(strings.TrimSuffix(string(data), " q"))
-			if valid != 1 || err != nil || style < 1 || style > 6 {
-				return
-			}
-			p.cursorPending, consumed = false, true
-			if !p.closed {
-				p.cursorStyle = &style
-			}
-		},
-	})
-	parser.Parse(packet.Raw)
-	return consumed
+	p.consumed = false
+	p.parser.Reset()
+	for _, b := range packet.Raw {
+		p.parser.Advance(b)
+	}
+	return p.consumed
+}
+
+func (p *terminalPreferences) handleOsc(cmd int, data []byte) {
+	p.consumed = !truncatedReply(data) && p.consumeColor(cmd, string(data))
+}
+
+func (p *terminalPreferences) handleDcs(cmd ansi.Cmd, params ansi.Params, data []byte) {
+	valid, _, _ := params.Param(0, 0)
+	if !p.cursorPending || cmd != ansi.Cmd(ansi.Command(0, '$', 'r')) || truncatedReply(data) {
+		return
+	}
+	if valid == 0 && (len(data) == 0 || strings.HasSuffix(string(data), " q")) {
+		p.cursorPending = false
+		p.consumed = true
+		return
+	}
+	if !strings.HasSuffix(string(data), " q") {
+		return
+	}
+	style, err := strconv.Atoi(strings.TrimSuffix(string(data), " q"))
+	if valid != 1 || err != nil || style < 1 || style > 6 {
+		return
+	}
+	p.cursorPending, p.consumed = false, true
+	if !p.closed {
+		p.cursorStyle = &style
+	}
+}
+
+// truncatedReply reports whether a payload filled the reply parser's buffer
+// and may therefore have lost bytes the parser dropped.
+func truncatedReply(data []byte) bool {
+	return len(data) >= replyDataSize
 }
 
 func (p *terminalPreferences) consumeColor(cmd int, data string) bool {
