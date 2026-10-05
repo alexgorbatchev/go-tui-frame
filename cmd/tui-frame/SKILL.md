@@ -9,7 +9,7 @@ description: >-
 author: alexgorbatchev
 metadata:
   created_on: 2026-10-01 13:23
-  last_modified: 2026-10-05 16:15
+  last_modified: 2026-10-05 16:20
   status: current
 ---
 
@@ -194,17 +194,16 @@ terminal's defaults with `CSI 0 SP q` or `OSC 112`, so a cursor override that
 was active before the run is lost. With `--no-terminal-inheritance`, the child
 starts with the emulator's default cursor style, which differs from any other
 reported style even when the child never changes its cursor. Cancellation
-terminates observed
-process groups in the owned child session and waits for the child. Closing the
-terminal window or tab ends terminal input and typically delivers SIGHUP; either
-cancels the session, and restoration failures on the closed terminal are added
-to the reported error. A SIGHUP received during that shutdown returns 129 even
-when ended input stopped the session first. Normal teardown also terminates
-remaining observed groups after the leader exits; detached processes in new
-sessions are excluded. The child retains its ordinary permissions and filesystem
-or network side effects. Metadata commands start no child process. Completion
-commands print scripts; apply shell redirection or sourcing explicitly when
-installing those scripts.
+terminates observed process groups in the owned child session and waits for the
+child. Closing the terminal window or tab ends terminal input and typically
+delivers SIGHUP; either cancels the session, and restoration failures on the
+closed terminal are added to the reported error. A SIGHUP received during that
+shutdown returns 129 even when ended input stopped the session first. Normal
+teardown also terminates remaining observed groups after the leader exits;
+detached processes in new sessions are excluded. The child retains its ordinary
+permissions and filesystem or network side effects. Metadata commands start no
+child process. Completion commands print scripts; apply shell redirection or
+sourcing explicitly when installing those scripts.
 
 Read `AGENT=1 tui-frame skill`, then inspect `tui-frame --version` when matching
 this reference to a deployed executable. Run `tui-frame -- <command> [args...]`
