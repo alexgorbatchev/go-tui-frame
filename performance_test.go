@@ -123,7 +123,7 @@ func TestCursorAppearanceRepaintsWithoutCellOrPositionChanges(t *testing.T) {
 	}{
 		{"\x1b[3 q", ansi.SetCursorStyle(3)},
 		{"\x1b]12;#123456\a", ansi.SetCursorColor("#123456")},
-		{"\x1b]112\a", ansi.SetCursorColor("#abcdef")},
+		{"\x1b]112\a", ansi.ResetCursorColor},
 	} {
 		readRepaintChunk(t, s, slave, step.sequence)
 		if err := s.render(false); err != nil {

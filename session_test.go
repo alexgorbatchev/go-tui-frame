@@ -134,11 +134,27 @@ func newSizedHarness(t *testing.T, cols, rows uint16) *terminalHarness {
 	return newCellHarness(t, cols, rows, harnessCellWidth, harnessCellHeight)
 }
 
-// newCellHarness models an outer terminal of the given grid and cell pixels,
-// keeping the PTY pixel size and the emulator answering size queries in
-// agreement. Zero cell pixels model a terminal that cannot measure its cells.
+// newCellHarness models an outer terminal of the given grid and cell pixels
+// with libghostty's defaults.
 func newCellHarness(t *testing.T, cols, rows, cellWidth, cellHeight uint16) *terminalHarness {
 	t.Helper()
+	return newTerminalHarness(t, harnessTerminal{cols: cols, rows: rows, cellWidth: cellWidth, cellHeight: cellHeight})
+}
+
+// harnessTerminal describes the outer terminal a harness models. defaults
+// holds its configured defaults, as a Ghostty configuration sets the cursor
+// color and style that programs can override and reset; nil keeps libghostty's.
+type harnessTerminal struct {
+	cols, rows, cellWidth, cellHeight uint16
+	defaults                          *emulator.Profile
+}
+
+// newTerminalHarness models an outer terminal, keeping the PTY pixel size and
+// the emulator answering size queries in agreement. Zero cell pixels model a
+// terminal that cannot measure its cells.
+func newTerminalHarness(t *testing.T, terminal harnessTerminal) *terminalHarness {
+	t.Helper()
+	cols, rows, cellWidth, cellHeight := terminal.cols, terminal.rows, terminal.cellWidth, terminal.cellHeight
 	m, s, err := pty.Open()
 	if err != nil {
 		t.Fatal(err)
@@ -146,7 +162,7 @@ func newCellHarness(t *testing.T, cols, rows, cellWidth, cellHeight uint16) *ter
 	if err := pty.Setsize(s, &pty.Winsize{Cols: cols, Rows: rows, X: cols * cellWidth, Y: rows * cellHeight}); err != nil {
 		t.Fatal(err)
 	}
-	em, err := emulator.New(emulator.Options{Size: emulator.Size{Cols: int(cols), Rows: int(rows), CellWidthPx: uint32(cellWidth), CellHeightPx: uint32(cellHeight)}, GraphemeWidth: true})
+	em, err := emulator.New(emulator.Options{Size: emulator.Size{Cols: int(cols), Rows: int(rows), CellWidthPx: uint32(cellWidth), CellHeightPx: uint32(cellHeight)}, GraphemeWidth: true, Profile: terminal.defaults})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -184,58 +184,71 @@ func TestInheritanceChild(t *testing.T) {
 	}
 }
 
+// The outer cursor follows its configured defaults, as Ghostty's does until a
+// program overrides it. Restoration resets the cursor the child changed to
+// those defaults instead of writing the reported values back as an override.
 func TestSessionRendersAndRestoresChildCursor(t *testing.T) {
-	h := newHarness(t)
-	h.mu.Lock()
-	_, err := h.em.Write([]byte("\x1b[6 q\x1b]12;#abcdef\x07"))
-	h.mu.Unlock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command(os.Args[0], "-test.run=^TestInheritanceChild$")
-	cmd.Env = append(os.Environ(), "FRAME_INHERITANCE_CURSOR=1")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	done := make(chan error, 1)
-	go func() { _, err := New(cmd, struct{}{}).Terminal(h.slave, h.slave).Run(ctx); done <- err }()
-	awaitText(t, h, "cursor changed")
-	h.mu.Lock()
-	s, err := h.em.State()
-	h.mu.Unlock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if s.Cursor.VisualStyle != ghostty.CursorVisualStyleUnderline || !s.Cursor.Blinking || s.Colors.Cursor != (ghostty.ColorRGB{R: 0x12, G: 0x34, B: 0x56}) {
-		t.Errorf("outer cursor did not reflect child: cursor=%+v color=%+v", s.Cursor, s.Colors.Cursor)
-	}
-	if _, err := unix.Write(h.fd, []byte("q")); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-ctx.Done():
-		t.Fatal(ctx.Err())
-	}
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		h.mu.Lock()
-		s, err = h.em.State()
-		h.mu.Unlock()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !s.Alternate {
-			if s.Cursor.VisualStyle != ghostty.CursorVisualStyleBar || s.Cursor.Blinking || s.Colors.Cursor != (ghostty.ColorRGB{R: 0xab, G: 0xcd, B: 0xef}) {
-				t.Errorf("cursor was not restored: %+v %+v", s.Cursor, s.Colors.Cursor)
+	bar, steady := ghostty.TerminalCursorStyleBar, false
+	configured := ghostty.ColorRGB{R: 0xab, G: 0xcd, B: 0xef}
+	for _, tt := range []struct {
+		name  string
+		color *ghostty.ColorRGB
+	}{
+		{"configured color", &configured},
+		// Without a configured color, the terminal answers OSC 12 with its
+		// foreground and has no cursor color of its own, so Ghostty draws the
+		// cursor from the theme. Writing the report back would pin it.
+		{"no configured color", nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			defaults := &emulator.Profile{Cursor: tt.color, CursorStyle: &bar, CursorBlink: &steady}
+			h := newTerminalHarness(t, harnessTerminal{cols: 40, rows: 12, cellWidth: harnessCellWidth, cellHeight: harnessCellHeight, defaults: defaults})
+			cmd := exec.Command(os.Args[0], "-test.run=^TestInheritanceChild$")
+			cmd.Env = append(os.Environ(), "FRAME_INHERITANCE_CURSOR=1")
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { _, err := New(cmd, struct{}{}).Terminal(h.slave, h.slave).Run(ctx); done <- err }()
+			awaitText(t, h, "cursor changed")
+			h.mu.Lock()
+			s, err := h.em.State()
+			h.mu.Unlock()
+			if err != nil {
+				t.Fatal(err)
 			}
-			return
-		}
-		time.Sleep(time.Millisecond)
+			if s.Cursor.VisualStyle != ghostty.CursorVisualStyleUnderline || !s.Cursor.Blinking || s.Colors.Cursor != (ghostty.ColorRGB{R: 0x12, G: 0x34, B: 0x56}) {
+				t.Errorf("outer cursor did not reflect child: cursor=%+v color=%+v", s.Cursor, s.Colors.Cursor)
+			}
+			if _, err := unix.Write(h.fd, []byte("q")); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			deadline := time.Now().Add(time.Second)
+			for time.Now().Before(deadline) {
+				h.mu.Lock()
+				s, err = h.em.State()
+				h.mu.Unlock()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !s.Alternate {
+					if s.Cursor.VisualStyle != ghostty.CursorVisualStyleBar || s.Cursor.Blinking || s.Colors.CursorHasValue != (tt.color != nil) || tt.color != nil && s.Colors.Cursor != *tt.color {
+						t.Errorf("cursor was not restored to the defaults: %+v color=%+v set=%v", s.Cursor, s.Colors.Cursor, s.Colors.CursorHasValue)
+					}
+					return
+				}
+				time.Sleep(time.Millisecond)
+			}
+			t.Fatal("alternate screen was not restored")
+		})
 	}
-	t.Fatal("alternate screen was not restored")
 }
 
 // cursorSequence matches the cursor appearance sequences the frame writes:
@@ -244,23 +257,25 @@ var cursorSequence = regexp.MustCompile(`\x1b\[[0-9]* q|\x1b\]1?12(;[^\x07]*)?\x
 
 // An inherited cursor the child leaves alone is already the outer terminal's
 // own appearance. Writing it back would turn the terminal's configured or
-// theme-following cursor into an explicit override that outlives the session.
+// theme-following cursor into an explicit override that outlives the session,
+// so the frame writes only what the child changed and resets that to the
+// terminal's defaults.
 func TestSessionWritesOnlyCursorAppearanceTheChildChanged(t *testing.T) {
 	style := 6
 	rgb := ghostty.ColorRGB{R: 0xab, G: 0xcd, B: 0xef}
-	restoreStyle, restoreColor := ansi.SetCursorStyle(style), ansi.SetCursorColor("#abcdef")
+	resetStyle, resetColor := ansi.SetCursorStyle(0), ansi.ResetCursorColor
 	for _, tt := range []struct {
 		name            string
 		steps           []string
 		session, ending []string
 	}{
 		{name: "unchanged"},
-		{name: "style changed", steps: []string{"\x1b[3 q"}, session: []string{ansi.SetCursorStyle(3)}, ending: []string{restoreStyle}},
-		{name: "color changed", steps: []string{"\x1b]12;#123456\x07"}, session: []string{ansi.SetCursorColor("#123456")}, ending: []string{restoreColor}},
+		{name: "style changed", steps: []string{"\x1b[3 q"}, session: []string{ansi.SetCursorStyle(3)}, ending: []string{resetStyle}},
+		{name: "color changed", steps: []string{"\x1b]12;#123456\x07"}, session: []string{ansi.SetCursorColor("#123456")}, ending: []string{resetColor}},
 		{
 			name:    "changed and reset by the child",
 			steps:   []string{"\x1b[3 q\x1b]12;#123456\x07", "\x1b[0 q\x1b]112\x07"},
-			session: []string{ansi.SetCursorStyle(3), ansi.SetCursorColor("#123456"), restoreStyle, restoreColor},
+			session: []string{ansi.SetCursorStyle(3), ansi.SetCursorColor("#123456"), resetStyle, resetColor},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
