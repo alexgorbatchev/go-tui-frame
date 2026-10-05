@@ -9,7 +9,7 @@ description: >-
 author: alexgorbatchev
 metadata:
   created_on: 2026-10-01 13:23
-  last_modified: 2026-10-05 14:32
+  last_modified: 2026-10-05 16:07
   status: current
 ---
 
@@ -187,10 +187,13 @@ alternate screen, mismatched input/output terminals, or another frame owning
 the same terminal produces a startup error.
 
 An interactive run starts a child in a PTY, changes terminal modes, paints the
-frame, and restores terminal state on exit. A cursor style or color the child
-changed is reset to the terminal's defaults with `CSI 0 SP q` or `OSC 112`, so
-a cursor override that was active before the run is lost; a child that leaves
-its cursor alone causes no cursor writes. Cancellation terminates observed
+frame, and restores terminal state on exit. While the child's cursor matches
+what the terminal reported at startup, the frame writes no cursor sequences. A
+cursor style or color that differs is reset to the terminal's defaults with
+`CSI 0 SP q` or `OSC 112`, so a cursor override that was active before the run
+is lost. With `--no-terminal-inheritance`, the child starts with the emulator's
+default cursor style, which differs from any other reported style even when the
+child never changes its cursor. Cancellation terminates observed
 process groups in the owned child session and waits for the child. Closing the
 terminal window or tab ends terminal input and typically delivers SIGHUP; either
 cancels the session, and restoration failures on the closed terminal are added
