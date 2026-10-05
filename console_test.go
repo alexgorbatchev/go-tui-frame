@@ -406,8 +406,6 @@ func TestConsoleKeepsPermanentInputModes(t *testing.T) {
 			if !tt.unmeasured {
 				c.cellWidth, c.cellHeight = harnessCellWidth, harnessCellHeight
 			}
-			// The probe leaves the cell-size query pending until a reply arrives.
-			c.cellPending = tt.unmeasured
 			router, err := newInputRouter(s.terminal, nil)
 			if err != nil {
 				t.Fatal(err)

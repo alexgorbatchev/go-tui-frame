@@ -544,7 +544,6 @@ func (s *session[T]) resize() error {
 	}
 	s.console.cellWidth, s.console.cellHeight = width, height
 	if width == 0 || height == 0 {
-		s.console.cellPending = true
 		if _, err := s.console.renderer.WriteString(ansi.WindowOp(16)); err != nil {
 			return err
 		}
