@@ -132,11 +132,13 @@ func TestExecuteSignalsCancelTheSession(t *testing.T) {
 		// closed hangs up the outer PTY before the signal, as closing the
 		// terminal tab does, so restoring it fails during the shutdown.
 		closed bool
+		// code is the shell's 128+N status for the cancelling signal.
+		code int
 	}{
-		{"hangup", syscall.SIGHUP, false},
-		{"hangup after terminal closed", syscall.SIGHUP, true},
-		{"interrupt", syscall.SIGINT, false},
-		{"terminated", syscall.SIGTERM, false},
+		{"hangup", syscall.SIGHUP, false, 129},
+		{"hangup after terminal closed", syscall.SIGHUP, true, 129},
+		{"interrupt", syscall.SIGINT, false, 130},
+		{"terminated", syscall.SIGTERM, false, 143},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			master, slave := demoTTY(t)
@@ -201,10 +203,11 @@ func TestExecuteSignalsCancelTheSession(t *testing.T) {
 			if !errors.As(waitErr, &exit) {
 				t.Fatalf("wrapper wait = %v; want its execute status: %s", waitErr, message)
 			}
-			// A handled signal ends the session through execute; the default
-			// action would terminate the wrapper before the frame's shutdown.
-			if status, ok := exit.Sys().(syscall.WaitStatus); !ok || status.Signaled() || status.ExitStatus() != 1 {
-				t.Errorf("wrapper status = %v; want exit status 1 from execute: %s", exit.ProcessState, message)
+			// A handled signal ends the session through execute, which reports
+			// the signal's shell status; the default action would terminate the
+			// wrapper before the frame's shutdown.
+			if status, ok := exit.Sys().(syscall.WaitStatus); !ok || status.Signaled() || status.ExitStatus() != tt.code {
+				t.Errorf("wrapper status = %v; want exit status %d from execute: %s", exit.ProcessState, tt.code, message)
 			}
 			if tt.closed {
 				if !strings.Contains(string(message), "restore terminal modes") {

@@ -9,7 +9,7 @@ description: >-
 author: alexgorbatchev
 metadata:
   created_on: 2026-10-01 13:23
-  last_modified: 2026-10-05 13:24
+  last_modified: 2026-10-05 13:48
   status: current
 ---
 
@@ -170,7 +170,8 @@ trailing topic does not resolve to a subcommand.
 A child exiting normally returns its own exit code;
 a signal termination maps to `128 + signal number`. Ctrl+Q returns 0 when
 draining and terminal restoration succeed. SIGHUP, SIGINT, or SIGTERM sent to
-the wrapper cancels the session and returns 1; stderr reports
+the wrapper cancels the session and returns `128 + signal number`: 129 for
+SIGHUP, 130 for SIGINT, and 143 for SIGTERM. Stderr reports
 `run child frame: <name> signal received`, where `<name>` is `hangup`,
 `interrupt`, or `terminated`. Startup, terminal, drawing, drain,
 restoration, cancellation, and output-write failures produce an error and a
@@ -188,7 +189,8 @@ frame, and restores terminal state on exit. Cancellation terminates observed
 process groups in the owned child session and waits for the child. Closing the
 terminal window or tab ends terminal input and typically delivers SIGHUP; either
 cancels the session, and restoration failures on the closed terminal are added
-to the reported error. Normal teardown also terminates
+to the reported error. A SIGHUP received during that shutdown returns 129 even
+when ended input stopped the session first. Normal teardown also terminates
 remaining observed groups after the leader exits; detached processes in new
 sessions are excluded. The child retains its ordinary permissions and filesystem
 or network side effects. Metadata commands start no child process. Completion

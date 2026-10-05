@@ -36,7 +36,7 @@ func runDemo(ctx context.Context, child *exec.Cmd, showcase, inheritTerminal boo
 	code := result.ProcessState.ExitCode()
 	if code < 0 {
 		if status, ok := result.ProcessState.Sys().(syscall.WaitStatus); ok && status.Signaled() {
-			code = 128 + int(status.Signal())
+			code = signalExitCode(status.Signal())
 		} else {
 			code = 1
 		}
