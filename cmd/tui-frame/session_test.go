@@ -94,7 +94,9 @@ func demoTTYObserved(t *testing.T, observed func(emulator.State)) (*os.File, *os
 			t.Errorf("close slave: %v", err)
 		}
 	})
-	fd, err := syscall.Dup(int(master.Fd()))
+	// Close-on-exec keeps subprocesses from holding the outer terminal open, so
+	// closing this master hangs up the PTY as closing a terminal tab does.
+	fd, err := unix.FcntlInt(master.Fd(), unix.F_DUPFD_CLOEXEC, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
