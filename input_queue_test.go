@@ -7,8 +7,10 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -194,13 +196,18 @@ func TestReleasedReplyReachesTerminalWithoutRepaint(t *testing.T) {
 }
 
 // More than a queue of input arriving while the frame starts reaches the child
-// once it reads, instead of ending the session as it is routed.
+// once it reads, instead of ending the session as it is routed. The session
+// starts with outer reads paused, and Run closes every descriptor it opened.
 func TestRunHoldsStartupInputBeyondTheQueue(t *testing.T) {
 	h := newHarness(t)
 	paste := bracketedPaste(inputQueueLimit + readBufferSize)
 	// The terminal answers the frame's capability queries only after the
 	// paste, so the startup probe must read all of it before the loop starts.
+	// It also answers the queries its emulator ignores, so the probe ends at
+	// its last reply rather than at a deadline a loaded host could miss.
 	h.precede(paste)
+	h.answer(ansi.QueryModifyOtherKeys, "\x1b[>4;0m")
+	h.answer(colorSchemeQuery, "\x1b[?997;1n")
 	dir, err := os.MkdirTemp(".tmp", "startup-input-")
 	if err != nil {
 		t.Fatal(err)
@@ -213,9 +220,18 @@ func TestRunHoldsStartupInputBeyondTheQueue(t *testing.T) {
 	count := dir + "/count"
 	cmd := childCommand(t)
 	cmd.Env = append(cmd.Env, "FRAME_TEST_MODE=count", "FRAME_TEST_COUNT_FILE="+count)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	done := startRun(ctx, New(cmd, struct{}{}).Terminal(h.slave, h.slave))
+	app := New(cmd, struct{}{}).Terminal(h.slave, h.slave)
+	app.probeTimeout = 20 * time.Second
+	// The first signal subscription in a process makes Darwin's Go runtime open
+	// a signal pipe it keeps for good. Run subscribes to SIGWINCH, so subscribe
+	// first: the baseline then holds only descriptors Run must leave as found.
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGWINCH)
+	signal.Stop(signals)
+	opened := openDescriptors(t)
+	done := startRun(ctx, app)
 	for !strings.Contains(h.text(), "counting") {
 		select {
 		case got := <-done:
@@ -235,6 +251,9 @@ func TestRunHoldsStartupInputBeyondTheQueue(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("Run did not finish", ctx.Err())
+	}
+	if leaked := openDescriptors(t) - opened; leaked != 0 {
+		t.Fatalf("Run left %d more descriptors open than before it started", leaked)
 	}
 	received, err := os.ReadFile(count)
 	if err != nil {
@@ -474,6 +493,25 @@ func fillChild(t *testing.T, s *session[struct{}], n int) []byte {
 		t.Fatal(err)
 	}
 	return append(fill, top...)
+}
+
+// openDescriptors counts the file descriptors this process has open, kqueues
+// included, which Darwin's /dev/fd does not list. The kernel hands out the
+// lowest free descriptor, so a test process's descriptors lie far below the
+// scanned range.
+func openDescriptors(t *testing.T) int {
+	t.Helper()
+	var limit unix.Rlimit
+	if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &limit); err != nil {
+		t.Fatal(err)
+	}
+	open := 0
+	for fd := range min(limit.Cur, 1<<16) {
+		if _, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err == nil {
+			open++
+		}
+	}
+	return open
 }
 
 // inputWaiting reports whether bytes wait unread in the terminal's input queue

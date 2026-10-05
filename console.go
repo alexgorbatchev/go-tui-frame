@@ -50,6 +50,7 @@ type console struct {
 	modifyPending, modifySupported                       bool
 	modifyEntry, modifyLevel                             int
 	cellPending                                          bool
+	probeTimeout                                         time.Duration
 	cellWidth, cellHeight                                uint32
 	renderer                                             *uv.TerminalRenderer
 	colorProfile                                         colorprofile.Profile
@@ -86,7 +87,7 @@ func acquireConsole(in, out *os.File, fd int, device uint64) (*console, error) {
 	}
 	consoleOwners.devices[device] = true
 	consoleOwners.Unlock()
-	c := &console{input: in, output: out, fd: fd, device: device, inherit: true, entry: make(map[ansi.DECMode]ansi.ModeSetting), applied: make(map[ansi.DECMode]bool), pending: make(map[ansi.DECMode]bool)}
+	c := &console{input: in, output: out, fd: fd, device: device, inherit: true, probeTimeout: capabilityTimeout, entry: make(map[ansi.DECMode]ansi.ModeSetting), applied: make(map[ansi.DECMode]bool), pending: make(map[ansi.DECMode]bool)}
 	var err error
 	c.raw, err = term.MakeRaw(uintptr(fd))
 	if err != nil {
@@ -146,7 +147,7 @@ func (c *console) probe(ctx context.Context, events *eventDispatcher) (saved []i
 		}
 	}()
 	writes := []byte(query)
-	deadline := time.Now().Add(capabilityTimeout)
+	deadline := time.Now().Add(c.probeTimeout)
 	c.framer = input.New()
 	buf := make([]byte, 4096)
 	for time.Now().Before(deadline) && (len(writes) > 0 || len(c.pending) > 0 || c.kittyPending || c.modifyPending || c.cellPending || c.preferences.pending()) {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -108,7 +109,15 @@ type terminalHarness struct {
 	em            *emulator.Terminal
 	stop, done    chan struct{}
 	err           error
-	lead          []byte // Input sent before the first query replies.
+	// lead is input sent before the first query replies. While a writer
+	// sends it, the read loop keeps reading and defers its replies.
+	lead, deferred []byte
+	leading        bool
+	writers        sync.WaitGroup
+	// answers maps queries the native emulator ignores to their replies; carry
+	// keeps the output tail where a query may continue in the next read.
+	answers map[string]string
+	carry   []byte
 }
 
 const harnessCellWidth, harnessCellHeight = 10, 20
@@ -149,6 +158,7 @@ func newCellHarness(t *testing.T, cols, rows, cellWidth, cellHeight uint16) *ter
 	t.Cleanup(func() {
 		close(h.stop)
 		<-h.done
+		h.writers.Wait()
 		h.mu.Lock()
 		err := h.err
 		h.em.Close()
@@ -199,9 +209,15 @@ func (h *terminalHarness) read() {
 				replies = append(replies, e.Bytes...)
 			}
 		}
-		var lead []byte
-		if len(replies) > 0 {
-			lead, h.lead = h.lead, nil
+		replies = append(replies, h.answerQueries(buf[:n])...)
+		switch {
+		case len(replies) > 0 && h.lead != nil:
+			h.deferred, replies, h.leading = replies, nil, true
+			h.writers.Add(1)
+			go h.writeLead(h.lead)
+			h.lead = nil
+		case h.leading:
+			h.deferred, replies = append(h.deferred, replies...), nil
 		}
 		h.mu.Unlock()
 		if err != nil {
@@ -209,10 +225,6 @@ func (h *terminalHarness) read() {
 			return
 		}
 		if len(replies) > 0 {
-			if err := h.writeReplies(lead); err != nil {
-				h.fail(err)
-				return
-			}
 			if err := h.writeReplies(replies); err != nil {
 				h.fail(err)
 				return
@@ -227,6 +239,59 @@ func (h *terminalHarness) precede(input []byte) {
 	h.mu.Lock()
 	h.lead = input
 	h.mu.Unlock()
+}
+
+// writeLead sends the lead input, then the replies deferred meanwhile, as one
+// terminal writing in order while it keeps reading the frame's output.
+func (h *terminalHarness) writeLead(lead []byte) {
+	defer h.writers.Done()
+	if err := h.writeReplies(lead); err != nil {
+		h.fail(err)
+		return
+	}
+	for {
+		h.mu.Lock()
+		replies := h.deferred
+		h.deferred, h.leading = nil, len(replies) > 0
+		h.mu.Unlock()
+		if len(replies) == 0 {
+			return
+		}
+		if err := h.writeReplies(replies); err != nil {
+			h.fail(err)
+			return
+		}
+	}
+}
+
+// answer makes the terminal reply to a query its native emulator ignores.
+func (h *terminalHarness) answer(query, reply string) {
+	h.mu.Lock()
+	if h.answers == nil {
+		h.answers = make(map[string]string)
+	}
+	h.answers[query] = reply
+	h.mu.Unlock()
+}
+
+// answerQueries returns the configured replies to queries in output, once
+// each, including a query split across reads. The caller holds h.mu.
+func (h *terminalHarness) answerQueries(output []byte) []byte {
+	if len(h.answers) == 0 {
+		return nil
+	}
+	window := append(h.carry, output...)
+	var replies []byte
+	longest := 0
+	for query, reply := range h.answers {
+		longest = max(longest, len(query))
+		if bytes.Contains(window, []byte(query)) {
+			replies = append(replies, reply...)
+			delete(h.answers, query)
+		}
+	}
+	h.carry = slices.Clone(window[max(0, len(window)-longest+1):])
+	return replies
 }
 
 func (h *terminalHarness) writeReplies(replies []byte) error {

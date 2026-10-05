@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"time"
 
 	uv "github.com/charmbracelet/ultraviolet"
 )
@@ -53,12 +54,15 @@ type Frame[T any] struct {
 	state           phase
 	configErr       error
 	wake            chan struct{}
+	// probeTimeout bounds the startup capability queries. Tests raise it to
+	// keep a terminal that answers late within the deadline.
+	probeTimeout time.Duration
 }
 
 // New creates a controller without starting the command or touching a terminal.
 func New[T any](cmd *exec.Cmd, initial T) *Frame[T] {
 	return &Frame[T]{cmd: cmd, initial: initial, input: os.Stdin, output: os.Stdout, inheritTerminal: true,
-		wake: make(chan struct{}, 1)}
+		wake: make(chan struct{}, 1), probeTimeout: capabilityTimeout}
 }
 
 // Header reserves rows across the top of the outer terminal.
