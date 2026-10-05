@@ -16,14 +16,27 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/creack/pty"
 	ghostty "go.mitchellh.com/libghostty"
+	"golang.org/x/sys/unix"
 )
 
+// Capture adds Kitty disambiguation and, for a child whose input it therefore
+// converts, alternate keys that carry the shifted key. A child that already
+// disambiguates keeps its own flags, so its input still passes unconverted.
 func TestCaptureNegotiatesDistinctKeysAndRestoresOuterMode(t *testing.T) {
+	const (
+		disambiguate = ghostty.KittyKeyDisambiguate
+		events       = ghostty.KittyKeyReportEvents
+		alternates   = ghostty.KittyKeyReportAlternates
+	)
 	for _, tt := range []struct {
 		capture bool
 		child   ghostty.KittyKeyFlags
 		want    ghostty.KittyKeyFlags
-	}{{false, 0, 0}, {true, 0, ghostty.KittyKeyDisambiguate}, {false, ghostty.KittyKeyReportEvents, ghostty.KittyKeyReportEvents}, {true, ghostty.KittyKeyReportEvents, ghostty.KittyKeyReportEvents | ghostty.KittyKeyDisambiguate}} {
+	}{
+		{false, 0, 0}, {true, 0, disambiguate | alternates},
+		{false, events, events}, {true, events, events | disambiguate | alternates},
+		{true, disambiguate, disambiguate}, {true, disambiguate | events, disambiguate | events},
+	} {
 		t.Run(fmt.Sprintf("capture=%v/child=%d", tt.capture, tt.child), func(t *testing.T) {
 			h := newHarness(t)
 			fd, device, _, err := inspectConsole(h.slave, h.slave)
@@ -120,6 +133,75 @@ func TestCaptureNegotiatesDistinctKeysAndRestoresOuterMode(t *testing.T) {
 	}
 }
 
+// Under Capture, the native outer terminal encodes each key with the flags the
+// frame requested, and the frame converts it for the legacy child. Without
+// alternate keys, Alt+Shift+comma arrives as Alt+Shift+"," and loses its "<".
+// The child must receive what a legacy terminal sends: M-< and M-B.
+func TestCaptureDeliversShiftedAltKeysToLegacyChild(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	converted := make(chan []byte, 4)
+	app := New(childCommand(t), struct{}{}).Terminal(h.slave, h.slave).Capture(func(Input) Disposition { return Pass }).
+		ObserveEvents([]EventKind{ChildInput}, func(e Event) {
+			if e.Origin == "key-protocol" {
+				converted <- e.Bytes
+			}
+		})
+	done := startRun(ctx, app)
+	awaitText(t, h, "child")
+	awaitOuter(t, h, "the capture keyboard flags", func(s emulator.State) bool {
+		return s.Alternate && s.KittyKeyboardFlags&ghostty.KittyKeyDisambiguate != 0
+	})
+	event, err := ghostty.NewKeyEvent()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer event.Close()
+	event.SetAction(ghostty.KeyActionPress)
+	event.SetMods(ghostty.ModAlt | ghostty.ModShift)
+	for _, tt := range []struct {
+		name, text, want string
+		key              ghostty.Key
+		unshifted        rune
+	}{
+		{"Alt+Shift+comma", "<", "\x1b<", ghostty.KeyComma, ','},
+		{"Alt+Shift+b", "B", "\x1bB", ghostty.KeyB, 'b'},
+	} {
+		event.SetKey(tt.key)
+		event.SetUTF8(tt.text)
+		event.SetUnshiftedCodepoint(tt.unshifted)
+		h.mu.Lock()
+		report, err := h.em.EncodeKey(event, ghostty.OptionAsAltTrue)
+		h.mu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := unix.Write(h.fd, report); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case got := <-converted:
+			if string(got) != tt.want {
+				t.Fatalf("%s reported as %q reached the child as %q, want %q", tt.name, report, got, tt.want)
+			}
+		case <-ctx.Done():
+			t.Fatalf("%s reported as %q was not converted: %v", tt.name, report, ctx.Err())
+		}
+	}
+	if _, err := unix.Write(h.fd, []byte("q")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-done:
+		if got.err != nil || got.result.ProcessState == nil || !got.result.ProcessState.Success() {
+			t.Fatalf("Run = %#v, %v", got.result, got.err)
+		}
+	case <-ctx.Done():
+		t.Fatal("Run did not finish", ctx.Err())
+	}
+}
+
 // A Kitty reply that misses the probe deadline arrives during the session,
 // where the frame consumes it and starts using the reported support. Ghostty
 // keeps a Kitty keyboard stack per screen and reuses the alternate screen, so
@@ -171,8 +253,10 @@ func TestLateKittyReplyLeavesOuterKeyboardAsFound(t *testing.T) {
 		outer = got
 		return got.Title == marker
 	})
-	if !outer.Alternate || outer.KittyKeyboardFlags != ghostty.KittyKeyDisambiguate {
-		t.Fatalf("session outer alternate=%v flags=%d, want alternate flags=%d", outer.Alternate, outer.KittyKeyboardFlags, ghostty.KittyKeyDisambiguate)
+	// Capture of the legacy child converts its keys, with alternate keys.
+	const capture = ghostty.KittyKeyDisambiguate | ghostty.KittyKeyReportAlternates
+	if !outer.Alternate || outer.KittyKeyboardFlags != capture {
+		t.Fatalf("session outer alternate=%v flags=%d, want alternate flags=%d", outer.Alternate, outer.KittyKeyboardFlags, capture)
 	}
 	if err := c.restore(); err != nil {
 		t.Fatal(err)

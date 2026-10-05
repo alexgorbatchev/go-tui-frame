@@ -398,8 +398,12 @@ func (c *console) syncInput(s emulator.State) error {
 		return err
 	}
 	flags := s.KittyKeyboardFlags
-	if c.capture {
-		flags |= ghostty.KittyKeyDisambiguate
+	if c.capture && flags&ghostty.KittyKeyDisambiguate == 0 {
+		// Disambiguation makes the host flags differ from the child's, so the
+		// router converts every key. Alternate keys then report the shifted key
+		// that keeps Alt+Shift punctuation such as M-< intact. A child that
+		// already disambiguates keeps its own flags and unconverted input.
+		flags |= ghostty.KittyKeyDisambiguate | ghostty.KittyKeyReportAlternates
 	}
 	if !c.kittySupported {
 		flags = 0
