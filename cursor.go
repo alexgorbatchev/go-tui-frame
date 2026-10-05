@@ -8,17 +8,19 @@ import (
 	ghostty "go.mitchellh.com/libghostty"
 )
 
-// defaultCursorStyle is the DECSCUSR parameter that selects the terminal's
-// configured cursor shape and blink. Ghostty also resumes applying later
-// configuration changes to a cursor reset this way.
+// defaultCursorStyle is the DECSCUSR parameter the frame resets a changed
+// cursor style with. In Ghostty it selects the configured cursor shape and
+// blink, and the cursor resumes following later configuration changes. VT510
+// defines it as a blinking block.
 const defaultCursorStyle = 0
 
 // cursorAppearance records the cursor the frame shows on the outer terminal in
 // place of the terminal's entry appearance. While styled or colored is false,
-// the terminal shows its entry value for that attribute, and the frame writes
-// nothing for it. Writing a reported value back would turn the terminal's own
-// default into an explicit override that outlives the session: Ghostty, for
-// one, then stops applying its configured and theme cursor.
+// the frame has not overridden that attribute and writes nothing for it: the
+// terminal shows its entry value or, after the frame reset it, its default.
+// Writing a reported value back would turn the terminal's own default into an
+// explicit override that outlives the session: Ghostty, for one, then stops
+// applying its configured and theme cursor.
 type cursorAppearance struct {
 	styled, colored bool
 	style           int
