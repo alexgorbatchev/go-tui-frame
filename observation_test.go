@@ -219,10 +219,20 @@ func pausedSelectedDispatcher(t *testing.T, kinds eventMask, fail context.Cancel
 }
 
 // sessionCancel returns the session cancellation a dispatcher reports a
-// callback panic through, for tests that never read that cause.
+// callback panic through, for tests whose handlers must not panic. The
+// dispatcher would otherwise swallow such a panic, so a recorded cause fails
+// the test. Call it before registering the dispatcher's close as a cleanup:
+// cleanups run in reverse order, so the check then follows the final drain.
 func sessionCancel(t *testing.T) context.CancelCauseFunc {
 	t.Helper()
-	_, cancel := context.WithCancelCause(t.Context())
+	// t.Context is canceled before cleanups run, which would set a cause here.
+	ctx, cancel := context.WithCancelCause(context.Background())
+	t.Cleanup(func() {
+		if ctx.Err() != nil {
+			t.Errorf("observer callback failed: %v", context.Cause(ctx))
+		}
+		cancel(nil)
+	})
 	return cancel
 }
 
