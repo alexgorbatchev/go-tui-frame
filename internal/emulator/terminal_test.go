@@ -106,12 +106,20 @@ func TestModesAlternateScreenAndReset(t *testing.T) {
 	if s.Title != "child title" || s.Directory != "file://host/work" || s.KittyKeyboardFlags != 5 {
 		t.Fatalf("terminal observations = %#v", s)
 	}
+	// Input routing observes the active screen without capturing the viewport.
+	var input State
 	writeTerminal(t, em, "\x1b[?1049h\x1b[HALT")
+	if err := em.InputState(&input); err != nil || !input.Alternate {
+		t.Fatalf("input alternate screen = %v, %v", input.Alternate, err)
+	}
 	s = terminalState(t, em)
 	if !s.Alternate || s.Cells[0].Content != "A" {
 		t.Fatalf("alternate screen = %v, %#v", s.Alternate, s.Cells[0])
 	}
 	writeTerminal(t, em, "\x1b[?1049l")
+	if err := em.InputState(&input); err != nil || input.Alternate {
+		t.Fatalf("input alternate screen after exit = %v, %v", input.Alternate, err)
+	}
 	s = terminalState(t, em)
 	if s.Alternate || s.Cells[0].Content != "n" {
 		t.Fatal("primary screen was not restored")

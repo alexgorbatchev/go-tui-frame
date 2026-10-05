@@ -253,7 +253,7 @@ func (s *session[T]) refreshState() error {
 	clear(input.ModeErrors)
 	maps.Copy(input.Modes, state.Modes)
 	maps.Copy(input.ModeErrors, state.ModeErrors)
-	input.Size, input.Held = state.Size, state.Held
+	input.Size, input.Held, input.Alternate = state.Size, state.Held, state.Alternate
 	input.KittyKeyboardFlags, input.ModifyOtherKeys2 = state.KittyKeyboardFlags, state.ModifyOtherKeys2
 	input.MouseTracking = state.MouseTracking
 	return s.syncInput()

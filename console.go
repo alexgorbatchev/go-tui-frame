@@ -20,6 +20,10 @@ import (
 
 const capabilityTimeout = 300 * time.Millisecond
 
+// alternateScrollMode (DEC mode 1007) makes a terminal send wheel steps as
+// cursor keys while its alternate screen is active and no mouse tracking is set.
+const alternateScrollMode ansi.DECMode = 1007
+
 var consoleOwners = struct {
 	sync.Mutex
 	devices map[uint64]bool
@@ -27,7 +31,7 @@ var consoleOwners = struct {
 
 // Only modes with an observed entry value are changed. The alternate screen is
 // required because its prior contents cannot be reconstructed from a TTY.
-var consoleModes = []ansi.DECMode{1, 5, 7, 9, 12, 25, 66, 67, 1000, 1001, 1002, 1003, 1004, 1005, 1006, 1015, 1016, 1035, 1036, 1039, 1049, 2004, synchronizedOutputMode, 2027, 2031}
+var consoleModes = []ansi.DECMode{1, 5, 7, 9, 12, 25, 66, 67, 1000, 1001, 1002, 1003, 1004, 1005, 1006, alternateScrollMode, 1015, 1016, 1035, 1036, 1039, 1049, 2004, synchronizedOutputMode, 2027, 2031}
 
 type console struct {
 	inherit                                              bool
@@ -365,6 +369,14 @@ func (c *console) syncInput(s emulator.State) error {
 		return err
 	}
 	if err := c.setMode(1016, pixels && s.MouseTracking); err != nil {
+		return err
+	}
+	// The outer screen is always alternate during a session, so the outer
+	// terminal would turn wheel steps into cursor keys for any child without
+	// mouse tracking. Convert only where the child itself would: on its
+	// alternate screen with alternate scroll set and no mouse tracking. Child
+	// tracking turns conversion off even while outer tracking is withheld.
+	if err := c.setMode(alternateScrollMode, s.Alternate && s.Modes[ghostty.ModeAltScroll] && !s.MouseTracking); err != nil {
 		return err
 	}
 	flags := s.KittyKeyboardFlags

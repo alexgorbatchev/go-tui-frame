@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -165,6 +166,106 @@ func TestConsoleRestoresObservedEntryModes(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("entry modes were not restored after alternate-screen exit")
+}
+
+// The outer terminal turns wheel steps into cursor keys under alternate scroll
+// (DEC mode 1007). The session must leave that conversion on only while the
+// child would convert: on its alternate screen, with alternate scroll set and
+// no mouse tracking. The harness models Ghostty, which enables 1007 by default.
+func TestSessionScopesOuterAlternateScrollToChild(t *testing.T) {
+	type step struct {
+		// line is typed into the child, which prints it as a printf format, so
+		// marker is the last text the child writes for that step.
+		line, marker string
+		scroll       bool
+	}
+	for _, tt := range []struct {
+		name  string
+		entry bool
+		// last leaves the outer mode opposite to its entry value, so the
+		// restored value can only come from restoration.
+		last step
+	}{
+		{"entry set", true, step{`\033[?1007h\033[?1049lprimary`, "primary", false}},
+		{"entry reset", false, step{`\033[?1007hrescrolled`, "rescrolled", true}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			steps := []step{
+				{"", "start", false},
+				// The child inherits the outer alternate scroll preference.
+				{`\033[?1049halternate`, "alternate", tt.entry},
+				{`\033[?1007hscrolling`, "scrolling", true},
+				{`\033[?1000htracking`, "tracking", false},
+				{`\033[?1000lreleased`, "released", true},
+				{`\033[?1007lunscrolled`, "unscrolled", false},
+				tt.last,
+			}
+			h := newHarness(t)
+			if !tt.entry {
+				h.mu.Lock()
+				_, err := h.em.Write([]byte(ansi.ResetMode(alternateScrollMode)))
+				h.mu.Unlock()
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			child := exec.Command("sh", "-c", `stty -echo; printf start; while IFS= read -r line; do test "$line" = q && exit; printf "$line"; done`)
+			done := startRun(ctx, New(child, struct{}{}).Terminal(h.slave, h.slave))
+			for _, s := range steps {
+				if s.line != "" {
+					if err := h.writeReplies([]byte(s.line + "\r")); err != nil {
+						t.Fatal(err)
+					}
+				}
+				// The session flushes host input modes before it paints the
+				// child output that changed them.
+				awaitText(t, h, s.marker)
+				h.mu.Lock()
+				outer, err := h.em.State()
+				h.mu.Unlock()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := outer.Modes[ghostty.ModeAltScroll]; got != s.scroll {
+					t.Errorf("outer alternate scroll after %q = %v, want %v", s.marker, got, s.scroll)
+				}
+			}
+			if err := h.writeReplies([]byte("q\r")); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case got := <-done:
+				if got.err != nil {
+					t.Fatal(got.err)
+				}
+			case <-ctx.Done():
+				t.Fatal("Run did not finish", ctx.Err())
+			}
+			awaitOuter(t, h, fmt.Sprintf("its entry alternate scroll %v", tt.entry), func(s emulator.State) bool {
+				return !s.Alternate && s.Modes[ghostty.ModeAltScroll] == tt.entry
+			})
+		})
+	}
+}
+
+// The child read that switches screens updates the outer alternate scroll
+// before anything is painted, as it does other host input modes, so a wheel
+// step that arrives next already follows the child's screen.
+func TestChildReadSyncsOuterAlternateScrollBeforePainting(t *testing.T) {
+	s, out, slave := newRepaintSession(t, ansi.ModeReset, nil)
+	reportModes(t, s.console, map[ansi.DECMode]ansi.ModeSetting{alternateScrollMode: ansi.ModeReset})
+	for _, tt := range []struct{ chunk, want string }{
+		{"\x1b[?1049h", ansi.SetMode(alternateScrollMode)},
+		{"\x1b[?1049l", ansi.ResetMode(alternateScrollMode)},
+	} {
+		before := len(repaintOutput(t, out))
+		readRepaintChunk(t, s, slave, tt.chunk)
+		if got := string(repaintOutput(t, out)[before:]); !strings.Contains(got, tt.want) {
+			t.Errorf("child output %q wrote %q to the outer terminal, want %q", tt.chunk, got, tt.want)
+		}
+	}
 }
 
 func TestConsolePreservesOnlySolicitedReplies(t *testing.T) {

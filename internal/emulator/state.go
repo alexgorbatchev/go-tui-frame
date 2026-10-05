@@ -89,8 +89,10 @@ func (t *Terminal) UpdateState(s *State) error {
 	return t.readMetadata(s)
 }
 
-// InputState observes current routing modes and hold state without capturing
-// the viewport. Other fields are unchanged until UpdateState is called.
+// InputState observes current routing modes, the active screen and hold state
+// without capturing the viewport. Routing needs the active screen because a
+// terminal converts wheel steps into cursor keys only on its alternate screen.
+// Other fields are unchanged until UpdateState is called.
 func (t *Terminal) InputState(s *State) error {
 	if t == nil || t.native == nil {
 		return ErrClosed
@@ -109,12 +111,15 @@ func (t *Terminal) InputState(s *State) error {
 	if err != nil {
 		return err
 	}
+	var screen ghostty.TerminalScreen
 	if err := errors.Join(
+		read("active screen", &screen, t.native.ActiveScreen),
 		read("Kitty keyboard flags", &s.KittyKeyboardFlags, t.native.KittyKeyboardFlags),
 		read("mouse tracking", &s.MouseTracking, t.native.MouseTracking),
 	); err != nil {
 		return err
 	}
+	s.Alternate = screen == ghostty.ScreenAlternate
 	for _, mode := range knownModes {
 		value, err := t.native.Mode(mode)
 		if err != nil {
@@ -133,9 +138,7 @@ func (t *Terminal) DirtyRows() []bool { return t.visual.dirty }
 func (t *Terminal) ClearDamage() { clear(t.visual.dirty) }
 
 func (t *Terminal) readMetadata(s *State) error {
-	var screen ghostty.TerminalScreen
-	err := errors.Join(
-		read("active screen", &screen, t.native.ActiveScreen),
+	return errors.Join(
 		read("title", &s.Title, t.native.Title),
 		read("directory", &s.Directory, t.native.Pwd),
 		read("mouse shape", &s.MouseShape, t.native.MouseShape),
@@ -151,8 +154,6 @@ func (t *Terminal) readMetadata(s *State) error {
 		read("pending cursor wrap", &s.CursorPendingWrap, t.native.CursorPendingWrap),
 		read("cursor prompt", &s.CursorAtPrompt, t.native.CursorAtPrompt),
 	)
-	s.Alternate = screen == ghostty.ScreenAlternate
-	return err
 }
 
 func read[T any](name string, dst *T, getter func() (T, error)) error {
