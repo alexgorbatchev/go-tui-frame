@@ -150,6 +150,8 @@ func (f *Frame[T]) Capture(handler func(Input) Disposition) *Frame[T] {
 }
 
 // Observe receives durable observations without consuming input.
+// A handler panic ends the session as cancellation does, and Run returns an
+// error with the panic value and stack.
 func (f *Frame[T]) Observe(handler func(Event)) *Frame[T] {
 	f.configure(func() { f.observe, f.observedKinds = handler, allEvents })
 	return f
@@ -158,6 +160,8 @@ func (f *Frame[T]) Observe(handler func(Event)) *Frame[T] {
 // ObserveEvents receives only the selected event kinds. An empty selection
 // disables observations; unknown kinds fail configuration when Run begins.
 // StateChanged retains one owned snapshot per child-output read when selected.
+// A handler panic ends the session as cancellation does, and Run returns an
+// error with the panic value and stack.
 func (f *Frame[T]) ObserveEvents(kinds []EventKind, handler func(Event)) *Frame[T] {
 	f.configure(func() {
 		mask, err := selectEvents(kinds)
