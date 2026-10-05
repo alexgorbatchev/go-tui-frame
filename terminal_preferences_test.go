@@ -241,3 +241,38 @@ func TestReportedKeyboardPreferencesSeedChildEncoder(t *testing.T) {
 		t.Errorf("child keyboard protocol flags=%d modifyOtherKeys2=%v", s.KittyKeyboardFlags, s.ModifyOtherKeys2)
 	}
 }
+
+// Programs end a probe batch with DA1 and stop reading at its reply, so a
+// missing reply stalls them until their own query timeout.
+func TestChildDeviceAttributeQueriesReceiveNativeDefaults(t *testing.T) {
+	for _, inherit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("inherit=%v", inherit), func(t *testing.T) {
+			c := &console{inherit: inherit, pending: make(map[ansi.DECMode]bool)}
+			c.preferenceQueries()
+			em, err := emulator.New(c.childOptions(emulator.Size{Cols: 10, Rows: 3}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(em.Close)
+			for _, tt := range []struct{ name, query, reply string }{
+				{"DA1", "\x1b[c", "\x1b[?62;22c"},
+				{"DA2", "\x1b[>c", "\x1b[>1;0;0c"},
+				{"DA3", "\x1b[=c", "\x1bP!|00000000\x1b\\"},
+			} {
+				t.Run(tt.name, func(t *testing.T) {
+					if _, err := em.Write([]byte(tt.query)); err != nil {
+						t.Fatal(err)
+					}
+					var got []string
+					for _, effect := range em.Effects() {
+						got = append(got, fmt.Sprintf("%s %q", effect.Kind, effect.Bytes))
+					}
+					want := fmt.Sprintf("%s %q", emulator.Reply, tt.reply)
+					if len(got) != 1 || got[0] != want {
+						t.Fatalf("query %q effects = %s, want exactly [%s]", tt.query, got, want)
+					}
+				})
+			}
+		})
+	}
+}
