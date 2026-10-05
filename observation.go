@@ -17,7 +17,8 @@ const (
 )
 
 // eventDispatcher separates consumer work from terminal transport. The budget
-// includes the current callback until it returns, as well as queued records.
+// includes the current callback until it returns, as well as queued records;
+// bytes is their combined weight.
 type eventDispatcher struct {
 	mu       sync.Mutex
 	queue    chan eventRecord
@@ -108,7 +109,7 @@ func (d *eventDispatcher) emit(ev Event) error {
 		return ErrSessionClosed
 	}
 	weight := eventWeight(ev)
-	if len(d.queue) == cap(d.queue) || weight > observationByteLimit-d.bytes {
+	if !d.admits(weight) {
 		return ErrObservationOverflow
 	}
 	d.sequence++
@@ -137,6 +138,18 @@ func (d *eventDispatcher) emit(ev Event) error {
 	d.bytes += weight
 	d.queue <- eventRecord{event: ev, weight: weight} // Capacity was checked under the producer lock.
 	return nil
+}
+
+// admits reports whether a record of weight fits beside the records already
+// queued or executing. The byte budget bounds that backlog, not one record: a
+// snapshot of a screen within maxScreenCells can outweigh the budget alone, so
+// an idle dispatcher admits the next record whatever its weight. eventWeight
+// counts each record's Event struct, so zero bytes means none is held.
+func (d *eventDispatcher) admits(weight int) bool {
+	if d.bytes == 0 {
+		return true
+	}
+	return len(d.queue) < cap(d.queue) && weight <= observationByteLimit-d.bytes
 }
 
 func (d *eventDispatcher) close() {

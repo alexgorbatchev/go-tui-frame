@@ -39,8 +39,13 @@ func TestObservationBudgetIncludesProtocolNamesAndCommands(t *testing.T) {
 		{"clipboard write name", ProtocolEffect{ClipboardWrite: &ghostty.ClipboardWrite{Name: strings.Repeat("x", observationByteLimit)}}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			d := newEventDispatcher(allEvents, func(Event) {})
-			defer d.close()
+			// An idle dispatcher admits any lone record, so weigh the effect
+			// against the budget left beside an executing callback.
+			d, entered, _ := pausedDispatcher(t, func(Event) {})
+			if err := d.emit(Event{Kind: Started}); err != nil {
+				t.Fatal(err)
+			}
+			<-entered
 			if err := d.emit(Event{Kind: Protocol, Effect: &tt.effect}); !errors.Is(err, ErrObservationOverflow) {
 				t.Fatalf("large protocol metadata admitted: %v", err)
 			}

@@ -3,12 +3,15 @@ package frame
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os/exec"
 	"sync"
 	"testing"
 	"time"
+	"unsafe"
 
 	uv "github.com/charmbracelet/ultraviolet"
+	"golang.org/x/sys/unix"
 )
 
 func TestObservationsOwnBytesAndSnapshotsAndStayOrdered(t *testing.T) {
@@ -64,6 +67,116 @@ func TestSlowObserverReportsOverflowWithoutBlockingProducer(t *testing.T) {
 	}
 	release()
 	d.close()
+}
+
+func TestObservationBudgetBoundsBacklogRatherThanLoneRecords(t *testing.T) {
+	oversized := oversizedStarted(t)
+	for _, tt := range []struct {
+		name    string
+		held    *Event // executing when next arrives; nil leaves the dispatcher idle
+		next    Event
+		wantErr error
+	}{
+		{"idle dispatcher admits oversized snapshot", nil, oversized, nil},
+		{"executing callback rejects oversized snapshot", &Event{Kind: Started}, oversized, ErrObservationOverflow},
+		{"executing oversized snapshot rejects small record", &oversized, Event{Kind: ChildOutput, Bytes: []byte("data")}, ErrObservationOverflow},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var got []Event
+			d, entered, release := pausedDispatcher(t, func(ev Event) { got = append(got, ev) })
+			var want []Event
+			if tt.held != nil {
+				if err := d.emit(*tt.held); err != nil {
+					t.Fatalf("idle dispatcher rejected held %s record: %v", tt.held.Kind, err)
+				}
+				<-entered
+				want = append(want, *tt.held)
+			}
+			if err := d.emit(tt.next); !errors.Is(err, tt.wantErr) {
+				t.Fatalf("emit %s weighing %d bytes = %v, want %v", tt.next.Kind, eventWeight(tt.next), err, tt.wantErr)
+			}
+			if tt.wantErr == nil {
+				want = append(want, tt.next)
+			}
+			release()
+			d.close()
+			if len(got) != len(want) {
+				t.Fatalf("delivered %d records, want %d", len(got), len(want))
+			}
+			for i := range want {
+				if g, w := recordSummary(got[i]), recordSummary(want[i]); g != w {
+					t.Fatalf("delivered record %d = %s, want %s", i, g, w)
+				}
+			}
+		})
+	}
+}
+
+// oversizedStarted returns a Started record whose snapshot alone outweighs the
+// observation budget while its viewport stays within maxScreenCells.
+func oversizedStarted(t *testing.T) Event {
+	t.Helper()
+	cells := make([]uv.Cell, observationByteLimit/int(unsafe.Sizeof(uv.Cell{}))+1)
+	if len(cells) > maxScreenCells {
+		t.Fatalf("oversized snapshot needs %d cells, beyond the %d-cell screen budget", len(cells), maxScreenCells)
+	}
+	cells[len(cells)-1] = uv.Cell{Content: "z", Width: 1}
+	ev := Event{Kind: Started, Snapshot: &Snapshot{Terminal: TerminalSnapshot{Cells: cells}}}
+	if w := eventWeight(ev); w <= observationByteLimit {
+		t.Fatalf("snapshot weighs %d bytes, want more than %d", w, observationByteLimit)
+	}
+	return ev
+}
+
+func recordSummary(ev Event) string {
+	cells, last := 0, ""
+	if ev.Snapshot != nil {
+		cells = len(ev.Snapshot.Terminal.Cells)
+		if cells > 0 {
+			last = ev.Snapshot.Terminal.Cells[cells-1].Content
+		}
+	}
+	return fmt.Sprintf("%s bytes=%q cells=%d last=%q", ev.Kind, ev.Bytes, cells, last)
+}
+
+func TestRunDeliversStartedSnapshotLargerThanObservationBudget(t *testing.T) {
+	// 131,072 child cells stay within maxScreenCells, yet one Started snapshot
+	// of them outweighs the whole observation budget.
+	h := newSizedHarness(t, 512, 256)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	weights := make(chan int, 1)
+	app := New(childCommand(t), struct{}{}).Terminal(h.slave, h.slave).ObserveEvents([]EventKind{Started}, func(e Event) {
+		weights <- eventWeight(e)
+	})
+	type outcome struct {
+		result Result
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() { r, err := app.Run(ctx); done <- outcome{r, err} }()
+	select {
+	case w := <-weights:
+		if w <= observationByteLimit {
+			t.Fatalf("Started weighed %d bytes, want more than the %d-byte budget", w, observationByteLimit)
+		}
+	case got := <-done:
+		t.Fatalf("Run ended before Started was delivered: %v", got.err)
+	case <-ctx.Done():
+		t.Fatal("Started was not delivered", ctx.Err())
+	}
+	awaitText(t, h, "child")
+	if _, err := unix.Write(h.fd, []byte("q")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-done:
+		if got.err != nil || got.result.ProcessState == nil || !got.result.ProcessState.Success() {
+			t.Fatalf("Run = %#v, %v", got.result, got.err)
+		}
+	case <-ctx.Done():
+		t.Fatal("Run did not finish", ctx.Err())
+	}
 }
 
 func TestObserverQueueCountIsBoundedAndShutdownRejects(t *testing.T) {

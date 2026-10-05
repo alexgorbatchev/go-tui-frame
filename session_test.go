@@ -80,16 +80,25 @@ type terminalHarness struct {
 	err           error
 }
 
+const harnessCellWidth, harnessCellHeight = 10, 20
+
 func newHarness(t *testing.T) *terminalHarness {
+	t.Helper()
+	return newSizedHarness(t, 40, 12)
+}
+
+// newSizedHarness models an outer terminal of the given grid, keeping the PTY
+// pixel size and the emulator answering size queries in agreement.
+func newSizedHarness(t *testing.T, cols, rows uint16) *terminalHarness {
 	t.Helper()
 	m, s, err := pty.Open()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := pty.Setsize(s, &pty.Winsize{Cols: 40, Rows: 12, X: 400, Y: 240}); err != nil {
+	if err := pty.Setsize(s, &pty.Winsize{Cols: cols, Rows: rows, X: cols * harnessCellWidth, Y: rows * harnessCellHeight}); err != nil {
 		t.Fatal(err)
 	}
-	em, err := emulator.New(emulator.Options{Size: emulator.Size{Cols: 40, Rows: 12, CellWidthPx: 10, CellHeightPx: 20}, GraphemeWidth: true})
+	em, err := emulator.New(emulator.Options{Size: emulator.Size{Cols: int(cols), Rows: int(rows), CellWidthPx: harnessCellWidth, CellHeightPx: harnessCellHeight}, GraphemeWidth: true})
 	if err != nil {
 		t.Fatal(err)
 	}
