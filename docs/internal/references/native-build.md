@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 16:06
-last_modified: 2026-10-05 10:28
+last_modified: 2026-10-06 09:37
 status: current
 ---
 
@@ -42,12 +42,20 @@ just run -- nvim
 just run-ai -- nvim
 ```
 
-`just native` downloads the pinned native source into `.tmp/native/ghostty`,
-verifies its SHA-256, and builds only libghostty-vt with:
+`just native` downloads the pinned native source archive, verifies its SHA-256,
+extracts it into `.tmp/native/ghostty`, and builds only libghostty-vt with:
 
 ```sh
 zig build -Demit-lib-vt -Demit-xcframework=false -Doptimize=ReleaseFast
 ```
+
+The recipe caches the archive as `.tmp/native/ghostty-<revision>.tar.gz`. It
+downloads to a temporary file in the same directory and renames that file to
+the cached path only after the checksum passes. A failed or interrupted
+transfer, or a download with other bytes, leaves no file at the cached path, so
+the next run downloads again. A download that fails the check stops the recipe
+with the URL, the cached path, and the expected digest. A cached archive that
+fails the check is removed and downloaded again.
 
 Ghostty's build runs `git` in its source directory to detect its version. The
 extracted archive is not a git repository, so the recipe runs `zig build`

@@ -47,10 +47,28 @@ _native target prefix cache:
         test -f "$source/.frame-source-revision" && test "$(cat "$source/.frame-source-revision")" = "$revision" || { printf 'Existing native source is unmarked or uses another revision: %s\n' "$source" >&2; exit 1; }
     else
         archive="$root/ghostty-$revision.tar.gz"
-        if ! test -f "$archive"; then
-            curl --fail --location --retry 3 "https://codeload.github.com/ghostty-org/ghostty/tar.gz/$revision" --output "$archive"
+        url="https://codeload.github.com/ghostty-org/ghostty/tar.gz/$revision"
+        verify_archive() {
+            printf '%s  %s\n' "$archive_sha" "$1" | shasum -a 256 --check
+        }
+        # Only a verified download is renamed to $archive. A cached archive
+        # that fails the check, such as a partial file from an older recipe,
+        # is removed and downloaded again.
+        if test -f "$archive" && ! verify_archive "$archive"; then
+            rm -f "$archive"
+            printf 'Removed cached archive %s: its SHA-256 is not %s.\n' "$archive" "$archive_sha" >&2
         fi
-        printf '%s  %s\n' "$archive_sha" "$archive" | shasum -a 256 --check
+        if ! test -f "$archive"; then
+            download=$(mktemp "$archive.XXXXXX")
+            trap 'rm -f "$download"' EXIT
+            curl --fail --location --retry 3 "$url" --output "$download"
+            verify_archive "$download" || {
+                printf 'Downloaded %s does not match SHA-256 %s; %s was not saved.\n' "$url" "$archive_sha" "$archive" >&2
+                exit 1
+            }
+            mv "$download" "$archive"
+            trap - EXIT
+        fi
         extracted=$(mktemp -d "$root/source.XXXXXX")
         trap 'rm -rf "$extracted"' EXIT
         tar -xzf "$archive" --strip-components=1 -C "$extracted"
