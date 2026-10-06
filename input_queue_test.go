@@ -88,10 +88,10 @@ func TestPausedOuterInputReportsHangup(t *testing.T) {
 		closed <- outer.Close()
 	}()
 	wakeAt(t, s, start.Add(3*limit))
-	steps := 0
+	wakes := 0
 	for {
-		paused, disconnected := step(t, s, buf)
-		steps++
+		paused, disconnected := stepUninterrupted(t, s, buf)
+		wakes++
 		if !paused {
 			t.Fatal("outer reads resumed although the child read nothing")
 		}
@@ -107,8 +107,8 @@ func TestPausedOuterInputReportsHangup(t *testing.T) {
 	}
 	// Starting the watch may report the input already waiting once; otherwise
 	// the paused loop sleeps until the hangup.
-	if steps > 2 {
-		t.Fatalf("paused loop woke %d times before the hangup, want at most 2", steps)
+	if wakes > 2 {
+		t.Fatalf("paused loop woke %d times before the hangup, want at most 2", wakes)
 	}
 	if err := <-closed; err != nil {
 		t.Fatal(err)
@@ -348,10 +348,47 @@ func rawPTY(t *testing.T) (master, slave *os.File) {
 // terminal disconnected. Any session error or queue overrun fails the test.
 func step(t *testing.T, s *session[struct{}], buf []byte) (paused, disconnected bool) {
 	t.Helper()
+	return stepWith(t, s, func() (bool, error) { return s.await(buf, nil, nil) })
+}
+
+// stepUninterrupted repeats step's iteration while a signal interrupts its
+// poll, so each call returns one wake of the loop. await returns an
+// interrupted poll as an empty iteration, which the loop repeats at once, and
+// Go's asynchronous preemption signal, SIGURG, can interrupt a blocked poll at
+// any time. Otherwise it waits as await does.
+func stepUninterrupted(t *testing.T, s *session[struct{}], buf []byte) (paused, disconnected bool) {
+	t.Helper()
+	for {
+		interrupted := false
+		paused, disconnected = stepWith(t, s, func() (bool, error) {
+			hungUp, err := s.hangup.watch(s.console.fd, s.watchesHangup(nil))
+			if err != nil || hungUp {
+				return hungUp, err
+			}
+			fds := s.pollFDs(nil)
+			_, err = unix.Poll(fds, s.pollTimeout())
+			if errors.Is(err, unix.EINTR) {
+				interrupted = true
+				return false, nil
+			}
+			if err != nil {
+				return false, err
+			}
+			return s.processReady(buf, fds, nil, true)
+		})
+		if !interrupted {
+			return paused, disconnected
+		}
+	}
+}
+
+// stepWith runs step's iteration with wait in place of await.
+func stepWith(t *testing.T, s *session[struct{}], wait func() (bool, error)) (paused, disconnected bool) {
+	t.Helper()
 	if err := s.deadlines(); err != nil {
 		t.Fatal(err)
 	}
-	disconnected, err := s.await(buf, nil, nil)
+	disconnected, err := wait()
 	if err != nil {
 		t.Fatal(err)
 	}
