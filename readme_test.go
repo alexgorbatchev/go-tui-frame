@@ -2,6 +2,7 @@ package frame
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -107,36 +108,64 @@ func runReadmeCapture(t *testing.T, binary string) {
 			h := newHarness(t)
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
-			cmd := exec.CommandContext(ctx, binary)
-			cmd.Env = readmeChildEnv(t, tt.child)
-			var stderr strings.Builder
-			cmd.Stdin, cmd.Stdout, cmd.Stderr = h.slave, h.slave, &stderr
-			if err := cmd.Start(); err != nil {
+			p := &readmeProgram{cmd: exec.CommandContext(ctx, binary), exited: make(chan struct{})}
+			p.cmd.Env = readmeChildEnv(t, tt.child)
+			p.cmd.Stdin, p.cmd.Stdout, p.cmd.Stderr = h.slave, h.slave, &p.stderr
+			if err := p.cmd.Start(); err != nil {
 				t.Fatal(err)
 			}
-			var waitErr error
-			exited := make(chan struct{})
 			go func() {
-				defer close(exited)
-				waitErr = cmd.Wait()
+				defer close(p.exited)
+				p.err = p.cmd.Wait()
 			}()
 			t.Cleanup(func() {
 				cancel()
-				<-exited
+				<-p.exited
 				if t.Failed() {
-					t.Logf("README program: %v, stderr %q", waitErr, stderr.String())
+					t.Logf("README program %s", p.outcome())
 				}
 			})
 			if tt.quitAfter != "" {
-				awaitText(t, h, tt.quitAfter)
+				p.awaitText(ctx, t, h, tt.quitAfter)
 				pressCtrlQ(t, h)
 			}
-			<-exited
-			if code := cmd.ProcessState.ExitCode(); code != tt.code || !tt.stderr.MatchString(stderr.String()) {
-				t.Fatalf("README program exited %d (%v) with stderr %q, want status %d and stderr matching %q",
-					code, waitErr, stderr.String(), tt.code, tt.stderr)
+			<-p.exited
+			if code := p.cmd.ProcessState.ExitCode(); code != tt.code || !tt.stderr.MatchString(p.stderr.String()) {
+				t.Fatalf("README program %s, want status %d and stderr matching %q", p.outcome(), tt.code, tt.stderr)
 			}
 		})
+	}
+}
+
+// readmeProgram is a README program running on a harness terminal.
+type readmeProgram struct {
+	cmd    *exec.Cmd
+	stderr strings.Builder
+	// exited is closed when Wait returns; err and stderr are final from then.
+	exited chan struct{}
+	err    error
+}
+
+// outcome describes how the program ended. The caller has received from
+// exited.
+func (p *readmeProgram) outcome() string {
+	return fmt.Sprintf("exited %d (%v) with stderr %q", p.cmd.ProcessState.ExitCode(), p.err, p.stderr.String())
+}
+
+// awaitText waits until the display of h, the program's terminal, shows want.
+// It fails as soon as the program exits, reporting how it ended, or ctx ends.
+func (p *readmeProgram) awaitText(ctx context.Context, t *testing.T, h *terminalHarness, want string) {
+	t.Helper()
+	poll := time.NewTicker(10 * time.Millisecond)
+	defer poll.Stop()
+	for !strings.Contains(h.text(), want) {
+		select {
+		case <-p.exited:
+			t.Fatalf("README program %s while the case waited for %q on the outer display: %q", p.outcome(), want, h.text())
+		case <-ctx.Done():
+			t.Fatalf("outer display missing %q when the case ended (%v): %q", want, ctx.Err(), h.text())
+		case <-poll.C:
+		}
 	}
 }
 
