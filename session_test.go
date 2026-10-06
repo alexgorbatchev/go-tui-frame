@@ -36,24 +36,17 @@ func TestSessionChild(t *testing.T) {
 		countInput(os.Getenv("FRAME_TEST_COUNT_FILE"))
 	}
 	if os.Getenv("FRAME_TEST_MODE") == "groups" {
-		cmd := exec.Command(os.Args[0], "-test.run=^TestSessionChild$")
-		cmd.Env = append(os.Environ(), "FRAME_TEST_MODE=sleep")
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-		if err := cmd.Start(); err != nil {
-			os.Exit(95)
-		}
-		pidFile := os.Getenv("FRAME_TEST_PID_FILE")
-		if err := os.WriteFile(pidFile+".pending", []byte(strconv.Itoa(cmd.Process.Pid)), 0600); err != nil {
-			os.Exit(96)
-		}
-		if err := os.Rename(pidFile+".pending", pidFile); err != nil {
-			os.Exit(98)
-		}
-		if err := cmd.Wait(); err != nil {
+		sleeper := startSleeper(&syscall.SysProcAttr{Setpgid: true})
+		if err := sleeper.Wait(); err != nil {
 			os.Exit(97)
 		}
 		os.Exit(0)
+	}
+	if os.Getenv("FRAME_TEST_MODE") == "detached" {
+		// The sleeper keeps the slave open from its own session, as a daemon
+		// the framed program starts with setsid would; cleanup never signals it.
+		startSleeper(&syscall.SysProcAttr{Setsid: true})
+		floodOutput()
 	}
 	if _, err := term.MakeRaw(os.Stdin.Fd()); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -73,6 +66,37 @@ func TestSessionChild(t *testing.T) {
 				os.Exit(94)
 			}
 			os.Exit(0)
+		}
+	}
+}
+
+// startSleeper starts a sleeping child with attrs on this process's terminal
+// and publishes its PID in FRAME_TEST_PID_FILE.
+func startSleeper(attrs *syscall.SysProcAttr) *exec.Cmd {
+	cmd := exec.Command(os.Args[0], "-test.run=^TestSessionChild$")
+	cmd.Env = append(os.Environ(), "FRAME_TEST_MODE=sleep")
+	cmd.SysProcAttr = attrs
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := cmd.Start(); err != nil {
+		os.Exit(95)
+	}
+	pidFile := os.Getenv("FRAME_TEST_PID_FILE")
+	if err := os.WriteFile(pidFile+".pending", []byte(strconv.Itoa(cmd.Process.Pid)), 0600); err != nil {
+		os.Exit(96)
+	}
+	if err := os.Rename(pidFile+".pending", pidFile); err != nil {
+		os.Exit(98)
+	}
+	return cmd
+}
+
+// floodOutput writes to the terminal until a write fails or the process is
+// killed, so output stays queued on the PTY whenever the frame stops reading.
+func floodOutput() {
+	chunk := bytes.Repeat([]byte("flood "), 1024)
+	for {
+		if _, err := os.Stdout.Write(chunk); err != nil {
+			os.Exit(99)
 		}
 	}
 }
@@ -499,7 +523,7 @@ func TestCancellationRestoresTerminalBeforeObserverDrains(t *testing.T) {
 
 func TestCancellationTerminatesAllOwnedSessionGroups(t *testing.T) {
 	h := newHarness(t)
-	cmd, file := groupsCommand(t)
+	cmd, file := descendantCommand(t, "groups")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	started := make(chan int, 1)
@@ -534,7 +558,7 @@ func TestCancellationTerminatesAllOwnedSessionGroups(t *testing.T) {
 func TestObserverPanicEndsSessionThroughShutdown(t *testing.T) {
 	h := newHarness(t)
 	before := termiosState(t, h)
-	cmd, file := groupsCommand(t)
+	cmd, file := descendantCommand(t, "groups")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	fault := errors.New("observer fault on Started")
@@ -622,26 +646,174 @@ func TestObserverPanicDuringShutdownDrainReachesRun(t *testing.T) {
 	}
 }
 
-// groupsCommand returns a child whose descendant leads a separate process group
-// inside the owned session and writes its PID to the returned file.
-func groupsCommand(t *testing.T) (*exec.Cmd, string) {
+// A session error leaves child output unread. On Darwin the killed launch
+// leader cannot finish exiting until that output drains, and while a process in
+// another session holds the slave the drain has no deadline. Cleanup must not
+// depend on either.
+func TestSessionErrorCleanupIgnoresDetachedSlaveHolder(t *testing.T) {
+	// Holding the first child output until cleanup has finished overflows the
+	// observation queue, so the loop returns while the child is still writing.
+	d := startDetached(t, nil, []EventKind{ChildOutput}, func(_ Event, hold <-chan struct{}) { <-hold })
+	d.finish(t, awaitTermios(d.h, d.before, 5*time.Second))
+}
+
+// Output stopped by flow control cannot be read, so reading the child PTY
+// cannot release a killed leader whose exit waits for that output; the drain
+// deadline must.
+func TestSessionErrorCleanupReleasesStoppedChildOutput(t *testing.T) {
+	stop := []byte{0x13} // VSTOP (^S), which the default line discipline applies with IXON.
+	stopped := make(chan struct{})
+	// Only ^S reaches the child. Any later input would restart its output
+	// under IXANY, so the frame consumes it; its observations, held until
+	// cleanup has finished, overflow the queue.
+	capture := func(in Input) Disposition {
+		if bytes.Equal(in.Raw, stop) {
+			return Pass
+		}
+		return Consume
+	}
+	holding := false // Startup probe replies are outer input too; let them pass.
+	d := startDetached(t, capture, []EventKind{ChildInput, OuterInput}, func(e Event, hold <-chan struct{}) {
+		switch {
+		case e.Kind == ChildInput && bytes.Equal(e.Bytes, stop):
+			holding = true
+			close(stopped)
+		case e.Kind == OuterInput && holding:
+			<-hold
+		}
+	})
+	if _, err := unix.Write(d.h.fd, stop); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("^S did not reach the child")
+	}
+	// Separate reads each emit an observation; keep typing until the queue has
+	// overflowed and cleanup has restored the terminal.
+	cleaned := false
+	for deadline := time.Now().Add(drainTimeout + 3*time.Second); !cleaned && time.Now().Before(deadline); {
+		if _, err := unix.Write(d.h.fd, []byte("a")); err != nil && !errors.Is(err, unix.EAGAIN) {
+			t.Fatal(err)
+		}
+		cleaned = awaitTermios(d.h, d.before, 5*time.Millisecond)
+	}
+	d.finish(t, cleaned)
+}
+
+// detachedRun is a session whose "detached" child writes output continuously
+// while a sleeper in another session holds the child PTY's slave.
+type detachedRun struct {
+	h       *terminalHarness
+	before  string
+	holder  int
+	done    <-chan runOutcome
+	release func()
+}
+
+// startDetached starts a detachedRun with capture, when not nil, and passes
+// each observed event of kinds to observe. observe may block on hold, which
+// closes once the test has seen whether cleanup finished.
+func startDetached(t *testing.T, capture func(Input) Disposition, kinds []EventKind, observe func(e Event, hold <-chan struct{})) *detachedRun {
 	t.Helper()
-	dir, err := os.MkdirTemp(".tmp", "session-groups-")
+	h := newHarness(t)
+	before := termiosState(t, h)
+	cmd, file := descendantCommand(t, "detached")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	t.Cleanup(cancel)
+	leaders, hold := make(chan int, 1), make(chan struct{})
+	release := sync.OnceFunc(func() { close(hold) })
+	t.Cleanup(release)
+	app := New(cmd, struct{}{}).Terminal(h.slave, h.slave)
+	if capture != nil {
+		app.Capture(capture)
+	}
+	app.ObserveEvents(append([]EventKind{Started}, kinds...), func(e Event) {
+		if e.Kind == Started {
+			leaders <- e.Snapshot.Child.PID
+			return
+		}
+		observe(e, hold)
+	})
+	done := startRun(ctx, app)
+	var leader int
+	select {
+	case leader = <-leaders:
+	case got := <-done:
+		t.Fatalf("Run returned before the child started: %#v, %v", got.result, got.err)
+	case <-ctx.Done():
+		t.Fatal("Started was not observed", ctx.Err())
+	}
+	holder := awaitDescendantGroup(t, file, leader)
+	if sid, err := unix.Getsid(holder); err != nil || sid != holder {
+		t.Fatalf("holder session = %d, %v; want its own session %d", sid, err, holder)
+	}
+	return &detachedRun{h: h, before: before, holder: holder, done: done, release: release}
+}
+
+// finish requires that child cleanup restored the terminal, which Run does
+// only after cleanup has returned, and that Run then reported the observation
+// overflow with the leader's exit state while the holder survived.
+func (d *detachedRun) finish(t *testing.T, cleaned bool) {
+	t.Helper()
+	if !cleaned {
+		// Ending the holder bounds the leader's drain, so Run can return before
+		// the test reports the failure.
+		if err := unix.Kill(-d.holder, syscall.SIGKILL); err != nil {
+			t.Error(err)
+		}
+	}
+	d.release()
+	var got runOutcome
+	select {
+	case got = <-d.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after its observer was released")
+	}
+	if !cleaned {
+		t.Fatal("child cleanup did not finish in time while a process in another session held the child PTY")
+	}
+	if !errors.Is(got.err, ErrObservationOverflow) || got.result.ProcessState == nil || got.result.CleanupError != nil {
+		t.Fatalf("Run = %#v, %v; want ErrObservationOverflow, the launch leader's exit state and no cleanup error", got.result, got.err)
+	}
+	if err := unix.Kill(d.holder, 0); err != nil {
+		t.Fatalf("detached holder did not outlive Run: %v", err)
+	}
+}
+
+// descendantCommand returns a child in mode, "groups" or "detached", whose
+// descendant leads its own process group and writes its PID to the returned
+// file. Cleanup kills that group once its PID is published, even when the test
+// failed before reading it.
+func descendantCommand(t *testing.T, mode string) (*exec.Cmd, string) {
+	t.Helper()
+	dir, err := os.MkdirTemp(".tmp", "session-"+mode+"-")
 	if err != nil {
 		t.Fatal(err)
 	}
+	file := dir + "/pid"
 	t.Cleanup(func() {
+		if data, err := os.ReadFile(file); err == nil {
+			pid, err := strconv.Atoi(string(data))
+			if err != nil {
+				t.Error(err)
+			} else if err := unix.Kill(-pid, syscall.SIGKILL); err != nil && !errors.Is(err, unix.ESRCH) {
+				t.Error(err)
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Error(err)
+		}
 		if err := os.RemoveAll(dir); err != nil {
 			t.Error(err)
 		}
 	})
-	file := dir + "/pid"
 	cmd := childCommand(t)
-	cmd.Env = append(cmd.Env, "FRAME_TEST_MODE=groups", "FRAME_TEST_PID_FILE="+file)
+	cmd.Env = append(cmd.Env, "FRAME_TEST_MODE="+mode, "FRAME_TEST_PID_FILE="+file)
 	return cmd, file
 }
 
-// awaitDescendantGroup reads the PID groupsCommand's descendant records and
+// awaitDescendantGroup reads the PID descendantCommand's descendant records and
 // verifies that it leads its own process group, apart from the launch leader.
 func awaitDescendantGroup(t *testing.T, file string, leader int) int {
 	t.Helper()
@@ -664,11 +836,6 @@ func awaitDescendantGroup(t *testing.T, file string, leader int) int {
 	if pid == 0 {
 		t.Fatal("separate child group did not start")
 	}
-	t.Cleanup(func() {
-		if err := unix.Kill(-pid, syscall.SIGKILL); err != nil && !errors.Is(err, unix.ESRCH) {
-			t.Error(err)
-		}
-	})
 	if pgid, err := unix.Getpgid(pid); err != nil || pgid != pid || pgid == leader {
 		t.Fatalf("group = %d, %v; leader=%d descendant=%d", pgid, err, leader, pid)
 	}

@@ -545,6 +545,12 @@ func (s *session[T]) readChild(buf []byte) error {
 			}
 		}
 	}
+	return s.childReadError(n, err)
+}
+
+// childReadError records the end of child output on EOF or EIO and returns
+// the error of a child PTY read that cannot be retried.
+func (s *session[T]) childReadError(n int, err error) error {
 	if n == 0 && err == nil || errors.Is(err, unix.EIO) {
 		s.ptyEOF = true
 		return nil
@@ -803,19 +809,82 @@ func (s *session[T]) cleanupChild() error {
 	// the owned native session even after Wait; detached sessions are excluded.
 	errs = append(errs, s.signalGroups(syscall.SIGKILL))
 	if !s.waited {
-		err := <-s.wait
-		s.waited = true
-		var exit *exec.ExitError
-		if err != nil && !errors.As(err, &exit) {
-			errs = append(errs, err)
-		}
+		errs = append(errs, s.discardUntilReaped())
 	}
+	// Closing the master hangs up the slave. Once the leader has been reaped its
+	// exit has detached its session from the terminal, so the hangup signals no
+	// one. A leader the drain could not release is released by the hangup.
 	if s.master != nil {
 		errs = append(errs, s.master.Close())
 		s.master = nil
 	}
+	if !s.waited {
+		errs = append(errs, s.finishWait(<-s.wait))
+	}
 	<-s.waitDone
 	return errors.Join(errs...)
+}
+
+// discardUntilReaped reads and discards child output until Wait reports the
+// killed launch leader, for at most drainTimeout. Nothing else reads the master
+// once the loop has returned, and on Darwin an exiting leader waits for its
+// unread output to drain; SIGKILL cannot end that wait. It lasts 600 ms when
+// the leader's close is the slave's last, and has no deadline while a process
+// in another session holds the slave. Reading empties the queue and wakes the
+// leader. Closing the master first would also end the wait, but its hangup
+// sends the leader SIGHUP, which on Darwin can end a multi-threaded leader
+// before its SIGKILL does and so change the exit status Run reports. Output
+// that flow control has stopped cannot be read; the deadline bounds that wait.
+func (s *session[T]) discardUntilReaped() error {
+	deadline := time.Now().Add(drainTimeout)
+	buf := make([]byte, readBufferSize)
+	for {
+		select {
+		case err := <-s.wait:
+			return s.finishWait(err)
+		default:
+		}
+		timeout := int(time.Until(deadline).Milliseconds())
+		if timeout <= 0 {
+			return nil
+		}
+		fds := []unix.PollFd{{Fd: int32(s.wakeReadFD), Events: unix.POLLIN}, {Fd: int32(s.fd), Events: unix.POLLIN}}
+		if s.ptyEOF {
+			fds[1].Fd = -1
+		}
+		if _, err := unix.Poll(fds, timeout); err != nil {
+			if errors.Is(err, unix.EINTR) {
+				continue
+			}
+			return fmt.Errorf("poll child cleanup: %w", err)
+		}
+		if fds[0].Revents&(unix.POLLHUP|unix.POLLERR|unix.POLLNVAL) != 0 {
+			// Wait's wakeup can no longer arrive; closeWake reports why.
+			return nil
+		}
+		if fds[0].Revents&unix.POLLIN != 0 {
+			if err := s.clearWake(buf); err != nil {
+				return err
+			}
+		}
+		if fds[1].Revents&(unix.POLLIN|unix.POLLHUP|unix.POLLERR) != 0 {
+			n, err := unix.Read(s.fd, buf)
+			if err := s.childReadError(n, err); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+// finishWait records that the launch leader was reaped and returns Wait's
+// error unless it only reports the leader's exit status.
+func (s *session[T]) finishWait(err error) error {
+	s.waited = true
+	var exit *exec.ExitError
+	if err != nil && !errors.As(err, &exit) {
+		return err
+	}
+	return nil
 }
 
 func (s *session[T]) loop(ctx context.Context) error {
@@ -952,20 +1021,8 @@ func (s *session[T]) processReady(buf []byte, fds []unix.PollFd, resizes <-chan 
 }
 
 func (s *session[T]) handleWake(buf []byte, resizes <-chan struct{}) error {
-	for {
-		n, err := unix.Read(s.wakeReadFD, buf)
-		if errors.Is(err, unix.EAGAIN) {
-			break
-		}
-		if errors.Is(err, unix.EINTR) {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			break
-		}
+	if err := s.clearWake(buf); err != nil {
+		return err
 	}
 	select {
 	case <-resizes:
@@ -978,6 +1035,25 @@ func (s *session[T]) handleWake(buf []byte, resizes <-chan struct{}) error {
 		return err
 	}
 	return s.render(false)
+}
+
+// clearWake reads every pending wakeup so the next poll waits for a new one.
+func (s *session[T]) clearWake(buf []byte) error {
+	for {
+		n, err := unix.Read(s.wakeReadFD, buf)
+		if errors.Is(err, unix.EAGAIN) {
+			return nil
+		}
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return nil
+		}
+	}
 }
 
 func (s *session[T]) deadlines() error {
