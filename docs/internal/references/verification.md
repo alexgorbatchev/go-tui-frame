@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 20:10
-last_modified: 2026-10-06 14:48
+last_modified: 2026-10-06 16:39
 status: current
 ---
 
@@ -25,10 +25,13 @@ macOS:
 
 ```sh
 export CGO_ENABLED=1 PKG_CONFIG_PATH="$PWD/.tmp/native/prefix/share/pkgconfig" TMPDIR="$PWD/.tmp"
+export CGO_CPPFLAGS="$(pkg-config --static --cflags libghostty-vt-static)"
 ```
 
-Linux uses a different prefix and compiler; see the
-[pinned native build](native-build.md).
+`CGO_CPPFLAGS` names this checkout's prefix in Go's build cache key, as
+`scripts/with-libghostty-cppflags` does for the recipes; without it, Go can
+reuse a binding built against another checkout's archive. Linux uses a
+different prefix and compiler; see the [pinned native build](native-build.md).
 
 Allocation counts are deterministic: each benchmark reports the same count in
 every run. Byte counts are also identical across runs, except for owned
@@ -352,10 +355,14 @@ repository files.
 
 Go's build cache key for a cgo package includes the cgo flags from the
 environment and `#cgo` directives, but not `pkg-config` output (`buildActionID`
-in Go 1.27.1's `cmd/go/internal/work/exec.go`). A cached libghostty package
-therefore links the archive path that `pkg-config` returned when the package was
-first built, possibly in another checkout. Both audited cross-builds used an
-empty `GOCACHE`, so each linked this checkout's archive.
+in Go 1.27.1's `cmd/go/internal/work/exec.go`). The recipes add the prefix's
+include flags to `CGO_CPPFLAGS`, so a cached libghostty package is reused only
+for the same native prefix; see the [pinned native build](native-build.md).
+`TestBuildCacheKeepsNativePrefixesApart` in
+[the CLI tests](../../../cmd/tui-frame/native_cache_test.go) builds against two
+prefixes with one build cache and removes the first before building the second.
+Both audited cross-builds used an empty `GOCACHE`, so each linked this
+checkout's archive.
 
 These audits follow the [pinned native build](native-build.md). Source changes
 require rebuilding and reauditing the resulting binaries. Linux x86_64 tests

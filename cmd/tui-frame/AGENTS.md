@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 13:56
-last_modified: 2026-10-06 16:49
+last_modified: 2026-10-06 17:18
 status: current
 ---
 
@@ -22,11 +22,14 @@ From the repository root:
   host architecture and use separate prefixes for each archive.
 - `just linkage` inspects executable dependencies; its optional argument selects
   another artifact, including the Linux cross build.
-- Export the native `PKG_CONFIG_PATH` and `CGO_ENABLED=1` before invoking Go
-  checks directly; see [native build setup](../../docs/internal/references/native-build.md).
-- `go test -coverprofile=.tmp/cli-coverage.out ./cmd/tui-frame` measures unit
-  coverage after that environment setup. Integration binaries can be instrumented
-  with Go's native `-cover` and `GOCOVERDIR` support.
+- Before invoking Go checks directly, export the native `PKG_CONFIG_PATH` and
+  `CGO_ENABLED=1`, and run `go` through `scripts/with-libghostty-cppflags`, as
+  the recipes do. Without the wrapper, Go's build cache can reuse a binding
+  built in another checkout, which links that checkout's archive; see
+  [native build setup](../../docs/internal/references/native-build.md).
+- `scripts/with-libghostty-cppflags go test -coverprofile=.tmp/cli-coverage.out ./cmd/tui-frame`
+  measures unit coverage after that environment setup. Integration binaries can
+  be instrumented with Go's native `-cover` and `GOCOVERDIR` support.
 
 Demo painting can also be checked independently with
 `go test -race cmd/tui-frame/demo.go cmd/tui-frame/demo_test.go`.

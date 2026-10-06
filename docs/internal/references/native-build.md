@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 16:06
-last_modified: 2026-10-06 12:42
+last_modified: 2026-10-06 16:39
 status: current
 ---
 
@@ -93,6 +93,29 @@ matching `.frame-source-revision`; the recipe refuses an unmarked or differently
 pinned directory. Zig caches and downloaded sources remain under ignored
 `.tmp/native/`. Binaries go to ignored `bin/`.
 
+The binding gets the archive's include and link flags from a `#cgo pkg-config`
+directive. Go's build cache key for a cgo package includes the `CGO_CPPFLAGS`,
+`CGO_CFLAGS`, and `CGO_LDFLAGS` environment and the package's `#cgo`
+directives, but not `pkg-config` output (`buildActionID` in Go 1.27.1's
+`cmd/go/internal/work/exec.go`). The binding's module-cache directory is the
+same in every checkout, so without another key input a binding compiled in one
+checkout is reused in the others and links the first checkout's archive. Once
+that checkout's `.tmp/native` is removed, the other checkouts fail to link.
+Recipes that compile cgo therefore run `go` through
+`scripts/with-libghostty-cppflags`. The script appends
+`pkg-config --static --cflags libghostty-vt-static`, the include flag that
+names the prefix, to `CGO_CPPFLAGS`, where Go also puts `pkg-config`'s
+`--cflags` output. Each prefix then gets its own cache entry. The `--libs`
+output is not exported through `CGO_LDFLAGS`: Go applies that variable to every
+cgo package, so the archive would reach the final link once for each of them,
+and the macOS linker warns about the duplicates.
+
+The cache key covers the prefix path, not the archive or header contents. As
+[`go help cache`](https://pkg.go.dev/cmd/go#hdr-Build_and_test_caching) states,
+the build cache does not detect changes to C libraries. After the archive is
+rebuilt at the same prefix, for example for another Ghostty revision, run
+`go clean -cache` or build with `-a`.
+
 `just check` checks module hygiene, builds all packages and `bin/tui-frame`,
 runs vet, and runs race tests. `just linkage` inspects the resulting executable.
 Its Mach-O audit permits only OS-provided `/usr/lib/` or `/System/Library/`
@@ -122,11 +145,14 @@ amd64/arm64 executables. Linux runtime tests have not executed locally.
 ## Build a consumer
 
 Build the pinned archive first. For a macOS consumer, export its actual absolute
-prefix before running the consumer's ordinary Go build:
+prefix before running the consumer's ordinary Go build. Go's build cache is
+shared by every project of the user, so also add the prefix's include flags to
+`CGO_CPPFLAGS`, as `scripts/with-libghostty-cppflags` does for this repository:
 
 ```sh
 export CGO_ENABLED=1
 export PKG_CONFIG_PATH="/absolute/path/to/go-tui-frame/.tmp/native/prefix/share/pkgconfig"
+export CGO_CPPFLAGS="$(pkg-config --static --cflags libghostty-vt-static)"
 go build ./...
 ```
 
@@ -137,8 +163,12 @@ export CGO_ENABLED=1
 export GOOS=linux GOARCH=amd64
 export CC='zig cc -target x86_64-linux-musl'
 export PKG_CONFIG_PATH="/absolute/path/to/go-tui-frame/.tmp/native/linux-musl/amd64/prefix/share/pkgconfig"
+export CGO_CPPFLAGS="$(pkg-config --static --cflags libghostty-vt-static)"
 go build -ldflags='-linkmode=external -extldflags=-static' ./...
 ```
+
+These commands replace any earlier `CGO_CPPFLAGS` value; keep other flags by
+prepending them.
 
 For Linux arm64, first run `just native-linux arm64`, then change `GOARCH` to
 `arm64`, the C compiler target to `aarch64-linux-musl`, and the prefix segment to
