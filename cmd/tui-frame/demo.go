@@ -107,14 +107,16 @@ func drawFooter(ctx frame.DrawContext[UIData]) {
 }
 
 // paintFooter paints the metadata row above the key-hint row. Lip Gloss wraps
-// a block at its width before it applies a height limit, so each row is cut to
-// the cells inside its style's frame and rendered on its own: a long child
-// title ends in an ellipsis instead of wrapping over the key hints.
+// a block at its width before it applies a height limit, so each row is
+// rendered on its own and cut to the cells Render leaves inside the row's
+// border and padding: a long child title ends in an ellipsis instead of
+// wrapping over the key hints.
 func paintFooter(view uv.Screen, style, hintStyle lipgloss.Style, metadata string) {
 	paint(view, style, "")
 	width := view.Bounds().Dx()
 	row := func(rowStyle lipgloss.Style, text string) *lipgloss.Layer {
-		text = ansi.Truncate(text, width-rowStyle.GetHorizontalFrameSize(), "…")
+		budget := width - rowStyle.GetHorizontalBorderSize() - rowStyle.GetHorizontalPadding()
+		text = ansi.Truncate(text, budget, "…")
 		return lipgloss.NewLayer(rowStyle.Width(width).Render(text))
 	}
 	metadataRow := row(style, metadata)
