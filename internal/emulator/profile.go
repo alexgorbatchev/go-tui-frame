@@ -23,6 +23,9 @@ type Profile struct {
 
 // PreferenceModes are the native resettable modes that describe user
 // preferences supported by this endpoint, rather than per-application state.
+// Grapheme clustering (mode 2027) is not one of them: Options.GraphemeWidth
+// sets it, and an inherited default would replace both its value and its reset
+// default.
 func PreferenceModes() []ghostty.Mode {
 	return []ghostty.Mode{
 		ghostty.ModeKAM, ghostty.ModeInsert, ghostty.ModeSRM, ghostty.ModeLinefeed,
@@ -31,8 +34,7 @@ func PreferenceModes() []ghostty.Mode {
 		ghostty.ModeReverseWrap, ghostty.ModeKeypadKeys, ghostty.ModeBackarrowKeyMode,
 		ghostty.ModeFocusEvent, ghostty.ModeAltScroll, ghostty.ModeNumlockKeypad,
 		ghostty.ModeAltEscPrefix, ghostty.ModeAltSendsEsc, ghostty.ModeReverseWrapExt,
-		ghostty.ModeBracketedPaste, ghostty.ModeGraphemeCluster, ghostty.ModeColorSchemeReport,
-		ghostty.ModeInBandResize,
+		ghostty.ModeBracketedPaste, ghostty.ModeColorSchemeReport, ghostty.ModeInBandResize,
 	}
 }
 

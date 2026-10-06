@@ -40,10 +40,14 @@ type Size struct {
 // Clipboard handlers run synchronously during Write and must not reenter the
 // terminal. Nil handlers produce Unsupported replies and observable requests.
 type Options struct {
-	Profile                                *Profile
-	Size                                   Size
-	TerminfoName                           string
-	Version                                string
+	Profile      *Profile
+	Size         Size
+	TerminfoName string
+	Version      string
+	// GraphemeWidth is the value and reset default of grapheme clustering
+	// (mode 2027): true measures text by grapheme clusters, false with
+	// wcwidth. It must match the outer screen's width rule, so the child's
+	// cursor and wrapping agree with where its text is shown.
 	GraphemeWidth                          bool
 	UnknownMaxBytes                        uint
 	ScrollbackMaxBytes, ScrollbackMaxLines *uint

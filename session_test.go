@@ -184,6 +184,9 @@ func newCellHarness(t *testing.T, cols, rows, cellWidth, cellHeight uint16) *ter
 type harnessTerminal struct {
 	cols, rows, cellWidth, cellHeight uint16
 	defaults                          *emulator.Profile
+	// wcwidth starts the terminal measuring text with wcwidth, grapheme
+	// clustering (mode 2027) reset, instead of by grapheme clusters.
+	wcwidth bool
 }
 
 // newTerminalHarness models an outer terminal, keeping the PTY pixel size and
@@ -199,7 +202,7 @@ func newTerminalHarness(t *testing.T, terminal harnessTerminal) *terminalHarness
 	if err := pty.Setsize(s, &pty.Winsize{Cols: cols, Rows: rows, X: cols * cellWidth, Y: rows * cellHeight}); err != nil {
 		t.Fatal(err)
 	}
-	em, err := emulator.New(emulator.Options{Size: emulator.Size{Cols: int(cols), Rows: int(rows), CellWidthPx: uint32(cellWidth), CellHeightPx: uint32(cellHeight)}, GraphemeWidth: true, Profile: terminal.defaults})
+	em, err := emulator.New(emulator.Options{Size: emulator.Size{Cols: int(cols), Rows: int(rows), CellWidthPx: uint32(cellWidth), CellHeightPx: uint32(cellHeight)}, GraphemeWidth: !terminal.wcwidth, Profile: terminal.defaults})
 	if err != nil {
 		t.Fatal(err)
 	}

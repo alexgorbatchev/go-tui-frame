@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/alexgorbatchev/go-tui-frame/internal/emulator"
+	"github.com/alexgorbatchev/go-tui-frame/internal/input"
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/term"
@@ -149,6 +150,10 @@ func TestSessionPaletteEncodingFollowsOuterColorProfile(t *testing.T) {
 }
 
 func TestInheritanceChild(t *testing.T) {
+	if file := os.Getenv("FRAME_INHERITANCE_GRAPHEME_FILE"); file != "" {
+		measureGraphemeLine(t, file)
+		return
+	}
 	if os.Getenv("FRAME_INHERITANCE_CURSOR") == "1" {
 		if _, err := term.MakeRaw(os.Stdin.Fd()); err != nil {
 			t.Fatal(err)
@@ -181,6 +186,162 @@ func TestInheritanceChild(t *testing.T) {
 	}
 	if err := os.WriteFile(file, data, 0600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// graphemeLine puts a ZWJ family emoji between two letters. Grapheme
+// clustering measures the emoji as one character two cells wide; wcwidth gives
+// each of its three emoji two cells.
+const graphemeLine = "a\U0001F468\u200d\U0001F469\u200d\U0001F467b"
+
+// graphemeLineRow is the 1-based row measureGraphemeLine prints on. Below row
+// 1 a cursor position report cannot be mistaken for a modified F3 key, which
+// shares its CSI 1 ; Pm R form.
+const graphemeLineRow = 2
+
+// measureGraphemeLine prints graphemeLine as the child starts and again after a
+// full reset (RIS), which restores the reset defaults of the child's modes.
+// After each it requests the cursor position, then records the 0-based
+// columns the terminal reported in file and prints "measured".
+func measureGraphemeLine(t *testing.T, file string) {
+	if _, err := term.MakeRaw(os.Stdin.Fd()); err != nil {
+		t.Fatal(err)
+	}
+	framer := input.New()
+	buf := make([]byte, 256)
+	var columns []int
+	for _, reset := range []string{"", ansi.ResetInitialState} {
+		if _, err := fmt.Fprint(os.Stdout, reset+ansi.CursorPosition(1, graphemeLineRow)+graphemeLine+ansi.RequestCursorPositionReport); err != nil {
+			t.Fatal(err)
+		}
+		column := -1
+		for column < 0 {
+			n, err := os.Stdin.Read(buf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			packets, err := framer.Feed(buf[:n])
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, p := range packets {
+				if report, ok := p.Event.(uv.CursorPositionEvent); ok {
+					column = report.X
+				}
+			}
+		}
+		columns = append(columns, column)
+	}
+	data, err := json.Marshal(columns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprint(os.Stdout, ansi.CursorPosition(1, graphemeLineRow+2)+"measured"); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		n, err := os.Stdin.Read(buf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(buf[:n]), "q") {
+			return
+		}
+	}
+}
+
+// The session decides how the outer terminal measures text, and the child
+// emulator must measure the same way from its start and after a reset, with or
+// without inheritance. Otherwise the child reports and computes columns the
+// screen does not show.
+func TestSessionChildMeasuresTextAsTheOuterTerminalDoes(t *testing.T) {
+	for _, inherit := range []bool{true, false} {
+		for _, tt := range []struct {
+			name   string
+			report ansi.ModeSetting
+			// wcwidth is the outer terminal's rule before the session;
+			// grapheme is the rule the session measures with on it.
+			wcwidth, grapheme bool
+		}{
+			{"set", ansi.ModeSet, false, true},
+			{"reset", ansi.ModeReset, true, true},
+			{"permanently set", ansi.ModePermanentlySet, false, true},
+			{"permanently reset", ansi.ModePermanentlyReset, true, false},
+		} {
+			t.Run(fmt.Sprintf("%s/inherit=%v", tt.name, inherit), func(t *testing.T) {
+				h := newTerminalHarness(t, harnessTerminal{cols: 40, rows: 12, cellWidth: harnessCellWidth, cellHeight: harnessCellHeight, wcwidth: tt.wcwidth})
+				// The native emulator starts in the state the report under test
+				// describes, but itself reports only switchable values.
+				h.report(ansi.ModeUnicodeCore, ansi.ReportMode(ansi.ModeUnicodeCore, tt.report))
+				file := filepath.Join(t.TempDir(), "columns.json")
+				cmd := exec.Command(os.Args[0], "-test.run=^TestInheritanceChild$")
+				cmd.Env = append(os.Environ(), "FRAME_INHERITANCE_GRAPHEME_FILE="+file)
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				started := make(chan Snapshot, 1)
+				done := make(chan error, 1)
+				app := New(cmd, struct{}{}).Terminal(h.slave, h.slave).InheritTerminal(inherit).Observe(func(e Event) {
+					if e.Kind == Started {
+						started <- *e.Snapshot
+					}
+				})
+				go func() { _, err := app.Run(ctx); done <- err }()
+				select {
+				case snap := <-started:
+					if got := snap.Terminal.Native.Modes[ghostty.ModeGraphemeCluster]; got != tt.grapheme {
+						t.Errorf("child grapheme clustering at start = %v, want %v", got, tt.grapheme)
+					}
+				case err := <-done:
+					t.Fatalf("session ended before startup: %v", err)
+				case <-ctx.Done():
+					t.Fatal(ctx.Err())
+				}
+				awaitText(t, h, "measured")
+				h.mu.Lock()
+				outer, err := h.em.State()
+				h.mu.Unlock()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := outer.Modes[ghostty.ModeGraphemeCluster]; got != tt.grapheme {
+					t.Errorf("outer grapheme clustering = %v, want %v", got, tt.grapheme)
+				}
+				cols := outer.Size.Cols
+				row := outer.Cells[(graphemeLineRow-1)*cols : graphemeLineRow*cols]
+				b := slices.IndexFunc(row, func(cell uv.Cell) bool { return cell.Content == "b" })
+				if b < 0 {
+					t.Fatalf("outer row %d does not show the line: %q", graphemeLineRow, h.text())
+				}
+				data, err := os.ReadFile(file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var columns []int
+				if err := json.Unmarshal(data, &columns); err != nil {
+					t.Fatal(err)
+				}
+				// The cursor follows the line where the outer terminal shows it.
+				for i, when := range []string{"at start", "after RIS"} {
+					if columns[i] != b+1 {
+						t.Errorf("child cursor column after the line %s = %d; the outer terminal shows the line ending at %d", when, columns[i], b+1)
+					}
+				}
+				if _, err := unix.Write(h.fd, []byte("q")); err != nil {
+					t.Fatal(err)
+				}
+				select {
+				case err := <-done:
+					if err != nil {
+						t.Fatal(err)
+					}
+				case <-ctx.Done():
+					t.Fatal(ctx.Err())
+				}
+			})
+		}
 	}
 }
 
