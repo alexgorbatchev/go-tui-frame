@@ -765,10 +765,10 @@ func TestExitedOverflowDuringCleanupIsReportedOnce(t *testing.T) {
 	entered := make(chan struct{})
 	var first sync.Once
 	// The observer holds its callback for the child's first output until
-	// cleanup has finished. Only then does the test start the flood, which
-	// fills the queue behind that callback and overflows it while the child
-	// still writes, so cleanup reaps the leader and its Exited meets the same
-	// full queue.
+	// cleanup has finished. Once the observer is inside that callback, the
+	// test types the byte that starts the flood, which fills the queue behind
+	// that callback and overflows it while the child still writes, so cleanup
+	// reaps the leader and its Exited meets the same full queue.
 	d := startDetached(t, "detached-on-input", nil, []EventKind{ChildOutput, Exited}, func(e Event, hold <-chan struct{}) {
 		observed.record(e)
 		first.Do(func() { close(entered) })
