@@ -9,7 +9,7 @@ description: >-
 author: alexgorbatchev
 metadata:
   created_on: 2026-10-01 13:23
-  last_modified: 2026-10-05 22:38
+  last_modified: 2026-10-06 06:40
   status: current
 ---
 
@@ -187,9 +187,10 @@ terminal too small for the reserved regions produces the library's
 viewport-size error.
 
 The terminal must answer the alternate-screen status probe and report DEC mode
-1049 inactive before the session starts. An unsupported probe, an already active
-alternate screen, mismatched input/output terminals, or another frame owning
-the same terminal produces a startup error.
+1049 as reset, meaning inactive and switchable, before the session starts. A
+missing reply; a not-recognized, set (already active), permanently set, or
+permanently reset report; mismatched input/output terminals; or another frame
+owning the same terminal produces a startup error.
 
 An interactive run starts a child in a PTY, changes terminal modes, paints the
 frame, and restores terminal state on exit. While the child's cursor matches
