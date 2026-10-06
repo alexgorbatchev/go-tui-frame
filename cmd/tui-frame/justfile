@@ -6,6 +6,8 @@ project_root := clean(source_directory() / '../..')
 linux_host_arch := if arch() == 'x86_64' { 'amd64' } else if arch() == 'aarch64' { 'arm64' } else { error('Native builds support amd64 and arm64 hosts.') }
 linux_host_target := if linux_host_arch == 'amd64' { 'x86_64-linux-musl' } else { 'aarch64-linux-musl' }
 native_prefix := project_root / '.tmp/native' / if os() == 'linux' { 'linux-musl' / linux_host_arch / 'prefix' } else { 'prefix' }
+# Recipes run cgo builds through scripts/with-libghostty-cppflags; see the root
+# justfile.
 export CGO_ENABLED := '1'
 export PKG_CONFIG_PATH := native_prefix / 'share/pkgconfig' + if env('PKG_CONFIG_PATH', '') == '' { '' } else { ':' + env('PKG_CONFIG_PATH') }
 export CC := if os() == 'linux' { 'zig cc -target ' + linux_host_target } else { env('CC', 'cc') }
@@ -13,16 +15,16 @@ export TMPDIR := project_root / '.tmp'
 
 build:
     just --justfile {{ quote(project_root / 'justfile') }} native
-    go build {{ if os() == 'linux' { '-ldflags="-linkmode=external -extldflags=-static"' } else { '' } }} -o bin/tui-frame ./cmd/tui-frame
+    scripts/with-libghostty-cppflags go build {{ if os() == 'linux' { '-ldflags="-linkmode=external -extldflags=-static"' } else { '' } }} -o bin/tui-frame ./cmd/tui-frame
 
 run *args='':
     just --justfile {{ quote(project_root / 'justfile') }} native
-    go run ./cmd/tui-frame "$@"
+    scripts/with-libghostty-cppflags go run ./cmd/tui-frame "$@"
 
 run-ai *args='':
     just --justfile {{ quote(project_root / 'justfile') }} native
-    AGENT=1 go run ./cmd/tui-frame "$@"
+    AGENT=1 scripts/with-libghostty-cppflags go run ./cmd/tui-frame "$@"
 
 test:
     just --justfile {{ quote(project_root / 'justfile') }} native
-    go test -race ./cmd/tui-frame
+    scripts/with-libghostty-cppflags go test -race ./cmd/tui-frame

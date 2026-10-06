@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Runs a command, normally go, with libghostty-vt-static's pkg-config compiler
+# flags appended to CGO_CPPFLAGS. Set PKG_CONFIG_PATH to the native prefix's
+# share/pkgconfig directory first.
+#
+# The Go binding gets its flags from a `#cgo pkg-config` directive. Go's build
+# cache key for a cgo package covers CGO_CPPFLAGS, CGO_CFLAGS, CGO_LDFLAGS, and
+# the package's `#cgo` directives, but not pkg-config's output, and the
+# binding's module-cache directory is the same in every checkout. Without this,
+# a binding built in one checkout is reused in another and links the first
+# checkout's archive. The include flags name the native prefix, so each prefix
+# gets its own cache entry. Go adds pkg-config's --cflags output to the C
+# preprocessor flags, so CGO_CPPFLAGS is the matching variable.
+#
+# The --libs output is not exported through CGO_LDFLAGS: Go applies CGO_LDFLAGS
+# to every cgo package, so the archive would reach the final link once per cgo
+# package. It comes from the same pkg-config file as the include flags.
+set -euo pipefail
+cflags=$(pkg-config --static --cflags libghostty-vt-static)
+inherited=$(go env CGO_CPPFLAGS)
+CGO_CPPFLAGS="${inherited:+$inherited }$cflags"
+export CGO_CPPFLAGS
+exec "$@"

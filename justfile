@@ -10,6 +10,9 @@ native_target := if os() == 'linux' { linux_host_target } else if os() == 'macos
 native_prefix_name := if os() == 'linux' { 'linux-musl' / linux_host_arch / 'prefix' } else { 'prefix' }
 native_cache_name := if os() == 'linux' { if linux_host_arch == 'amd64' { 'linux-musl-cache' } else { 'linux-arm64-musl-cache' } } else { 'zig-cache' }
 native_prefix := native_root / native_prefix_name
+# Recipes run cgo builds through scripts/with-libghostty-cppflags, which adds
+# the binding's pkg-config include flags to CGO_CPPFLAGS, so Go's build cache
+# keys the binding by the native prefix it links.
 export CGO_ENABLED := '1'
 export PKG_CONFIG_PATH := native_prefix / 'share/pkgconfig' + if env('PKG_CONFIG_PATH', '') == '' { '' } else { ':' + env('PKG_CONFIG_PATH') }
 export CC := if os() == 'linux' { 'zig cc -target ' + linux_host_target } else { env('CC', 'cc') }
@@ -139,17 +142,17 @@ _native target prefix cache:
 
 # Build all packages and the example wrapper after native setup.
 build: native
-    go build ./...
-    go build {{ if os() == 'linux' { '-ldflags="-linkmode=external -extldflags=-static"' } else { '' } }} -o bin/tui-frame ./cmd/tui-frame
+    scripts/with-libghostty-cppflags go build ./...
+    scripts/with-libghostty-cppflags go build {{ if os() == 'linux' { '-ldflags="-linkmode=external -extldflags=-static"' } else { '' } }} -o bin/tui-frame ./cmd/tui-frame
 
 # Produce a fully static Linux amd64 or arm64 example executable.
 [arg('architecture', pattern='amd64|arm64')]
 build-linux architecture='amd64': (native-linux architecture)
-    GOOS=linux GOARCH="$1" CC={{ quote('zig cc -target ' + if architecture == 'amd64' { 'x86_64-linux-musl' } else { 'aarch64-linux-musl' }) }} PKG_CONFIG_PATH={{ quote(native_root / 'linux-musl' / architecture / 'prefix/share/pkgconfig') }} go build -ldflags='-linkmode=external -extldflags=-static' -o "bin/tui-frame-linux-$1" ./cmd/tui-frame
+    GOOS=linux GOARCH="$1" CC={{ quote('zig cc -target ' + if architecture == 'amd64' { 'x86_64-linux-musl' } else { 'aarch64-linux-musl' }) }} PKG_CONFIG_PATH={{ quote(native_root / 'linux-musl' / architecture / 'prefix/share/pkgconfig') }} scripts/with-libghostty-cppflags go build -ldflags='-linkmode=external -extldflags=-static' -o "bin/tui-frame-linux-$1" ./cmd/tui-frame
 
 # Audit an existing macOS or Linux executable's dynamic dependencies.
 linkage artifact='bin/tui-frame':
-    TUI_FRAME_ARTIFACT={{ quote(artifact) }} go test -v ./cmd/tui-frame -run '^TestStandaloneBinary$$' -count=1
+    TUI_FRAME_ARTIFACT={{ quote(artifact) }} scripts/with-libghostty-cppflags go test -v ./cmd/tui-frame -run '^TestStandaloneBinary$$' -count=1
 
 # Run the example while preserving each argument.
 run *args='': native
@@ -161,11 +164,11 @@ run-ai *args='': native
 
 # Run all tests with the race detector.
 test: native
-    go test -race ./...
+    scripts/with-libghostty-cppflags go test -race ./...
 
 # Run static code analysis
 vet: native
-    go vet ./...
+    scripts/with-libghostty-cppflags go vet ./...
 
 # Lint (alias for vet)
 lint: vet
