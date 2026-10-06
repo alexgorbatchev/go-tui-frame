@@ -857,6 +857,35 @@ func TestCancellationReleasesStoppedChildOutput(t *testing.T) {
 	}
 }
 
+// The session loop reaps a child that exits on its own. Cleanup reaps only a
+// launch leader the loop left, so it must not report that exit again.
+func TestChildExitReportsExitedOnce(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var observed eventLog
+	app := New(childCommand(t), struct{}{}).Terminal(h.slave, h.slave).ObserveEvents([]EventKind{Started, Exited}, observed.record)
+	done := startRun(ctx, app)
+	awaitText(t, h, "child")
+	if _, err := unix.Write(h.fd, []byte("q")); err != nil {
+		t.Fatal(err)
+	}
+	var got runOutcome
+	select {
+	case got = <-done:
+	case <-ctx.Done():
+		t.Fatal("Run did not finish", ctx.Err())
+	}
+	if got.err != nil || got.result.ProcessState == nil || !got.result.ProcessState.Success() {
+		t.Fatalf("Run = %#v, %v; want the child's successful exit", got.result, got.err)
+	}
+	events := observed.events()
+	if kinds := eventKinds(events); !slices.Equal(kinds, []EventKind{Started, Exited}) {
+		t.Fatalf("observer received %v, want Started then Exited", kinds)
+	}
+	requireExited(t, events, got.result)
+}
+
 // A session error that ends the session while the child runs leaves the launch
 // leader to cleanup, which kills and reaps it. Exited must still follow Started
 // once before Run returns, reporting the exit Result.ProcessState reports. A
