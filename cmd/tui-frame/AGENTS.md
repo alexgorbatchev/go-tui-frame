@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 13:56
-last_modified: 2026-10-02 14:41
+last_modified: 2026-10-06 14:27
 status: current
 ---
 
@@ -45,19 +45,23 @@ Demo painting can also be checked independently with
   demo; use native `Draw(screen, bounds)` and `Bounds().Dx()/Dy()` dimensions.
   Do not retain screens, acquire terminal stdin from
   callbacks, or write directly to the outer terminal.
-- Reserve header/footer geometry before `Run`. Ctrl+1 changes layout and Ctrl+2
+- Reserve header/footer geometry before `Run`. Bind demo actions behind the
+  tmux-style Ctrl+B prefix: Ctrl+B, then 1 changes layout and Ctrl+B, then 2
   changes the native header background independently through immutable region
-  payloads. Ctrl+3 uses `SetBorder` to change the child inset and PTY size during
-  the session. Ctrl+Q cancels it. Consume reported releases without repeating
-  actions; pass plain digits, extra modifiers, and F5/F6 to the child.
-- Require native distinct-key negotiation for Ctrl+number controls. Keep legacy
-  NUL/Escape/digit input in the child route; do not add ambiguous capture aliases.
-  Test actual outer negotiation, native painted cells, and child-reported PTY
-  sizes after each border change.
+  payloads. Ctrl+B, then 3 uses `SetBorder` to change the child inset and PTY size
+  during the session. Ctrl+B, then Ctrl+B passes one Ctrl+B to the child; any
+  other key after the prefix ends it and is discarded. Ctrl+Q stays a direct
+  binding that cancels the session. Reported releases and repeats and lone
+  modifier or lock keys never advance or end the prefix. Pass other keys outside
+  the prefix, such as plain digits and F5/F6, to the child.
+- Use only keys legacy input distinguishes, since the outer terminal runs the
+  child's keyboard modes and the frame never re-encodes keys. Test the prefix
+  through real sessions in legacy and Kitty-with-release-events form, native
+  painted cells, and child-reported PTY sizes after each border change.
 - Demo recordings must emphasize the wrapper's layouts, colors, and live border
-  changes while Yazi remains the child. Use `--showcase` for VHS terminals that
-  cannot distinguish Ctrl+number. Keep playback on the shared frame actions;
-  do not synthesize key reports or alter capture aliases for a recording.
+  changes while Yazi remains the child. Keep playback on the shared frame
+  actions; do not synthesize key reports or alter capture bindings for a
+  recording.
 - Keep Ghostty statically linked. Require a Mach-O artifact to import only
   macOS system libraries; require Linux ELF to have no imported shared libraries
   or dynamic loader. Cross-build inspection does not replace Linux runtime tests.

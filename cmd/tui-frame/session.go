@@ -91,6 +91,8 @@ type demoSession struct {
 	frame  *frame.Frame[UIData]
 	data   UIData
 	cancel context.CancelCauseFunc
+	// keys belongs to capture, which the session calls inline.
+	keys keyPrefix
 }
 
 func newDemoSession(child *exec.Cmd, data UIData, cancel context.CancelCauseFunc) *demoSession {
@@ -103,20 +105,17 @@ func newDemoSession(child *exec.Cmd, data UIData, cancel context.CancelCauseFunc
 }
 
 func (d *demoSession) capture(input frame.Input) frame.Disposition {
-	action := actionFor(input)
+	action, disposition := d.keys.route(input)
 	switch action {
-	case demoPass:
-		return frame.Pass
-	case demoRelease:
-		return frame.Consume
+	case demoNone:
 	case demoQuit:
 		d.cancel(errDemoQuit)
-		return frame.Consume
+	default:
+		if err := d.apply(action); err != nil {
+			d.cancel(err)
+		}
 	}
-	if err := d.apply(action); err != nil {
-		d.cancel(err)
-	}
-	return frame.Consume
+	return disposition
 }
 
 func (d *demoSession) apply(action demoAction) error {

@@ -227,18 +227,15 @@ func startDemo(t *testing.T, cancel context.CancelFunc, run func() (frame.Result
 }
 
 func TestDemoControlsRepaintAndResizeRealChild(t *testing.T) {
-	type outerObservation struct {
-		flags  ghostty.KittyKeyFlags
-		corner string
-	}
-	states := make(chan outerObservation, 128)
+	// corners receives the outer cell where the child border's corner sits.
+	corners := make(chan string, 128)
 	master, slave := demoTTYObserved(t, func(s emulator.State) {
-		observation := outerObservation{flags: s.KittyKeyboardFlags}
+		corner := ""
 		if i := headerRows * s.Size.Cols; i < len(s.Cells) {
-			observation.corner = s.Cells[i].Content
+			corner = s.Cells[i].Content
 		}
 		select {
-		case states <- observation:
+		case corners <- corner:
 		default:
 		}
 	})
@@ -269,15 +266,6 @@ func TestDemoControlsRepaintAndResizeRealChild(t *testing.T) {
 	if ready.term.Viewport != (frame.Size{Cols: 98, Rows: 13}) || ready.term.Child.Executable == "" {
 		t.Fatalf("metadata does not describe the real child viewport: %+v", ready.term)
 	}
-	negotiated := false
-	for !negotiated {
-		select {
-		case s := <-states:
-			negotiated = s.flags&ghostty.KittyKeyDisambiguate != 0
-		case <-ctx.Done():
-			t.Fatal("outer terminal was not asked to disambiguate Ctrl+number")
-		}
-	}
 	querySize := func(expected string) {
 		t.Helper()
 		if _, err := io.WriteString(master, "size\n"); err != nil {
@@ -302,8 +290,8 @@ func TestDemoControlsRepaintAndResizeRealChild(t *testing.T) {
 		t.Helper()
 		for {
 			select {
-			case state := <-states:
-				if (state.corner == lipgloss.RoundedBorder().TopLeft) == enabled {
+			case corner := <-corners:
+				if (corner == lipgloss.RoundedBorder().TopLeft) == enabled {
 					return
 				}
 			case <-ctx.Done():
@@ -320,19 +308,19 @@ func TestDemoControlsRepaintAndResizeRealChild(t *testing.T) {
 		colour     string
 		sizeOutput string
 	}{
-		{"\x1b[49;5u", 1, 0, true, frame.Size{Cols: 98, Rows: 13}, red, ""},
-		{"\x1b[49;5u", 2, 0, true, frame.Size{Cols: 98, Rows: 13}, red, ""},
-		{"\x1b[49;5u", 0, 0, true, frame.Size{Cols: 98, Rows: 13}, red, ""},
-		{"\x1b[50;5u", 0, 1, true, frame.Size{Cols: 98, Rows: 13}, navy, ""},
-		{"\x1b[50;5u", 0, 2, true, frame.Size{Cols: 98, Rows: 13}, teal, ""},
-		{"\x1b[50;5u", 0, 0, true, frame.Size{Cols: 98, Rows: 13}, red, ""},
-		{"\x1b[51;5u", 0, 0, false, frame.Size{Cols: 100, Rows: 15}, red, "13 98\n15 100\n"},
-		{"\x1b[51;5u", 0, 0, true, frame.Size{Cols: 98, Rows: 13}, red, "13 98\n15 100\n13 98\n"},
+		{"\x021", 1, 0, true, frame.Size{Cols: 98, Rows: 13}, red, ""},
+		{"\x021", 2, 0, true, frame.Size{Cols: 98, Rows: 13}, red, ""},
+		{"\x021", 0, 0, true, frame.Size{Cols: 98, Rows: 13}, red, ""},
+		{"\x022", 0, 1, true, frame.Size{Cols: 98, Rows: 13}, navy, ""},
+		{"\x022", 0, 2, true, frame.Size{Cols: 98, Rows: 13}, teal, ""},
+		{"\x022", 0, 0, true, frame.Size{Cols: 98, Rows: 13}, red, ""},
+		{"\x023", 0, 0, false, frame.Size{Cols: 100, Rows: 15}, red, "13 98\n15 100\n"},
+		{"\x023", 0, 0, true, frame.Size{Cols: 98, Rows: 13}, red, "13 98\n15 100\n13 98\n"},
 	} {
 		if change.sizeOutput != "" {
 			// Discard old renders before checking the next actual border state.
-			for len(states) > 0 {
-				<-states
+			for len(corners) > 0 {
+				<-corners
 			}
 		}
 		if _, err := io.WriteString(master, change.key); err != nil {
@@ -353,15 +341,16 @@ func TestDemoControlsRepaintAndResizeRealChild(t *testing.T) {
 			waitBorder(change.border)
 		}
 	}
-	// Selected release reports do not cycle/toggle a second time or reach the
-	// child. Ordinary digits and the old function keys remain child input.
-	if _, err := io.WriteString(master, "\x1b[49;5:3u\x1b[50;5:3u\x1b[51;5:3u"); err != nil {
+	// Another key after the prefix ends it and reaches neither the demo nor the
+	// child, whose next line is still "size". Ordinary digits and function keys
+	// remain child input.
+	if _, err := io.WriteString(master, "\x02x"); err != nil {
 		t.Fatal(err)
 	}
 	querySize("13 98\n15 100\n13 98\n13 98\n")
-	released := waitPaint(t, paints, func(p regionPaint) bool { return p.term.Terminal.Title == "sized-4" })
-	if released.data.Demo != 0 || released.data.Background != 0 || !released.data.Border {
-		t.Fatalf("reported releases changed the demo: %+v", released.data)
+	discarded := waitPaint(t, paints, func(p regionPaint) bool { return p.term.Terminal.Title == "sized-4" })
+	if discarded.data.Demo != 0 || discarded.data.Background != 0 || !discarded.data.Border {
+		t.Fatalf("the discarded key changed the demo: %+v", discarded.data)
 	}
 	if _, err := io.WriteString(master, "123\x1b[15~\x1b[17~ hello child\n"); err != nil {
 		t.Fatal(err)
@@ -405,8 +394,13 @@ func TestDemoQuitPreservesCauseAndReapsChild(t *testing.T) {
 				t.Fatal(err)
 			}
 			// The raw child records the first byte it reads, so a Ctrl+Q that
-			// capture passes on ends the session as an ordinary child exit.
-			child := exec.Command("sh", "-c", `stty raw -echo; printf '\033]2;raw-child\007'; dd bs=1 count=1 of="$1" 2>/dev/null`, "sh", inputFile)
+			// capture passes on ends the session as an ordinary child exit. A
+			// Kitty child requests disambiguation, which the outer terminal mirrors.
+			modes := ""
+			if tt.kitty {
+				modes = `\033[>1u`
+			}
+			child := exec.Command("sh", "-c", `stty raw -echo; printf "$2\033]2;raw-child\007"; dd bs=1 count=1 of="$1" 2>/dev/null`, "sh", inputFile, modes)
 			ctx, cancel := context.WithTimeout(context.Background(), sessionTimeout)
 			defer cancel()
 			ctx, quit := context.WithCancelCause(ctx)
@@ -432,7 +426,7 @@ func TestDemoQuitPreservesCauseAndReapsChild(t *testing.T) {
 				select {
 				case <-negotiated:
 				case <-ctx.Done():
-					t.Fatal("outer terminal was not asked to disambiguate Ctrl+Q")
+					t.Fatal("outer terminal did not mirror the child's Kitty disambiguation")
 				}
 			}
 			if _, err := io.WriteString(master, tt.input); err != nil {
@@ -449,6 +443,153 @@ func TestDemoQuitPreservesCauseAndReapsChild(t *testing.T) {
 			}
 			if got.result.DrainError != nil || got.result.CleanupError != nil {
 				t.Fatalf("quit failed cleanup: %+v", got.result)
+			}
+		})
+	}
+}
+
+// keyStroke is one key event a terminal reports. text must be a string
+// literal: the native event borrows its storage until the event is encoded.
+type keyStroke struct {
+	key       ghostty.Key
+	mods      ghostty.Mods
+	text      string
+	unshifted rune
+	action    ghostty.KeyAction
+}
+
+// reportKeys encodes strokes as a terminal running the Kitty keyboard flags
+// reports them, using the native key encoder. A legacy terminal (flags 0)
+// reports no releases.
+func reportKeys(t *testing.T, flags ghostty.KittyKeyFlags, strokes ...keyStroke) string {
+	t.Helper()
+	encoder, err := ghostty.NewKeyEncoder()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer encoder.Close()
+	encoder.SetOptKittyFlags(flags)
+	event, err := ghostty.NewKeyEvent()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer event.Close()
+	var report []byte
+	for _, s := range strokes {
+		event.SetKey(s.key)
+		event.SetMods(s.mods)
+		event.SetUTF8(s.text)
+		event.SetUnshiftedCodepoint(s.unshifted)
+		event.SetAction(s.action)
+		encoded, err := encoder.Encode(event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		report = append(report, encoded...)
+	}
+	return string(report)
+}
+
+// The demo's prefix keys pass through a real session to its capture handler,
+// as a legacy terminal reports them and with Kitty disambiguation and release
+// events, which the outer terminal runs because the child requests them. A
+// release or repeat between Ctrl+B and the digit leaves the prefix in place, a
+// second Ctrl+B reaches the child as the terminal sent it, and another key
+// after the prefix is discarded.
+func TestDemoPrefixKeysThroughRealSession(t *testing.T) {
+	const press, repeat, release = ghostty.KeyActionPress, ghostty.KeyActionRepeat, ghostty.KeyActionRelease
+	ctrlB := func(action ghostty.KeyAction) keyStroke {
+		return keyStroke{ghostty.KeyB, ghostty.ModCtrl, "b", 'b', action}
+	}
+	ctrlQ := func(action ghostty.KeyAction) keyStroke {
+		return keyStroke{ghostty.KeyQ, ghostty.ModCtrl, "q", 'q', action}
+	}
+	digit := func(key ghostty.Key, text string, action ghostty.KeyAction) keyStroke {
+		return keyStroke{key, 0, text, rune(text[0]), action}
+	}
+	one := func(action ghostty.KeyAction) keyStroke { return digit(ghostty.KeyDigit1, "1", action) }
+	two := func(action ghostty.KeyAction) keyStroke { return digit(ghostty.KeyDigit2, "2", action) }
+	three := func(action ghostty.KeyAction) keyStroke { return digit(ghostty.KeyDigit3, "3", action) }
+	x := func(action ghostty.KeyAction) keyStroke { return keyStroke{ghostty.KeyX, 0, "x", 'x', action} }
+	for _, form := range []struct {
+		name, modes string
+		flags       ghostty.KittyKeyFlags
+	}{
+		{"legacy", "", 0},
+		{"Kitty with release events", `\033[>3u`, ghostty.KittyKeyDisambiguate | ghostty.KittyKeyReportEvents},
+	} {
+		t.Run(form.name, func(t *testing.T) {
+			master, slave := demoTTY(t)
+			inputFile := filepath.Join(projectTempDir(t), "child-input")
+			if err := os.WriteFile(inputFile, nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			// The raw child records every byte it reads.
+			child := exec.Command("sh", "-c", `stty raw -echo; printf "$2\033]2;prefix-child\007"; exec dd bs=1 of="$1" 2>/dev/null`, "sh", inputFile, form.modes)
+			ctx, cancel := context.WithTimeout(context.Background(), sessionTimeout)
+			defer cancel()
+			ctx, quit := context.WithCancelCause(ctx)
+			defer quit(nil)
+			app := newDemoSession(child, UIData{}, quit).frame.Terminal(slave, slave)
+			paints := make(chan regionPaint, 64)
+			app.Header(headerRows, func(ctx frame.DrawContext[UIData]) {
+				drawHeader(ctx)
+				paints <- regionPaint{region: "header", data: ctx.Data, term: ctx.Term}
+			})
+			done := startDemo(t, cancel, func() (frame.Result, error) { return app.Run(ctx) })
+			waitPaint(t, paints, func(p regionPaint) bool { return p.term.Terminal.Title == "prefix-child" && p.term.Child.PID > 0 })
+			send := func(strokes ...keyStroke) {
+				t.Helper()
+				if _, err := io.WriteString(master, reportKeys(t, form.flags, strokes...)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			awaitDemo := func(want UIData) {
+				t.Helper()
+				waitPaint(t, paints, func(p regionPaint) bool { return p.data == want })
+			}
+			awaitChild := func(want string) {
+				t.Helper()
+				for {
+					got, err := os.ReadFile(inputFile)
+					if err == nil && string(got) == want {
+						return
+					}
+					select {
+					case <-ctx.Done():
+						t.Fatalf("child read %q, %v; want %q", got, err, want)
+					case <-time.After(time.Millisecond):
+					}
+				}
+			}
+			send(ctrlB(press), ctrlB(release), one(press), one(release))
+			awaitDemo(UIData{Demo: 1, Border: true})
+			held := []keyStroke{ctrlB(press)}
+			if form.flags != 0 {
+				// A legacy terminal repeats a held key as presses.
+				held = append(held, ctrlB(repeat), ctrlB(repeat))
+			}
+			send(append(held, ctrlB(release), two(press), two(release))...)
+			awaitDemo(UIData{Demo: 1, Background: 1, Border: true})
+			send(ctrlB(press), ctrlB(release), three(press), three(release))
+			awaitDemo(UIData{Demo: 1, Background: 1})
+			forwarded := reportKeys(t, form.flags, ctrlB(press), ctrlB(release))
+			send(ctrlB(press), ctrlB(release), ctrlB(press), ctrlB(release))
+			awaitChild(forwarded)
+			typed := reportKeys(t, form.flags, one(press), one(release))
+			send(ctrlB(press), ctrlB(release), x(press), x(release), one(press), one(release))
+			awaitChild(forwarded + typed)
+			send(ctrlQ(press), ctrlQ(release))
+			var got demoOutcome
+			select {
+			case got = <-done:
+			case <-time.After(sessionTimeout):
+				// Ctrl+Q cancels ctx, so only Run's return shows it took effect.
+				t.Fatal("Ctrl+Q did not end the session")
+			}
+			read, err := os.ReadFile(inputFile)
+			if !errors.Is(got.err, errDemoQuit) || err != nil || string(read) != forwarded+typed {
+				t.Fatalf("Run = %v; child read %q, %v; want the quit after %q", got.err, read, err, forwarded+typed)
 			}
 		})
 	}
@@ -535,7 +676,7 @@ func TestAgentDemoStartsPlainAndCanEnableChildBorder(t *testing.T) {
 	if initial.data.Border || initial.term.Viewport != (frame.Size{Cols: 100, Rows: 15}) || initial.bg != nil {
 		t.Fatalf("agent defaults are not plain and borderless: %+v", initial)
 	}
-	if _, err := io.WriteString(master, "\x1b[51;5u"); err != nil {
+	if _, err := io.WriteString(master, "\x023"); err != nil {
 		t.Fatal(err)
 	}
 	enabled := waitPaint(t, paints, func(p regionPaint) bool { return p.data.Border })

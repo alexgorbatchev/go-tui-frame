@@ -22,7 +22,7 @@ const (
 	teal            = "#115E59"
 	white           = "#FFFFFF"
 	slate           = "#0F172A"
-	keyHints        = "Ctrl+1 layout | Ctrl+2 colour | Ctrl+3 border | Ctrl+Q quit"
+	keyHints        = "Ctrl+B 1 layout | Ctrl+B 2 colour | Ctrl+B 3 border | Ctrl+Q quit"
 )
 
 // UIData is an immutable value published to each frame region.
@@ -56,7 +56,7 @@ func drawHeader(ctx frame.DrawContext[UIData]) {
 		title := lipgloss.NewLayer(style.Render(text)).Y(1)
 		badgeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(navy)).
 			Background(lipgloss.Color(white)).Bold(true).Padding(0, 1)
-		badge := lipgloss.NewLayer(badgeStyle.Render("Ctrl+1 layout")).Z(1)
+		badge := lipgloss.NewLayer(badgeStyle.Render("Ctrl+B 1 layout")).Z(1)
 		badge.X(max(0, view.Bounds().Dx()-badge.Width()-1))
 		lipgloss.NewCompositor(title, badge).Draw(view, view.Bounds())
 	case 2:
@@ -145,35 +145,73 @@ func metadataText(text string) string {
 type demoAction uint8
 
 const (
-	demoPass demoAction = iota
+	demoNone demoAction = iota
 	demoNext
 	demoBackground
 	demoBorder
 	demoQuit
-	demoRelease
 )
 
-func actionFor(input frame.Input) demoAction {
-	if input.Key == nil {
-		return demoPass
+// keyPrefix reads the demo's keys with a tmux-style prefix. Ctrl+B starts the
+// prefix; then 1, 2 or 3 selects an action, a second Ctrl+B passes to the
+// child, and any other key ends the prefix and is discarded. Ctrl+Q quits
+// without the prefix. Only the session's capture handler uses it.
+type keyPrefix struct{ active bool }
+
+// route returns the action input selects and what the frame does with it.
+// Releases, repeats and lone modifier or lock keys, which Kitty terminals
+// report, leave the prefix as it is and pass: the frame gives a reported
+// release or repeat of a consumed press its press's disposition.
+func (p *keyPrefix) route(input frame.Input) (demoAction, frame.Disposition) {
+	key, ok := pressedKey(input.Key)
+	if !ok || isModifierKey(key.Code) {
+		return demoNone, frame.Pass
 	}
-	key := input.Key.Key()
-	action := demoPass
+	if !p.active {
+		switch {
+		case key.MatchString("ctrl+b"):
+			p.active = true
+			return demoNone, frame.Consume
+		case key.MatchString("ctrl+q"):
+			return demoQuit, frame.Consume
+		}
+		return demoNone, frame.Pass
+	}
+	p.active = false
 	switch {
-	case key.MatchString("ctrl+1"):
-		action = demoNext
-	case key.MatchString("ctrl+2"):
-		action = demoBackground
-	case key.MatchString("ctrl+3"):
-		action = demoBorder
-	case key.MatchString("ctrl+q"):
-		action = demoQuit
+	case key.MatchString("1"):
+		return demoNext, frame.Consume
+	case key.MatchString("2"):
+		return demoBackground, frame.Consume
+	case key.MatchString("3"):
+		return demoBorder, frame.Consume
+	case key.MatchString("ctrl+b"):
+		return demoNone, frame.Pass
 	}
-	if action != demoPass {
-		switch input.Key.(type) {
-		case uv.KeyReleaseEvent, *uv.KeyReleaseEvent:
-			return demoRelease
+	return demoNone, frame.Consume
+}
+
+// pressedKey returns the key of a press that is not a reported repeat.
+func pressedKey(event uv.KeyEvent) (uv.Key, bool) {
+	switch press := event.(type) {
+	case uv.KeyPressEvent:
+		return press.Key(), !press.IsRepeat
+	case *uv.KeyPressEvent:
+		if press != nil {
+			return press.Key(), !press.IsRepeat
 		}
 	}
-	return action
+	return uv.Key{}, false
+}
+
+// isModifierKey reports whether code is a modifier or lock key, which a Kitty
+// terminal reporting all keys sends on its own.
+func isModifierKey(code rune) bool {
+	switch code {
+	case uv.KeyLeftShift, uv.KeyLeftAlt, uv.KeyLeftCtrl, uv.KeyLeftSuper, uv.KeyLeftHyper, uv.KeyLeftMeta,
+		uv.KeyRightShift, uv.KeyRightAlt, uv.KeyRightCtrl, uv.KeyRightSuper, uv.KeyRightHyper, uv.KeyRightMeta,
+		uv.KeyIsoLevel3Shift, uv.KeyIsoLevel5Shift, uv.KeyCapsLock, uv.KeyScrollLock, uv.KeyNumLock:
+		return true
+	}
+	return false
 }

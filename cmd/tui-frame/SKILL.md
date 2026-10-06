@@ -2,14 +2,14 @@
 name: tui-frame
 description: >-
   REQUIRED when operating tui-frame, wrapping a child terminal application with
-  tui-frame -- command, changing frame demos with Ctrl+1/2/3, or reading tui-frame
-  help, version, skill, or shell completion output. Read this operating reference
-  for this executable's exact arguments and keyboard capture. Use Go project
-  instructions for developing the library instead.
+  tui-frame -- command, changing frame demos with the Ctrl+B prefix, or reading
+  tui-frame help, version, skill, or shell completion output. Read this
+  operating reference for this executable's exact arguments and keyboard
+  capture. Use Go project instructions for developing the library instead.
 author: alexgorbatchev
 metadata:
   created_on: 2026-10-01 13:23
-  last_modified: 2026-10-06 12:45
+  last_modified: 2026-10-06 14:27
   status: current
 ---
 
@@ -41,36 +41,36 @@ the child PID, executable name, terminal title, and child viewport size. Region
 header/footer geometry stays fixed for the session. A child-border toggle adds
 or removes a one-cell inset, resizes the child PTY, and repaints the frame. The
 footer's first row shows the executable name, child viewport dimensions, current
-border state, and terminal title. Its second row always shows the Ctrl+1/2/3 and
-Ctrl+Q key hints. A row whose text does not fit ends in an ellipsis; the
+border state, and terminal title. Its second row always shows the Ctrl+B prefix
+and Ctrl+Q key hints. A row whose text does not fit ends in an ellipsis; the
 Bordered card layout's left border leaves its rows one column narrower than the
 footer.
 
 | Key | Wrapper action |
 | --- | --- |
-| Ctrl+1 | Advance to the next layout, wrapping after the third |
-| Ctrl+2 | Advance the header background independently: red, navy, teal |
-| Ctrl+3 | Toggle the child frame border and resize the child PTY |
+| Ctrl+B, then 1 | Advance to the next layout, wrapping after the third |
+| Ctrl+B, then 2 | Advance the header background independently: red, navy, teal |
+| Ctrl+B, then 3 | Toggle the child frame border and resize the child PTY |
+| Ctrl+B, then Ctrl+B | Send one Ctrl+B to the child |
 | Ctrl+Q | Cancel the session and terminate observed process groups in the owned child session |
 
-The wrapper consumes these exact Ctrl+number keys and Ctrl+Q, including
-their key-release events. Lock state does not count as a modifier, so the
-controls work while Caps Lock or Num Lock is on. Other keyboard events follow
-the library's child input route. Plain digits, combinations with extra
-modifiers, and F5/F6 follow the child route. Paste, mouse input, and unknown
-controls follow ordinary routing.
+The wrapper consumes Ctrl+B, the digit that follows it, and Ctrl+Q, including
+their reported key-release events. After Ctrl+B, any other key ends the prefix
+and is discarded, including Ctrl+Q; a second Ctrl+B reaches the child exactly as
+the terminal sent it. Reported key releases and repeats and lone modifier or lock
+keys leave the prefix waiting. Lock state does not count as a modifier, so the
+controls work while Caps Lock or Num Lock is on. Other keyboard events, such as
+plain digits and F5/F6 outside the prefix, follow the library's child input
+route. Paste, mouse input, and unknown controls follow ordinary routing.
 Child mouse coordinates follow the child viewport geometry. The child can
-change terminal modes and responds to terminal resizing through its PTY.
-Ctrl+number controls require a terminal that reports those keys distinctly.
-The capture layer requests Kitty key disambiguation when the terminal reports
-support, or modifyOtherKeys level 2 when its probe confirms support. When the
-child's own Kitty flags lack disambiguation, it also requests Kitty alternate-key
-reports, so converted Alt+Shift keys keep their shifted character: Alt+Shift+comma
-reaches a legacy child as `ESC <` (M-<). Legacy terminals can collapse Ctrl+1
-into `1`, Ctrl+2 into NUL, and Ctrl+3 into Escape; those ambiguous bytes retain
-their child meanings and do not trigger controls. The viewport paints terminal
-cells; it does not render inline graphics. Native Kitty graphics storage is
-disabled, so its capability query does not advertise successful image support.
+change terminal modes and responds to terminal resizing through its PTY. The
+terminal runs the child's keyboard modes, and keys reach the child exactly as
+the terminal sends them. The controls use keys every terminal reports
+distinctly, so they work with legacy input. While the terminal has not reported
+Kitty keyboard support, the child's Kitty keyboard query gets no reply. The
+viewport paints terminal cells; it does not render inline graphics. Native Kitty
+graphics storage is disabled, so its capability query does not advertise
+successful image support.
 
 ## Play the frame showcase
 
@@ -219,5 +219,5 @@ sourcing explicitly when installing those scripts.
 
 Read `AGENT=1 tui-frame skill`, then inspect `tui-frame --version` when matching
 this reference to a deployed executable. Run `tui-frame -- <command> [args...]`
-with a terminal available. Use Ctrl+1 for layout, Ctrl+2 for header colour,
-Ctrl+3 for the child border, or Ctrl+Q to close the session.
+with a terminal available. Press Ctrl+B, then 1 for layout, 2 for header colour,
+or 3 for the child border, or press Ctrl+Q to close the session.

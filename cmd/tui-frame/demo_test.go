@@ -60,7 +60,7 @@ func TestHeaderBackgroundIsIndependentOfLayout(t *testing.T) {
 }
 
 func TestFooterUsesChildMetadataAndChangesWithTheDemo(t *testing.T) {
-	const hints = "Ctrl+1 layout | Ctrl+2 colour | Ctrl+3 border | Ctrl+Q quit"
+	const hints = "Ctrl+B 1 layout | Ctrl+B 2 colour | Ctrl+B 3 border | Ctrl+Q quit"
 	sizes := []struct {
 		name         string
 		width        int
@@ -191,59 +191,75 @@ func TestPaintingTinyAndAgentCanvases(t *testing.T) {
 	}
 }
 
-func TestDemoKeysUseNativeEventsWithoutCapturingOtherInput(t *testing.T) {
-	type keyCase struct {
-		name string
-		key  uv.KeyEvent
-		want demoAction
+// The demo binds a tmux-style prefix: Ctrl+B, then 1, 2 or 3 runs an action,
+// a second Ctrl+B passes to the child, and any other key ends the prefix and
+// is discarded. Ctrl+Q quits without the prefix. Releases, repeats and lone
+// modifier or lock keys, which Kitty terminals report, leave the prefix as it
+// is; the frame gives a reported release its press's disposition.
+func TestDemoPrefixKeys(t *testing.T) {
+	type step struct {
+		key         uv.KeyEvent
+		action      demoAction
+		disposition frame.Disposition
 	}
-	tests := []keyCase{
-		{"next", uv.KeyPressEvent{Code: '1', Mod: uv.ModCtrl}, demoNext},
-		{"background", uv.KeyPressEvent{Code: '2', Mod: uv.ModCtrl}, demoBackground},
-		{"border", uv.KeyPressEvent{Code: '3', Mod: uv.ModCtrl}, demoBorder},
-		{"quit", uv.KeyPressEvent{Code: 'q', Mod: uv.ModCtrl}, demoQuit},
-		{"ordinary key", uv.KeyPressEvent{Code: 'q', Text: "q"}, demoPass},
-		{"plain digit", uv.KeyPressEvent{Code: '1', Text: "1"}, demoPass},
-		{"extra modifier", uv.KeyPressEvent{Code: '1', Mod: uv.ModCtrl | uv.ModAlt}, demoPass},
-		{"old next function", uv.KeyPressEvent{Code: uv.KeyF6}, demoPass},
-		{"old previous function", uv.KeyPressEvent{Code: uv.KeyF5}, demoPass},
-		{"selected release", uv.KeyReleaseEvent{Code: '1', Mod: uv.ModCtrl}, demoRelease},
-		{"selected release pointer", &uv.KeyReleaseEvent{Code: '1', Mod: uv.ModCtrl}, demoRelease},
-		{"background release", uv.KeyReleaseEvent{Code: '2', Mod: uv.ModCtrl}, demoRelease},
-		{"border release", uv.KeyReleaseEvent{Code: '3', Mod: uv.ModCtrl}, demoRelease},
-		{"old function release", uv.KeyReleaseEvent{Code: uv.KeyF6}, demoPass},
-		{"ambiguous NUL", uv.KeyPressEvent{Code: 0, Mod: uv.ModCtrl}, demoPass},
-		{"ambiguous ESC", uv.KeyPressEvent{Code: uv.KeyEscape}, demoPass},
-		{"ordinary release", uv.KeyReleaseEvent{Code: 'a'}, demoPass},
-		{"non-key", nil, demoPass},
-		{"extra modifier with caps lock", uv.KeyPressEvent{Code: '1', Mod: uv.ModCtrl | uv.ModAlt | uv.ModCapsLock}, demoPass},
+	ctrlB := uv.KeyPressEvent{Code: 'b', Mod: uv.ModCtrl}
+	digit := func(r rune) uv.KeyPressEvent { return uv.KeyPressEvent{Code: r, Text: string(r)} }
+	prefixed := func(key uv.KeyEvent, action demoAction, disposition frame.Disposition) []step {
+		return []step{{ctrlB, demoNone, frame.Consume}, {key, action, disposition}}
 	}
-	// A Kitty terminal sets an enabled lock's bit on every control it
-	// reports, so a lock must not stop a control from matching.
-	for _, lock := range []struct {
-		name string
-		mod  uv.KeyMod
-	}{{"caps lock", uv.ModCapsLock}, {"num lock", uv.ModNumLock}} {
-		for _, control := range []struct {
-			name string
-			code rune
-			want demoAction
-		}{{"next", '1', demoNext}, {"background", '2', demoBackground}, {"border", '3', demoBorder}, {"quit", 'q', demoQuit}} {
-			mod := uv.ModCtrl | lock.mod
-			tests = append(tests,
-				keyCase{control.name + " with " + lock.name, uv.KeyPressEvent{Code: control.code, Mod: mod}, control.want},
-				keyCase{control.name + " release with " + lock.name, uv.KeyReleaseEvent{Code: control.code, Mod: mod}, demoRelease},
-			)
-		}
+	tests := []struct {
+		name  string
+		steps []step
+	}{
+		{"layout", prefixed(digit('1'), demoNext, frame.Consume)},
+		{"colour", prefixed(digit('2'), demoBackground, frame.Consume)},
+		{"border", prefixed(digit('3'), demoBorder, frame.Consume)},
+		{"quit", []step{{uv.KeyPressEvent{Code: 'q', Mod: uv.ModCtrl}, demoQuit, frame.Consume}}},
+		{"second Ctrl+B passes and ends the prefix", append(prefixed(ctrlB, demoNone, frame.Pass), step{digit('1'), demoNone, frame.Pass})},
+		{"other key ends the prefix and is discarded", append(prefixed(digit('x'), demoNone, frame.Consume), step{digit('1'), demoNone, frame.Pass})},
+		{"Ctrl+Q after the prefix is discarded", append(prefixed(uv.KeyPressEvent{Code: 'q', Mod: uv.ModCtrl}, demoNone, frame.Consume),
+			step{uv.KeyPressEvent{Code: 'q', Mod: uv.ModCtrl}, demoQuit, frame.Consume})},
+		{"modified digit after the prefix is discarded", prefixed(uv.KeyPressEvent{Code: '1', Mod: uv.ModCtrl}, demoNone, frame.Consume)},
+		{"release between the keys", []step{
+			{ctrlB, demoNone, frame.Consume}, {uv.KeyReleaseEvent{Code: 'b', Mod: uv.ModCtrl}, demoNone, frame.Pass}, {digit('1'), demoNext, frame.Consume},
+		}},
+		{"release pointer between the keys", []step{
+			{ctrlB, demoNone, frame.Consume}, {&uv.KeyReleaseEvent{Code: 'b', Mod: uv.ModCtrl}, demoNone, frame.Pass}, {digit('2'), demoBackground, frame.Consume},
+		}},
+		{"repeat between the keys", []step{
+			{ctrlB, demoNone, frame.Consume}, {uv.KeyPressEvent{Code: 'b', Mod: uv.ModCtrl, IsRepeat: true}, demoNone, frame.Pass}, {digit('2'), demoBackground, frame.Consume},
+		}},
+		{"modifier and lock keys between the keys", []step{
+			{ctrlB, demoNone, frame.Consume}, {uv.KeyPressEvent{Code: uv.KeyLeftCtrl, Mod: uv.ModCtrl}, demoNone, frame.Pass},
+			{uv.KeyPressEvent{Code: uv.KeyCapsLock}, demoNone, frame.Pass}, {digit('3'), demoBorder, frame.Consume},
+		}},
+		{"pointer press", []step{{&ctrlB, demoNone, frame.Consume}, {digit('1'), demoNext, frame.Consume}}},
+		// A Kitty terminal sets an enabled lock's bit on every key it reports.
+		{"locks", []step{
+			{uv.KeyPressEvent{Code: 'b', Mod: uv.ModCtrl | uv.ModCapsLock}, demoNone, frame.Consume},
+			{uv.KeyPressEvent{Code: '1', Text: "1", Mod: uv.ModNumLock}, demoNext, frame.Consume},
+			{uv.KeyPressEvent{Code: 'q', Mod: uv.ModCtrl | uv.ModNumLock}, demoQuit, frame.Consume},
+		}},
+		{"plain digit", []step{{digit('1'), demoNone, frame.Pass}}},
+		{"Ctrl+number", []step{{uv.KeyPressEvent{Code: '1', Mod: uv.ModCtrl}, demoNone, frame.Pass}}},
+		{"ordinary key", []step{{digit('q'), demoNone, frame.Pass}}},
+		{"function key", []step{{uv.KeyPressEvent{Code: uv.KeyF5}, demoNone, frame.Pass}}},
+		{"ambiguous NUL", []step{{uv.KeyPressEvent{Code: 0, Mod: uv.ModCtrl}, demoNone, frame.Pass}}},
+		{"ordinary release", []step{{uv.KeyReleaseEvent{Code: 'a'}, demoNone, frame.Pass}}},
+		{"non-key", []step{{nil, demoNone, frame.Pass}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			raw := []byte("original bytes")
-			if got := actionFor(frame.Input{Raw: raw, Key: tt.key}); got != tt.want {
-				t.Fatalf("action=%v, want %v", got, tt.want)
-			}
-			if string(raw) != "original bytes" {
-				t.Fatal("capture altered transport bytes")
+			var keys keyPrefix
+			for i, s := range tt.steps {
+				raw := []byte("original bytes")
+				action, disposition := keys.route(frame.Input{Raw: raw, Key: s.key})
+				if action != s.action || disposition != s.disposition {
+					t.Fatalf("step %d %#v: action=%v disposition=%v, want %v and %v", i, s.key, action, disposition, s.action, s.disposition)
+				}
+				if string(raw) != "original bytes" {
+					t.Fatal("capture altered transport bytes")
+				}
 			}
 		})
 	}
@@ -265,7 +281,7 @@ func newDemoTestScreen(width, height int) uv.ScreenBuffer {
 func TestDemoAcceptsOptionalLipGlossCanvas(t *testing.T) {
 	view := lipgloss.NewCanvas(60, headerRows)
 	drawHeader(frame.DrawContext[UIData]{View: view, Data: UIData{Demo: 1}})
-	if text := view.Render(); !strings.Contains(text, demoName(1)) || !strings.Contains(text, "Ctrl+1 layout") {
+	if text := view.Render(); !strings.Contains(text, demoName(1)) || !strings.Contains(text, "Ctrl+B 1 layout") {
 		t.Fatalf("Lip Gloss drawable lost content: %q", text)
 	}
 }
