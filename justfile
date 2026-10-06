@@ -42,6 +42,7 @@ _native target prefix cache:
     source="$root/ghostty"
     test "$(zig version)" = '0.16.0' || { printf 'Zig 0.16.0 is required.\n' >&2; exit 1; }
     command -v pkg-config >/dev/null
+    command -v shasum >/dev/null || { printf 'shasum is required.\n' >&2; exit 1; }
     mkdir -p "$root"
     if test -e "$source"; then
         test -f "$source/.frame-source-revision" && test "$(cat "$source/.frame-source-revision")" = "$revision" || { printf 'Existing native source is unmarked or uses another revision: %s\n' "$source" >&2; exit 1; }
@@ -50,6 +51,26 @@ _native target prefix cache:
         url="https://codeload.github.com/ghostty-org/ghostty/tar.gz/$revision"
         verify_archive() {
             printf '%s  %s\n' "$archive_sha" "$1" | shasum -a 256 --check
+        }
+        # curl runs as a job so that remove_download, the EXIT trap below,
+        # can stop and reap it before removing its file. A signal sent only
+        # to this shell would otherwise leave curl running, and curl would
+        # create the file again. curl_pid is cleared once wait reaps curl.
+        curl_pid=''
+        remove_download() {
+            if test -n "$curl_pid"; then
+                kill "$curl_pid" 2>/dev/null || true
+                wait "$curl_pid" 2>/dev/null || true
+            fi
+            rm -f "$download"
+        }
+        # Without job control a job ignores SIGINT and SIGQUIT, so Ctrl+C
+        # and Ctrl+\ reach only this shell. It stops curl, removes the file,
+        # and re-raises the signal.
+        stop_download() {
+            remove_download
+            trap - EXIT "$1"
+            kill -s "$1" "$$"
         }
         # Only a verified download is renamed to $archive. A cached archive
         # that fails the check, such as a partial file from an older recipe,
@@ -60,14 +81,21 @@ _native target prefix cache:
         fi
         if ! test -f "$archive"; then
             download=$(mktemp "$archive.XXXXXX")
-            trap 'rm -f "$download"' EXIT
-            curl --fail --location --retry 3 "$url" --output "$download"
+            trap remove_download EXIT
+            trap 'stop_download INT' INT
+            trap 'stop_download QUIT' QUIT
+            curl --fail --location --retry 3 "$url" --output "$download" &
+            curl_pid=$!
+            curl_status=0
+            wait "$curl_pid" || curl_status=$?
+            curl_pid=''
+            test "$curl_status" -eq 0 || exit "$curl_status"
             verify_archive "$download" || {
                 printf 'Downloaded %s does not match SHA-256 %s; %s was not saved.\n' "$url" "$archive_sha" "$archive" >&2
                 exit 1
             }
             mv "$download" "$archive"
-            trap - EXIT
+            trap - EXIT INT QUIT
         fi
         extracted=$(mktemp -d "$root/source.XXXXXX")
         trap 'rm -rf "$extracted"' EXIT
