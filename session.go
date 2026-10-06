@@ -734,7 +734,7 @@ func (s *session[T]) monitor(ctx context.Context, stop <-chan struct{}, done cha
 }
 
 // signalChild signals process group pgid. A group that no longer exists, or
-// whose members have all exited, has nothing left to signal.
+// whose members have all exited or are exiting, has nothing left to signal.
 func signalChild(pgid int, sig syscall.Signal) error {
 	err := unix.Kill(-pgid, sig)
 	if err == nil || errors.Is(err, unix.ESRCH) {
