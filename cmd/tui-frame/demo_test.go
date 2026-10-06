@@ -98,11 +98,12 @@ func TestPaintingTinyAndAgentCanvases(t *testing.T) {
 }
 
 func TestDemoKeysUseNativeEventsWithoutCapturingOtherInput(t *testing.T) {
-	tests := []struct {
+	type keyCase struct {
 		name string
 		key  uv.KeyEvent
 		want demoAction
-	}{
+	}
+	tests := []keyCase{
 		{"next", uv.KeyPressEvent{Code: '1', Mod: uv.ModCtrl}, demoNext},
 		{"background", uv.KeyPressEvent{Code: '2', Mod: uv.ModCtrl}, demoBackground},
 		{"border", uv.KeyPressEvent{Code: '3', Mod: uv.ModCtrl}, demoBorder},
@@ -121,6 +122,25 @@ func TestDemoKeysUseNativeEventsWithoutCapturingOtherInput(t *testing.T) {
 		{"ambiguous ESC", uv.KeyPressEvent{Code: uv.KeyEscape}, demoPass},
 		{"ordinary release", uv.KeyReleaseEvent{Code: 'a'}, demoPass},
 		{"non-key", nil, demoPass},
+		{"extra modifier with caps lock", uv.KeyPressEvent{Code: '1', Mod: uv.ModCtrl | uv.ModAlt | uv.ModCapsLock}, demoPass},
+	}
+	// A Kitty terminal sets an enabled lock's bit on every control it
+	// reports, so a lock must not stop a control from matching.
+	for _, lock := range []struct {
+		name string
+		mod  uv.KeyMod
+	}{{"caps lock", uv.ModCapsLock}, {"num lock", uv.ModNumLock}} {
+		for _, control := range []struct {
+			name string
+			code rune
+			want demoAction
+		}{{"next", '1', demoNext}, {"background", '2', demoBackground}, {"border", '3', demoBorder}, {"quit", 'q', demoQuit}} {
+			mod := uv.ModCtrl | lock.mod
+			tests = append(tests,
+				keyCase{control.name + " with " + lock.name, uv.KeyPressEvent{Code: control.code, Mod: mod}, control.want},
+				keyCase{control.name + " release with " + lock.name, uv.KeyReleaseEvent{Code: control.code, Mod: mod}, demoRelease},
+			)
+		}
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

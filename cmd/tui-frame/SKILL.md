@@ -50,9 +50,11 @@ footer shows the current border state and child viewport dimensions.
 | Ctrl+Q | Cancel the session and terminate observed process groups in the owned child session |
 
 The wrapper consumes these exact Ctrl+number keys and Ctrl+Q, including
-their key-release events. Other keyboard events follow the library's child
-input route. Plain digits, combinations with extra modifiers, and F5/F6 follow
-the child route. Paste, mouse input, and unknown controls follow ordinary routing.
+their key-release events. Lock state does not count as a modifier, so the
+controls work while Caps Lock or Num Lock is on. Other keyboard events follow
+the library's child input route. Plain digits, combinations with extra
+modifiers, and F5/F6 follow the child route. Paste, mouse input, and unknown
+controls follow ordinary routing.
 Child mouse coordinates follow the child viewport geometry. The child can
 change terminal modes and responds to terminal resizing through its PTY.
 Ctrl+number controls require a terminal that reports those keys distinctly.

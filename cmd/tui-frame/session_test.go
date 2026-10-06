@@ -422,6 +422,88 @@ func TestDemoQuitPreservesCauseAndReapsChild(t *testing.T) {
 	}
 }
 
+func TestDemoQuitIgnoresLockStatesInKittyReports(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		report string
+	}{
+		{"caps lock", "\x1b[113;69u"},
+		{"num lock", "\x1b[113;133u"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			negotiated := make(chan struct{}, 1)
+			master, slave := demoTTYObserved(t, func(s emulator.State) {
+				if s.KittyKeyboardFlags&ghostty.KittyKeyDisambiguate != 0 {
+					select {
+					case negotiated <- struct{}{}:
+					default:
+					}
+				}
+			})
+			inputFile := filepath.Join(projectTempDir(t), "child-input")
+			if err := os.WriteFile(inputFile, nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			// The raw child records the first byte it reads, so a Ctrl+Q that
+			// capture passes on ends the session as an ordinary child exit.
+			child := exec.Command("sh", "-c", `stty raw -echo; printf '\033]2;raw-child\007'; dd bs=1 count=1 of="$1" 2>/dev/null`, "sh", inputFile)
+			ctx, cancel := context.WithTimeout(context.Background(), sessionTimeout)
+			defer cancel()
+			ctx, quit := context.WithCancelCause(ctx)
+			defer quit(nil)
+			app := newDemoSession(child, UIData{}, quit).frame.Terminal(slave, slave)
+			ready := make(chan struct{}, 1)
+			app.Header(headerRows, func(ctx frame.DrawContext[UIData]) {
+				drawHeader(ctx)
+				if ctx.Term.Terminal.Title == "raw-child" {
+					select {
+					case ready <- struct{}{}:
+					default:
+					}
+				}
+			})
+			type outcome struct {
+				result frame.Result
+				err    error
+			}
+			done := make(chan outcome, 1)
+			exited := make(chan struct{})
+			go func() {
+				defer close(exited)
+				result, err := app.Run(ctx)
+				done <- outcome{result, err}
+			}()
+			t.Cleanup(func() {
+				cancel()
+				select {
+				case <-exited:
+				case <-time.After(sessionTimeout):
+					t.Error("quit session did not stop")
+				}
+			})
+			select {
+			case <-ready:
+			case <-ctx.Done():
+				t.Fatal("child never entered raw mode")
+			}
+			select {
+			case <-negotiated:
+			case <-ctx.Done():
+				t.Fatal("outer terminal was not asked to disambiguate Ctrl+Q")
+			}
+			if _, err := io.WriteString(master, tt.report); err != nil {
+				t.Fatal(err)
+			}
+			got := <-done
+			read, readErr := os.ReadFile(inputFile)
+			if !errors.Is(got.err, errDemoQuit) || got.result.ProcessState == nil || readErr != nil || len(read) != 0 {
+				t.Fatalf("report %q: err=%v process=%v; child read %q (%v), want a quit before the child reads anything",
+					tt.report, got.err, got.result.ProcessState, read, readErr)
+			}
+		})
+	}
+}
+
 func TestSessionFailureRemovesOnlyTheQuitRequest(t *testing.T) {
 	// These mirror the library's errors: the loop joins the context's cause with
 	// the SIGTERM and SIGCONT deliveries, then a render, deadline, or read

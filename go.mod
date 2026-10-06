@@ -31,4 +31,4 @@ require (
 	golang.org/x/sync v0.22.0 // indirect
 )
 
-replace github.com/charmbracelet/ultraviolet => github.com/alexgorbatchev/ultraviolet v0.0.0-20261006050112-466706a11cd3
+replace github.com/charmbracelet/ultraviolet => github.com/alexgorbatchev/ultraviolet v0.0.0-20261006132318-0ff1fafbd555
