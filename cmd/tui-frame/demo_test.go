@@ -79,9 +79,10 @@ func TestFooterUsesChildMetadataAndChangesWithTheDemo(t *testing.T) {
 		data          UIData
 		bg            string
 		borderColumns int
+		boldKeyHints  bool
 	}{
 		{name: demoName(0), data: UIData{Demo: 0}, bg: "#0F172A"},
-		{name: demoName(1), data: UIData{Demo: 1}, bg: "#172554"},
+		{name: demoName(1), data: UIData{Demo: 1}, bg: "#172554", boldKeyHints: true},
 		{name: demoName(2), data: UIData{Demo: 2}, bg: "#115E59", borderColumns: 1},
 		{name: "agent", data: UIData{Agent: true}},
 	}
@@ -103,8 +104,9 @@ func TestFooterUsesChildMetadataAndChangesWithTheDemo(t *testing.T) {
 					})
 					width := size.width - layout.borderColumns
 					metadata := fmt.Sprintf("nvim | 80×24 | border %s | %s", border, size.title)
+					hintRow := footerRowText(t, view, 1, layout.borderColumns)
 					assertFooterRow(t, footerRowText(t, view, 0, layout.borderColumns), metadata, width, size.cutsMetadata)
-					assertFooterRow(t, footerRowText(t, view, 1, layout.borderColumns), hints, width, size.cutsKeyHints)
+					assertFooterRow(t, hintRow, hints, width, size.cutsKeyHints)
 					if data.Agent {
 						if strings.Contains(view.Render(), "\x1b[") {
 							t.Fatalf("agent footer added styling: %q", view.Render())
@@ -115,6 +117,9 @@ func TestFooterUsesChildMetadataAndChangesWithTheDemo(t *testing.T) {
 					if cell == nil || cell.Style.Bg == nil || !sameColor(cell.Style.Bg, lipgloss.Color(layout.bg)) {
 						t.Fatalf("footer did not adopt %s background: %#v", layout.name, cell)
 					}
+					assertBoldCells(t, view, 0, 0, size.width, false)
+					hintEnd := layout.borderColumns + ansi.StringWidth(hintRow)
+					assertBoldCells(t, view, 1, layout.borderColumns, hintEnd, layout.boldKeyHints)
 				})
 			}
 		}
@@ -137,7 +142,8 @@ func footerRowText(t *testing.T, view uv.ScreenBuffer, y, borderColumns int) str
 }
 
 // assertFooterRow checks that a footer row shows text whole when it fits in
-// width cells, and otherwise shows the graphemes that fit before an ellipsis.
+// width cells, and otherwise shows the longest run of leading graphemes that
+// fits before a one-cell ellipsis.
 func assertFooterRow(t *testing.T, row, text string, width int, cut bool) {
 	t.Helper()
 	if !cut {
@@ -146,23 +152,31 @@ func assertFooterRow(t *testing.T, row, text string, width int, cut bool) {
 		}
 		return
 	}
+	budget := width - 1 // The ellipsis takes the last cell.
 	shown, ok := strings.CutSuffix(row, "…")
-	// The widest grapheme takes two cells, so a cut row fills its width or
-	// stops one cell short of it.
-	if !ok || !strings.HasPrefix(text, shown) || !isGraphemeBoundary(text, len(shown)) || ansi.StringWidth(row) < width-1 {
-		t.Errorf("footer row = %q (%d cells), want %q cut to %d cells with an ellipsis", row, ansi.StringWidth(row), text, width)
+	// A grapheme split by the cut joins its remainder here, adds no width and
+	// fails the longest-prefix condition as well.
+	next, _ := ansi.FirstGraphemeCluster(strings.TrimPrefix(text, shown), ansi.GraphemeWidth)
+	if !ok || !strings.HasPrefix(text, shown) || ansi.StringWidth(shown) > budget || ansi.StringWidth(shown+next) <= budget {
+		t.Errorf("footer row = %q (%d cells), want the longest leading graphemes of %q within %d cells, then an ellipsis",
+			row, ansi.StringWidth(row), text, budget)
 	}
 }
 
-func isGraphemeBoundary(text string, offset int) bool {
-	for at := 0; at < offset; {
-		cluster, _ := ansi.FirstGraphemeCluster(text[at:], ansi.GraphemeWidth)
-		at += len(cluster)
-		if at == offset {
-			return true
+// assertBoldCells checks that every cell of row y from column from up to
+// column to is bold exactly when want is set.
+func assertBoldCells(t *testing.T, view uv.ScreenBuffer, y, from, to int, want bool) {
+	t.Helper()
+	for x := from; x < to; x++ {
+		cell := view.CellAt(x, y)
+		if cell == nil {
+			t.Fatalf("footer row %d has no cell at column %d", y, x)
+		}
+		if bold := cell.Style.Attrs&uv.AttrBold != 0; bold != want {
+			t.Errorf("footer cell (%d, %d) %q bold = %v, want %v", x, y, cell.Content, bold, want)
+			return
 		}
 	}
-	return offset == 0
 }
 
 func TestPaintingTinyAndAgentCanvases(t *testing.T) {
