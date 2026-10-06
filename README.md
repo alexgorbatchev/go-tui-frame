@@ -205,7 +205,7 @@ result, err := app.Capture(func(input frame.Input) frame.Disposition {
 }).Run(ctx)
 ```
 
-Use `uv "github.com/charmbracelet/ultraviolet"`. `Input.Key` carries the recognized key event; `Input.Raw` is an owned copy of its original bytes. `Pass` forwards input through normal child routing; `Consume` withholds it. This handler acts on presses, including reported repeats, and consumes matching releases without another action. Capture runs inline and must return promptly.
+Use `uv "github.com/charmbracelet/ultraviolet"`. `Input.Key` carries the recognized key event; `Input.Raw` is an owned copy of its original bytes. A Kitty report fills the key's `BaseCode` and `ShiftedCode` only with alternate keys, which capture requests while the child lacks Kitty disambiguation. `Keystroke()` and `String()` prefer `BaseCode`, so Russian Ctrl+й reads as `ctrl+q` while a legacy child runs and as `ctrl+й` while a child that disambiguates runs. `MatchString` matches a binding such as `ctrl+q` by the reported key code and modifiers, which alternate keys do not change, so use it for bindings that hold for every child. `Pass` forwards input through normal child routing; `Consume` withholds it. This handler acts on presses, including reported repeats, and consumes matching releases without another action. Capture runs inline and must return promptly.
 
 When releases are reported, the press determines ownership of its repeats and final release. Recognized paste payloads bypass key capture; unmarked paste cannot be distinguished from typing. Observation does not consume input.
 
@@ -213,9 +213,9 @@ Explicit capture requests distinct key reports through verified Kitty disambigua
 
 Unmatched input is converted to the child's requested protocol. A converted Alt key carries the character the outer terminal reports: Alt+Shift+comma reaches a legacy child as `ESC <` (M-<), and Alt+Shift+X on a Dvorak layout as `ESC X`. On macOS, the native encoder prefixes a non-ASCII character with its unshifted form, so Alt+Shift+И on a Russian layout arrives as `ESC и`. Ctrl combinations use the unshifted key and keep its control byte: Ctrl+Shift+b reaches a legacy child as `0x02`. When the outer terminal reports the key in the same US position, Ctrl alone with a non-ASCII key uses it, so Russian Ctrl+и also arrives as `0x02`.
 
-Upstream Ultraviolet decodes an alternate-key report's US-layout key as its shifted character, so on a layout other than US a converted Alt key could reach the child as the US letter in the same position. This module's `go.mod` replaces Ultraviolet with a fork that keeps the two apart. Go applies `replace` directives only in the main module, so add the same directive to your application's `go.mod` until upstream Ultraviolet fixes its alternate-key decoder:
+Upstream Ultraviolet decodes an alternate-key report's US-layout key as its shifted character, so on a layout other than US a converted Alt key could reach the child as the US letter in the same position. Capture handlers would also see that US letter as `Input.Key`'s `ShiftedCode`, and a Shift-only report without associated text would decode to it as text: Russian Shift+И would read as `b`. This module's `go.mod` replaces Ultraviolet with a fork that keeps the two apart. Go applies `replace` directives only in the main module, so add the same directive to your application's `go.mod` until upstream Ultraviolet fixes its alternate-key decoder. The directive names no version on its left side, so it replaces every Ultraviolet version in your build with this fork commit, including for a dependency that requires a newer Ultraviolet:
 
-```
+```go.mod
 replace github.com/charmbracelet/ultraviolet => github.com/alexgorbatchev/ultraviolet v0.0.0-20261006050112-466706a11cd3
 ```
 
