@@ -24,7 +24,7 @@ func (f *Frame[T]) begin(ctx context.Context) error {
 		if ctx == nil {
 			err = fmt.Errorf("session context is required")
 		} else {
-			err = ctx.Err()
+			err = context.Cause(ctx)
 		}
 	}
 	if err != nil {

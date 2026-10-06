@@ -51,10 +51,31 @@ func TestBeginFreezesConfigurationAndHonorsCancellation(t *testing.T) {
 	if err := f.InvalidateHeader("live"); err != nil {
 		t.Fatalf("live update rejected after configuration freeze: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	f = New(exec.Command("sh"), "ready")
-	if err := f.begin(ctx); !errors.Is(err, context.Canceled) || f.cmd.Process != nil {
-		t.Fatalf("canceled startup = %v, process = %v", err, f.cmd.Process)
+	errCallerQuit := errors.New("caller quit")
+	tests := []struct {
+		name     string
+		canceled func() context.Context
+		want     error
+	}{
+		{"plain cancel", func() context.Context {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			return ctx
+		}, context.Canceled},
+		// A caller tells its own cancellation apart by the cause, so a context
+		// canceled before Run begins must report it as later cancellations do.
+		{"cancel with cause", func() context.Context {
+			ctx, cancel := context.WithCancelCause(context.Background())
+			cancel(errCallerQuit)
+			return ctx
+		}, errCallerQuit},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := New(exec.Command("sh"), "ready")
+			if _, err := f.Run(tt.canceled()); !errors.Is(err, tt.want) || f.cmd.Process != nil {
+				t.Fatalf("canceled startup = %v, want %v; process = %v", err, tt.want, f.cmd.Process)
+			}
+		})
 	}
 }
