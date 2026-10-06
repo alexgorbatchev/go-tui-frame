@@ -384,12 +384,16 @@ func TestRoutingMouseGestureAndOutsideCoordinates(t *testing.T) {
 	}
 }
 
-// Without SGR mode 1006 the outer terminal reports every release as X10 button
-// code 3, which names no button. That release ends every gesture: the child
-// receives a release of each button it owns, in its own encoding, and nothing
-// for a frame-owned press. A later drag then belongs to no child gesture.
-func TestRoutingX10ReleaseEndsEveryGesture(t *testing.T) {
-	const sgr, legacy = "\x1b[?1002;1006h", "\x1b[?1002h"
+// Without SGR or SGR-pixel reports (modes 1006 and 1016) the outer terminal
+// reports every release as X10 button code 3, which names no button, as does
+// an SGR release with button code 3. That release ends every gesture: the
+// child receives a release of each button it owns, in its own encoding, and
+// nothing for a frame-owned press or a release outside the child. A later drag
+// then belongs to no child gesture.
+func TestRoutingButtonlessReleaseEndsEveryGesture(t *testing.T) {
+	// Native button-event tracking (1002) reports no press without a button;
+	// normal tracking (1000) does.
+	const sgr, legacy, normalSGR = "\x1b[?1002;1006h", "\x1b[?1002h", "\x1b[?1000;1006h"
 	// X10 reports: left, middle and right presses inside the child at column
 	// 6, row 8, a right press outside it, and the anonymous release.
 	const left, middle, outsideRight, release = "\x1b[M &(", "\x1b[M!&(", "\x1b[M\"!!", "\x1b[M#&("
@@ -400,6 +404,9 @@ func TestRoutingX10ReleaseEndsEveryGesture(t *testing.T) {
 		{"every child button", sgr, middle + left + release, "\x1b[<1;4;5M\x1b[<0;4;5M\x1b[<0;4;5m\x1b[<1;4;5m"},
 		{"frame-owned press", sgr, outsideRight + release, ""},
 		{"child and frame presses", sgr, outsideRight + left + release, "\x1b[<0;4;5M\x1b[<0;4;5m"},
+		{"release outside the child", sgr, left + "\x1b[M#!!", "\x1b[<0;4;5M"},
+		{"SGR release with button code 3", sgr, "\x1b[<0;6;8M\x1b[<3;6;8m", "\x1b[<0;4;5M\x1b[<0;4;5m"},
+		{"SGR press and release with button code 3", normalSGR, "\x1b[<3;6;8M\x1b[<3;6;8m", "\x1b[<3;4;5M\x1b[<3;4;5m"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			r, em := newRouterTest(t, nil)
@@ -546,11 +553,13 @@ func TestRoutedLimitBoundsNativeEncoding(t *testing.T) {
 			pixelMice = append(pixelMice, fmt.Sprintf("\x1b[<%d;%sM", b, at), fmt.Sprintf("\x1b[<%d;%sm", b, at))
 		}
 	}
-	// Every button a child can own, pressed with every modifier at the widest
+	// Every button a press can name, pressed with every modifier at the widest
 	// X10 coordinates, then the X10 release that names no button and so
-	// releases each of them. An SGR press with no button, Cb 3, adds none.
+	// releases each one the child owns. Buttons 10 and 11 keep the bound
+	// checked if the native encoder starts accepting them. An SGR press with
+	// no button, Cb 3, adds no release beside the named ones.
 	var releasedMice []string
-	for _, cb := range []byte{0, 1, 2, 128, 129} {
+	for _, cb := range []byte{0, 1, 2, 128, 129, 130, 131} {
 		releasedMice = append(releasedMice, "\x1b[M"+string([]byte{32 + 28 + cb, 0xff, 0xff}))
 	}
 	releasedMice = append(releasedMice, "\x1b[<31;223;223M", "\x1b[M?\xff\xff")

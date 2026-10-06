@@ -475,9 +475,10 @@ func (r *inputRouter) routeMouse(event uv.MouseEvent, state emulator.State) (rou
 	var released []uv.MouseButton
 	switch {
 	case anonymous:
-		// Only SGR reports name the released button, using a separate final
-		// character. X10 reports every release as button code 3, which UV
-		// decodes as MouseNone. That release ends every gesture, and the child
+		// Only SGR and SGR-pixel reports name the released button, using a
+		// separate final character. X10 reports every release as button code
+		// 3, which UV decodes as MouseNone, as it does an SGR release with
+		// button code 3. That release ends every gesture, and the child
 		// receives a release of each button it owns: an SGR child needs the
 		// button to match the release to its press.
 		released = r.childButtons()
@@ -530,14 +531,18 @@ func (r *inputRouter) routeMouse(event uv.MouseEvent, state emulator.State) (rou
 }
 
 // childButtons returns the buttons the child owns, in button order. A press
-// that names no button, as an SGR report with button code 3 does, leaves no
-// button for a release to name.
+// that names no button, as an SGR report with button code 3 does, is released
+// with no button only when the child owns no named button: the named releases
+// already end its gesture, and adding it to them would exceed routedLimit.
 func (r *inputRouter) childButtons() []uv.MouseButton {
 	var buttons []uv.MouseButton
 	for _, button := range slices.Sorted(maps.Keys(r.mouseOwners)) {
 		if button != uv.MouseNone && r.mouseOwners[button] {
 			buttons = append(buttons, button)
 		}
+	}
+	if len(buttons) == 0 && r.mouseOwners[uv.MouseNone] {
+		buttons = append(buttons, uv.MouseNone)
 	}
 	return buttons
 }
