@@ -164,12 +164,20 @@ func (d *eventDispatcher) release(weight int) {
 // callObserver runs one callback and converts its panic into an error carrying
 // the panic value and the panicking goroutine's stack.
 func callObserver(handler func(Event), ev Event) (err error) {
+	returned := false
 	defer func() {
-		if v := recover(); v != nil {
-			err = observerPanicError(v, debug.Stack())
+		// The flag, not the recovered value, tells a panic from a return: with
+		// GODEBUG=panicnil=1, recover stops panic(nil) and returns nil.
+		if returned {
+			return
 		}
+		// runtime.Goexit also skips the assignment, and recover returns nil for
+		// it. Goexit then ends the goroutine without returning this error to
+		// deliver, whose own flag reports the Goexit instead.
+		err = observerPanicError(recover(), debug.Stack())
 	}()
 	handler(ev)
+	returned = true
 	return nil
 }
 

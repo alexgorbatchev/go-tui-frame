@@ -243,23 +243,37 @@ func TestObserverFailureCancelsSessionAndDiscardsLaterRecords(t *testing.T) {
 	test := t.Name()
 	var empty []int
 	for _, tt := range []struct {
-		name  string
-		fault func(Event)
-		want  func(error) bool
+		name string
+		// godebug, when set, replaces GODEBUG for the subtest. The runtime
+		// rereads its panicnil setting whenever GODEBUG changes.
+		godebug string
+		fault   func(Event)
+		want    func(error) bool
 	}{
-		{"value", func(Event) { panic("observer fault") }, func(err error) bool {
+		{"value", "", func(Event) { panic("observer fault") }, func(err error) bool {
 			return strings.Contains(err.Error(), "observer fault")
 		}},
-		{"runtime error", func(ev Event) { _ = empty[len(ev.Bytes)] }, func(err error) bool {
+		{"runtime error", "", func(ev Event) { _ = empty[len(ev.Bytes)] }, func(err error) bool {
 			var runtimeErr runtime.Error
 			return errors.As(err, &runtimeErr) && strings.Contains(err.Error(), "index out of range")
 		}},
+		{"nil with panicnil=0", "panicnil=0", func(Event) { panic(nil) }, func(err error) bool {
+			var nilErr *runtime.PanicNilError
+			return errors.As(err, &nilErr)
+		}},
+		// recover returns nil for this panic, as it does when nothing panicked.
+		{"nil with panicnil=1", "panicnil=1", func(Event) { panic(nil) }, func(err error) bool {
+			return strings.HasPrefix(err.Error(), "observer panicked: <nil>\n")
+		}},
 		// No recover stops runtime.Goexit, so the callback's goroutine ends.
-		{"runtime.Goexit", func(Event) { runtime.Goexit() }, func(err error) bool {
+		{"runtime.Goexit", "", func(Event) { runtime.Goexit() }, func(err error) bool {
 			return errors.Is(err, errObserverGoexit)
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.godebug != "" {
+				t.Setenv("GODEBUG", tt.godebug)
+			}
 			ctx, cancel := context.WithCancelCause(t.Context())
 			calls := 0
 			d, entered, release := pausedSelectedDispatcher(t, allEvents, cancel, func(ev Event) {
