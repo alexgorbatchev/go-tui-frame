@@ -175,7 +175,7 @@ type session[T any] struct {
 	waitDone                                                  chan struct{}
 	waited, ptyEOF                                            bool
 	started, terminationStarted                               bool
-	waitErr, drainErr                                         error
+	drainErr                                                  error
 	queue                                                     []pendingInput
 	held                                                      []input.Packet
 	hangup                                                    hangupWatch
@@ -813,7 +813,6 @@ func (s *session[T]) reap() error {
 	select {
 	case err := <-s.wait:
 		waitErr := s.recordReap(err)
-		s.waitErr = err
 		s.queue = nil
 		s.queuedBytes = 0
 		s.collectMetadata()
