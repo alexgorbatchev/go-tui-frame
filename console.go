@@ -219,6 +219,11 @@ func (c *console) probe(ctx context.Context, events *eventDispatcher, timeout ti
 }
 
 func (c *console) consumeReply(p input.Packet) bool {
+	// Bracketed-paste payload is user input, even where it holds text shaped
+	// like the reply to a pending query, such as copied terminal output.
+	if p.Paste {
+		return false
+	}
 	preference := c.consumePreferenceReply(p)
 	switch ev := p.Event.(type) {
 	case uv.ModeReportEvent:

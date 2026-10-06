@@ -68,7 +68,7 @@ func TestPreferenceParsingDoesNotAllocatePerPacket(t *testing.T) {
 				t.Fatalf("parsing a %s packet allocated %.0f times", tt.name, allocs)
 			}
 			if !c.preferences.cursorPending || !c.preferences.colors[12] || c.preferences.schemePending != tt.inherit {
-				t.Fatal("cursor and color-scheme queries must stay pending so every run parses the packet")
+				t.Fatal("cursor and color-scheme queries must stay pending so every run reaches the reply checks")
 			}
 		})
 	}
@@ -208,6 +208,127 @@ func TestLatePreferenceRepliesDoNotChangeChildDefaults(t *testing.T) {
 	}
 	if s.Colors.Background != (ghostty.ColorRGB{}) || s.Modes[ghostty.ModeDECCKM] || s.Cursor.VisualStyle != ghostty.CursorVisualStyleBlock {
 		t.Errorf("late replies changed defaults: bg=%+v cursor=%+v", s.Colors.Background, s.Cursor)
+	}
+}
+
+// pastedReply frames reply inside a bracketed paste, as copied terminal output
+// or a shell snippet holding a literal report arrives.
+func pastedReply(reply string) string {
+	return "\x1b[200~echo hi\n" + reply + "\n\x1b[201~"
+}
+
+// Bracketed-paste payload is user input even when it holds a well-formed
+// report for a query the frame still waits on, during the probe or after it.
+// The query stays pending for the terminal's own reply.
+func TestPastedRepliesStayUserInput(t *testing.T) {
+	for _, tt := range []struct {
+		name, reply string
+		inherit     bool
+		pending     func(*terminalPreferences) bool
+	}{
+		{"cursor color", "\x1b]12;rgb:ffff/0000/0000\x07", false, func(p *terminalPreferences) bool { return p.colors[12] }},
+		{"foreground color", "\x1b]10;rgb:aaaa/bbbb/cccc\x1b\\", true, func(p *terminalPreferences) bool { return p.colors[10] }},
+		{"background color", "\x1b]11;#203040\x07", true, func(p *terminalPreferences) bool { return p.colors[11] }},
+		{"palette color", "\x1b]4;1;#123456\x07", true, func(p *terminalPreferences) bool { return p.palette[1] }},
+		{"cursor style", "\x1bP1$r4 q\x1b\\", false, func(p *terminalPreferences) bool { return p.cursorPending }},
+	} {
+		for _, phase := range []struct {
+			name   string
+			closed bool
+		}{{"during the probe", false}, {"after the probe", true}} {
+			t.Run(tt.name+" "+phase.name, func(t *testing.T) {
+				c := &console{inherit: tt.inherit, pending: make(map[ansi.DECMode]bool)}
+				c.preferenceQueries()
+				c.preferences.closed = phase.closed
+				packets, err := input.New().Feed([]byte(pastedReply(tt.reply)))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(packets) != 3 || !packets[1].Paste || !strings.Contains(string(packets[1].Raw), tt.reply) {
+					t.Fatalf("paste was not framed as one payload holding %q: %#v", tt.reply, packets)
+				}
+				for _, p := range packets {
+					if c.consumeReply(p) {
+						t.Errorf("paste packet %q was consumed as a reply", p.Raw)
+					}
+				}
+				p := &c.preferences
+				if !tt.pending(p) {
+					t.Errorf("pasted %q settled its query", tt.reply)
+				}
+				if p.profile.Foreground != nil || p.profile.Background != nil || p.profile.Cursor != nil || len(p.profile.Palette) != 0 || p.cursorStyle != nil {
+					t.Errorf("pasted %q changed the child's defaults", tt.reply)
+				}
+				if !preferenceReply(t, c, tt.reply) {
+					t.Errorf("the terminal's own %q reply after the paste was not consumed", tt.reply)
+				}
+			})
+		}
+	}
+}
+
+// A paste routed after the probe, while the cursor color query is still
+// pending, reaches the child whole although it holds that query's report.
+func TestRoutedPasteKeepsPendingReplyText(t *testing.T) {
+	s, _, slave := newRepaintSession(t, ansi.ModeReset, nil)
+	router, err := newInputRouter(s.terminal, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(router.close)
+	s.router = router
+	// The child requests bracketed paste, so the markers reach it as well.
+	readRepaintChunk(t, s, slave, "\x1b[?2004h")
+	s.console.preferenceQueries()
+	s.console.preferences.closed = true
+	paste := pastedReply("\x1b]12;rgb:ffff/0000/0000\x07")
+	packets, err := input.New().Feed([]byte(paste))
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued := len(s.queue)
+	for _, p := range packets {
+		if err := s.route(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var routed []byte
+	for _, p := range s.queue[queued:] {
+		routed = append(routed, p.bytes[p.offset:]...)
+	}
+	if string(routed) != paste {
+		t.Fatalf("child input queue holds %q, want the whole paste %q", routed, paste)
+	}
+}
+
+// Only packets the input decoder recognizes as reply-shaped reach the reply
+// parser. A query the terminal never answers stays pending for the whole
+// session, so keys, mouse and focus reports and paste must not each pay for a
+// parse meanwhile.
+func TestReplyParserSkipsPacketsThatCannotBeReplies(t *testing.T) {
+	c := &console{inherit: true, pending: make(map[ansi.DECMode]bool)}
+	c.preferenceQueries()
+	c.preferences.closed = true
+	packets, err := input.New().Feed([]byte("a\x1b[<0;10;5M\x1b[I" + pastedReply("\x1b]12;rgb:ffff/0000/0000\x07")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The parser keeps the command of the last sequence it parsed, here an
+	// unsolicited OSC 13 report, until it parses another packet.
+	const parsed = 13
+	for _, p := range packets {
+		if preferenceReply(t, c, "\x1b]13;#123456\x07") {
+			t.Fatal("unsolicited OSC 13 report was consumed")
+		}
+		if got := c.preferences.parser.Command(); got != parsed {
+			t.Fatalf("reply parser command after an OSC 13 report = %d, want %d", got, parsed)
+		}
+		if c.consumeReply(p) {
+			t.Errorf("%T packet %q was consumed as a reply", p.Event, p.Raw)
+		}
+		if got := c.preferences.parser.Command(); got != parsed {
+			t.Errorf("%T packet %q reached the reply parser", p.Event, p.Raw)
+		}
 	}
 }
 

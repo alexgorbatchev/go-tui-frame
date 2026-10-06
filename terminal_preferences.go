@@ -90,9 +90,16 @@ func (c *console) preferenceQueries() string {
 	return query + colorSchemeQuery
 }
 
+// consumePreferenceReply reports whether packet answers a pending preference
+// query, and settles that query. Only packets the input decoder recognizes as
+// reply-shaped reach the reply parser: OSC 10, 11 and 12 decode as color
+// events, OSC 4 as an unknown OSC string and a DECRPSS reply as an unknown DCS
+// string. Keys, mouse reports and paste are never parsed.
 func (c *console) consumePreferenceReply(packet input.Packet) bool {
 	p := &c.preferences
-	if ev, ok := packet.Event.(uv.ModeReportEvent); ok {
+	var scheme ghostty.ColorScheme
+	switch ev := packet.Event.(type) {
+	case uv.ModeReportEvent:
 		var mode ghostty.Mode
 		switch m := ev.Mode.(type) {
 		case ansi.DECMode:
@@ -110,24 +117,23 @@ func (c *console) consumePreferenceReply(packet input.Packet) bool {
 			p.profile.Modes[mode] = ev.Value.IsSet()
 		}
 		return true
+	case uv.DarkColorSchemeEvent:
+		scheme = ghostty.ColorSchemeDark
+	case uv.LightColorSchemeEvent:
+		scheme = ghostty.ColorSchemeLight
+	case uv.ForegroundColorEvent, uv.BackgroundColorEvent, uv.CursorColorEvent, uv.UnknownOscEvent, uv.UnknownDcsEvent:
+		return c.consumePreferenceString(packet)
+	default:
+		return false
 	}
-	if p.schemePending {
-		var scheme ghostty.ColorScheme
-		switch packet.Event.(type) {
-		case uv.DarkColorSchemeEvent:
-			scheme = ghostty.ColorSchemeDark
-		case uv.LightColorSchemeEvent:
-			scheme = ghostty.ColorSchemeLight
-		default:
-			return c.consumePreferenceString(packet)
-		}
-		p.schemePending = false
-		if !p.closed {
-			p.profile.Scheme = new(scheme)
-		}
-		return true
+	if !p.schemePending {
+		return false
 	}
-	return c.consumePreferenceString(packet)
+	p.schemePending = false
+	if !p.closed {
+		p.profile.Scheme = new(scheme)
+	}
+	return true
 }
 
 func (c *console) consumePreferenceString(packet input.Packet) bool {
