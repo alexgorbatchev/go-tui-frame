@@ -49,8 +49,16 @@ _native target prefix cache:
     else
         archive="$root/ghostty-$revision.tar.gz"
         url="https://codeload.github.com/ghostty-org/ghostty/tar.gz/$revision"
+        # shasum --check exits 1 when the digest differs. Any other failure,
+        # such as shasum ending on Ctrl+C or Ctrl+\, stops the recipe with
+        # that status, so an interrupted check never counts as a mismatch.
         verify_archive() {
-            printf '%s  %s\n' "$archive_sha" "$1" | shasum -a 256 --check
+            local status=0
+            printf '%s  %s\n' "$archive_sha" "$1" | shasum -a 256 --check || status=$?
+            case "$status" in
+                0 | 1) return "$status" ;;
+                *) exit "$status" ;;
+            esac
         }
         # curl runs as a job so that remove_download, the EXIT trap below,
         # can stop and reap it before removing its file. A signal sent only
@@ -66,10 +74,11 @@ _native target prefix cache:
         }
         # Ctrl+C and Ctrl+\ reach curl too, but a job started without job
         # control ignores SIGINT and SIGQUIT, so this trap stops curl,
-        # removes the file, and re-raises the signal ($1). bash 4.4 and
-        # later ignore SIGQUIT again once the trap is reset, so the shell
-        # then exits with $2, the status bash gives a command that the
-        # signal ends: 128 plus its POSIX number (INT 2, QUIT 3).
+        # removes the file, and re-raises the signal ($1). bash, except
+        # macOS's /bin/bash 3.2, ignores SIGQUIT again once the trap is
+        # reset, so the shell then exits with $2, the status bash gives a
+        # command that the signal ends: 128 plus its POSIX number (INT 2,
+        # QUIT 3).
         stop_download() {
             remove_download
             trap - EXIT "$1"

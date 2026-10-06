@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 16:06
-last_modified: 2026-10-06 10:22
+last_modified: 2026-10-06 12:09
 status: current
 ---
 
@@ -56,9 +56,10 @@ transfer, or a download with other bytes, leaves no file at the cached path, so
 the next run downloads again. When the recipe exits during the transfer,
 including on SIGINT, SIGQUIT, or SIGTERM, it stops curl and removes the
 temporary file. A download that fails the check stops the recipe with the URL,
-the cached path, and the expected digest. A cached archive that fails the check
-is removed and downloaded again. Without `shasum` the recipe stops before it
-checks the cache.
+the cached path, and the expected digest. A cached archive whose digest differs
+is removed and downloaded again. When `shasum` itself fails or is interrupted,
+the recipe stops with its status and leaves the cached archive in place.
+Without `shasum` the recipe stops before it checks the cache.
 
 Ghostty's build runs `git` in its source directory to detect its version. The
 extracted archive is not a git repository, so the recipe runs `zig build`
