@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"image"
+	"maps"
 	"runtime"
 	"slices"
 	"unicode"
@@ -129,7 +130,10 @@ func (r *inputRouter) route(packet input.Packet, state emulator.State) (routedIn
 // byte of a converted key or mouse report. A one-byte upper-case letter is the
 // worst case: UV reports it as Shift with its shifted text, and Kitty flags 4
 // and 16 add the shifted alternate and associated text, so "Z" becomes
-// "\x1b[122:90;2;90u". TestRoutedLimitBoundsNativeEncoding checks the bound
+// "\x1b[122:90;2;90u". A six-byte X10 release names no button and becomes a
+// release of each button the child owns: at most left, middle, right, back and
+// forward, since wheel reports start no gesture and the native encoder rejects
+// buttons 10 and 11. TestRoutedLimitBoundsNativeEncoding checks the bound
 // against the native encoders.
 const maxRoutedExpansion = 14
 
@@ -466,8 +470,20 @@ func (r *inputRouter) routeMouse(event uv.MouseEvent, state emulator.State) (rou
 	}
 	_, press := event.(uv.MouseClickEvent)
 	_, release := event.(uv.MouseReleaseEvent)
-	owned, known := r.mouseOwners[m.Button]
-	if release {
+	owned := r.mouseOwners[m.Button]
+	anonymous := release && m.Button == uv.MouseNone
+	var released []uv.MouseButton
+	switch {
+	case anonymous:
+		// Only SGR reports name the released button, using a separate final
+		// character. X10 reports every release as button code 3, which UV
+		// decodes as MouseNone. That release ends every gesture, and the child
+		// receives a release of each button it owns: an SGR child needs the
+		// button to match the release to its press.
+		released = r.childButtons()
+		owned = len(released) > 0
+		clear(r.mouseOwners)
+	case release:
 		delete(r.mouseOwners, m.Button)
 	}
 	if !inside {
@@ -480,7 +496,7 @@ func (r *inputRouter) routeMouse(event uv.MouseEvent, state emulator.State) (rou
 		}
 		return result, nil
 	}
-	if (release || isMouseDrag(event)) && (!known || !owned) {
+	if (release || isMouseDrag(event)) && !owned {
 		result.Origin = "unowned-mouse-gesture"
 		return result, nil
 	}
@@ -491,34 +507,67 @@ func (r *inputRouter) routeMouse(event uv.MouseEvent, state emulator.State) (rou
 	if err := mouseWireBounds(position, state); err != nil {
 		return result, err
 	}
-	if err := r.setMouse(event, position); err != nil {
-		return result, err
+	if anonymous {
+		for _, button := range released {
+			m.Button = button
+			encoded, err := r.encodeMouse(uv.MouseReleaseEvent(m), position, state)
+			if err != nil {
+				result.Bytes = nil
+				return result, err
+			}
+			result.Bytes = append(result.Bytes, encoded...)
+		}
+		return result, nil
 	}
 	if press {
 		r.mouseOwners[m.Button] = true
+	}
+	result.Bytes, err = r.encodeMouse(event, position, state)
+	if press && (err != nil || len(result.Bytes) == 0) {
+		r.mouseOwners[m.Button] = false
+	}
+	return result, err
+}
+
+// childButtons returns the buttons the child owns, in button order. A press
+// that names no button, as an SGR report with button code 3 does, leaves no
+// button for a release to name.
+func (r *inputRouter) childButtons() []uv.MouseButton {
+	var buttons []uv.MouseButton
+	for _, button := range slices.Sorted(maps.Keys(r.mouseOwners)) {
+		if button != uv.MouseNone && r.mouseOwners[button] {
+			buttons = append(buttons, button)
+		}
+	}
+	return buttons
+}
+
+// encodeMouse writes event at position in the child's mouse encoding.
+func (r *inputRouter) encodeMouse(event uv.MouseEvent, position ghostty.MousePosition, state emulator.State) ([]byte, error) {
+	if err := r.setMouse(event, position); err != nil {
+		return nil, err
 	}
 	pressed := false
 	for _, childOwned := range r.mouseOwners {
 		pressed = pressed || childOwned
 	}
-	result.Bytes, err = r.terminal.EncodeMouse(r.mouse, pressed)
-	if err == nil && !utf8.Valid(result.Bytes) {
-		encodedUTF8, modeErr := routingMode(state, ghostty.ModeUTF8Mouse)
-		if modeErr != nil {
-			err = modeErr
-		} else if encodedUTF8 {
-			// The pinned native UTF-8 encoder writes Cb as a raw byte. High
-			// button codes cannot be forwarded as a valid UTF-8 report.
-			err = fmt.Errorf("native UTF-8 mouse encoding cannot represent this button event")
-		}
-		if err != nil {
-			result.Bytes = nil
-		}
+	encoded, err := r.terminal.EncodeMouse(r.mouse, pressed)
+	if err != nil {
+		return nil, err
 	}
-	if press && (err != nil || len(result.Bytes) == 0) {
-		r.mouseOwners[m.Button] = false
+	if utf8.Valid(encoded) {
+		return encoded, nil
 	}
-	return result, err
+	encodedUTF8, err := routingMode(state, ghostty.ModeUTF8Mouse)
+	if err != nil {
+		return nil, err
+	}
+	if encodedUTF8 {
+		// The pinned native UTF-8 encoder writes Cb as a raw byte. High
+		// button codes cannot be forwarded as a valid UTF-8 report.
+		return nil, fmt.Errorf("native UTF-8 mouse encoding cannot represent this button event")
+	}
+	return encoded, nil
 }
 
 func isMouseDrag(event uv.MouseEvent) bool {

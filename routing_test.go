@@ -384,6 +384,40 @@ func TestRoutingMouseGestureAndOutsideCoordinates(t *testing.T) {
 	}
 }
 
+// Without SGR mode 1006 the outer terminal reports every release as X10 button
+// code 3, which names no button. That release ends every gesture: the child
+// receives a release of each button it owns, in its own encoding, and nothing
+// for a frame-owned press. A later drag then belongs to no child gesture.
+func TestRoutingX10ReleaseEndsEveryGesture(t *testing.T) {
+	const sgr, legacy = "\x1b[?1002;1006h", "\x1b[?1002h"
+	// X10 reports: left, middle and right presses inside the child at column
+	// 6, row 8, a right press outside it, and the anonymous release.
+	const left, middle, outsideRight, release = "\x1b[M &(", "\x1b[M!&(", "\x1b[M\"!!", "\x1b[M#&("
+	for _, tt := range []struct{ name, modes, gesture, want string }{
+		{"SGR child", sgr, left + release, "\x1b[<0;4;5M\x1b[<0;4;5m"},
+		{"legacy child", legacy, left + release, "\x1b[M $%\x1b[M#$%"},
+		{"release modifiers", sgr, left + "\x1b[M'&(", "\x1b[<0;4;5M\x1b[<4;4;5m"},
+		{"every child button", sgr, middle + left + release, "\x1b[<1;4;5M\x1b[<0;4;5M\x1b[<0;4;5m\x1b[<1;4;5m"},
+		{"frame-owned press", sgr, outsideRight + release, ""},
+		{"child and frame presses", sgr, outsideRight + left + release, "\x1b[<0;4;5M\x1b[<0;4;5m"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r, em := newRouterTest(t, nil)
+			s := routerState(t, em, tt.modes)
+			if got := routeBytes(t, r, s, tt.gesture); string(got) != tt.want {
+				t.Errorf("gesture delivered %q, want %q", got, tt.want)
+			}
+			// X10 drags of the left, middle and right buttons.
+			for _, drag := range []string{"\x1b[M@&(", "\x1b[MA&(", "\x1b[MB&("} {
+				got, err := r.route(routerPackets(t, drag)[0], s)
+				if err != nil || len(got.Bytes) != 0 || got.Origin != "unowned-mouse-gesture" {
+					t.Errorf("drag %q after the release delivered %q as %q, %v", drag, got.Bytes, got.Origin, err)
+				}
+			}
+		})
+	}
+}
+
 func TestRoutingFocusRequiresChildModeAndUnknownKeysAreExplicit(t *testing.T) {
 	r, em := newRouterTest(t, nil)
 	s := routerState(t, em, "")
@@ -489,9 +523,9 @@ func TestRoutingDropsPixelReportsWithoutMeasuredCells(t *testing.T) {
 
 // The session admits outer input by routedLimit, so it must bound what the
 // native encoders write for every keyboard protocol and mouse format a child
-// can select, including SGR pixel reports at four-digit coordinates. The
-// widest expansion must also reach the bound, keeping its documented worst
-// case real.
+// can select, including SGR pixel reports at four-digit coordinates and an X10
+// release that releases every button the child owns. The widest expansion must
+// also reach the bound, keeping its documented worst case real.
 func TestRoutedLimitBoundsNativeEncoding(t *testing.T) {
 	var keys []string
 	for b := range 256 {
@@ -512,6 +546,14 @@ func TestRoutedLimitBoundsNativeEncoding(t *testing.T) {
 			pixelMice = append(pixelMice, fmt.Sprintf("\x1b[<%d;%sM", b, at), fmt.Sprintf("\x1b[<%d;%sm", b, at))
 		}
 	}
+	// Every button a child can own, pressed with every modifier at the widest
+	// X10 coordinates, then the X10 release that names no button and so
+	// releases each of them. An SGR press with no button, Cb 3, adds none.
+	var releasedMice []string
+	for _, cb := range []byte{0, 1, 2, 128, 129} {
+		releasedMice = append(releasedMice, "\x1b[M"+string([]byte{32 + 28 + cb, 0xff, 0xff}))
+	}
+	releasedMice = append(releasedMice, "\x1b[<31;223;223M", "\x1b[M?\xff\xff")
 	keyModes := []string{"", "\x1b[?2004h", "\x1b[>4;2m", "\x1b[?1h\x1b[?66h\x1b[?67h\x1b[?1036h", "\x1b[?1035h\x1b[?66h"}
 	for flags := 1; flags < 32; flags++ {
 		keyModes = append(keyModes, fmt.Sprintf("\x1b[>%du", flags))
@@ -521,21 +563,22 @@ func TestRoutedLimitBoundsNativeEncoding(t *testing.T) {
 		mouseModes = append(mouseModes, "\x1b[?1003h"+format)
 	}
 	widest := 0.0
+	// A 500x300 grid holds the widest X10 coordinates. With 10x20-pixel cells,
+	// pixel reports from the outer terminal reach four-digit coordinates.
+	wide, measured := emulator.Size{Cols: 500, Rows: 300}, emulator.Size{Cols: 500, Rows: 300, CellWidthPx: 10, CellHeightPx: 20}
 	for _, group := range []struct {
 		modes, inputs []string
-		measured      bool
-	}{{keyModes, keys, false}, {mouseModes, cellMice, false}, {mouseModes, pixelMice, true}} {
+		grid          emulator.Size // The zero size keeps the 8x5 test grid.
+	}{{keyModes, keys, emulator.Size{}}, {mouseModes, cellMice, emulator.Size{}}, {mouseModes, releasedMice, wide}, {mouseModes, pixelMice, measured}} {
 		delivered := 0
 		for _, modes := range group.modes {
 			r, em := newRouterTest(t, nil)
-			if group.measured {
-				// A 500x300 grid of 10x20-pixel cells: pixel reports from the
-				// outer terminal reach four-digit coordinates.
-				if err := em.Resize(emulator.Size{Cols: 500, Rows: 300, CellWidthPx: 10, CellHeightPx: 20}); err != nil {
+			if group.grid != (emulator.Size{}) {
+				if err := em.Resize(group.grid); err != nil {
 					t.Fatal(err)
 				}
-				r.viewport = image.Rect(2, 3, 502, 303)
-				r.host.MousePixels, r.host.CellWidthPx, r.host.CellHeightPx = true, 10, 20
+				r.viewport = image.Rect(2, 3, 2+group.grid.Cols, 3+group.grid.Rows)
+				r.host.MousePixels, r.host.CellWidthPx, r.host.CellHeightPx = group.grid.CellWidthPx > 0, group.grid.CellWidthPx, group.grid.CellHeightPx
 			}
 			s := routerState(t, em, modes)
 			for _, raw := range group.inputs {
