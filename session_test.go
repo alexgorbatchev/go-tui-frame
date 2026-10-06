@@ -45,10 +45,13 @@ func TestSessionChild(t *testing.T) {
 		}
 		os.Exit(0)
 	}
-	if os.Getenv("FRAME_TEST_MODE") == "detached" {
+	if mode := os.Getenv("FRAME_TEST_MODE"); mode == "detached" || mode == "detached-on-input" {
 		// The sleeper keeps the slave open from its own session, as a daemon
 		// the framed program starts with setsid would; cleanup never signals it.
 		startSleeper(&syscall.SysProcAttr{Setsid: true})
+		if mode == "detached-on-input" {
+			awaitFloodInput()
+		}
 		floodOutput()
 	}
 	if _, err := term.MakeRaw(os.Stdin.Fd()); err != nil {
@@ -91,6 +94,20 @@ func startSleeper(attrs *syscall.SysProcAttr) *exec.Cmd {
 		os.Exit(98)
 	}
 	return cmd
+}
+
+// awaitFloodInput writes one short output and waits for a byte of input, so a
+// test can start the flood once it has observed that output.
+func awaitFloodInput() {
+	if _, err := term.MakeRaw(os.Stdin.Fd()); err != nil {
+		os.Exit(91)
+	}
+	if _, err := fmt.Fprint(os.Stdout, "ready"); err != nil {
+		os.Exit(92)
+	}
+	if _, err := os.Stdin.Read(make([]byte, 1)); err != nil {
+		os.Exit(93)
+	}
 }
 
 // floodOutput writes to the terminal until a write fails or the process is
@@ -733,7 +750,7 @@ func TestObserverFailureDuringShutdownDrainReachesRun(t *testing.T) {
 func TestSessionErrorCleanupIgnoresDetachedSlaveHolder(t *testing.T) {
 	// Holding the first child output until cleanup has finished overflows the
 	// observation queue, so the loop returns while the child is still writing.
-	d := startDetached(t, nil, []EventKind{ChildOutput}, func(_ Event, hold <-chan struct{}) { <-hold })
+	d := startDetached(t, "detached", nil, []EventKind{ChildOutput}, func(_ Event, hold <-chan struct{}) { <-hold })
 	// Reading the unread output releases the leader at once. Finishing within
 	// half the drain deadline rules out a release by the deadline's hangup.
 	d.finish(t, awaitTermios(d.h, d.before, drainTimeout/2), ErrObservationOverflow)
@@ -745,12 +762,26 @@ func TestSessionErrorCleanupIgnoresDetachedSlaveHolder(t *testing.T) {
 // once, Result.CleanupError stays nil, and the observer never receives Exited.
 func TestExitedOverflowDuringCleanupIsReportedOnce(t *testing.T) {
 	var observed eventLog
-	// Holding the first child output until cleanup has finished overflows the
-	// queue while the child still writes, so cleanup reaps the leader.
-	d := startDetached(t, nil, []EventKind{ChildOutput, Exited}, func(e Event, hold <-chan struct{}) {
+	entered := make(chan struct{})
+	var first sync.Once
+	// The observer holds its callback for the child's first output until
+	// cleanup has finished. Only then does the test start the flood, which
+	// fills the queue behind that callback and overflows it while the child
+	// still writes, so cleanup reaps the leader and its Exited meets the same
+	// full queue.
+	d := startDetached(t, "detached-on-input", nil, []EventKind{ChildOutput, Exited}, func(e Event, hold <-chan struct{}) {
 		observed.record(e)
+		first.Do(func() { close(entered) })
 		<-hold
 	})
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the child's first output was not observed")
+	}
+	if _, err := unix.Write(d.h.fd, []byte("f")); err != nil {
+		t.Fatal(err)
+	}
 	got := d.finish(t, awaitTermios(d.h, d.before, drainTimeout/2), ErrObservationOverflow)
 	if n := strings.Count(got.err.Error(), ErrObservationOverflow.Error()); n != 1 {
 		t.Fatalf("Run reported the overflow %d times, want once: %v", n, got.err)
@@ -768,7 +799,7 @@ func TestSessionErrorCleanupReleasesStoppedChildOutput(t *testing.T) {
 	// The frame consumes all input but ^S; its observations, held until
 	// cleanup has finished, overflow the queue.
 	holding := false // Startup probe replies are outer input too; let them pass.
-	d := startDetached(t, passOnlyStop, []EventKind{ChildInput, OuterInput}, func(e Event, hold <-chan struct{}) {
+	d := startDetached(t, "detached", passOnlyStop, []EventKind{ChildInput, OuterInput}, func(e Event, hold <-chan struct{}) {
 		switch {
 		case e.Kind == ChildInput && bytes.Equal(e.Bytes, stopInput):
 			holding = true
@@ -797,7 +828,7 @@ func TestSessionErrorCleanupReleasesStoppedChildOutput(t *testing.T) {
 func TestCancellationReleasesStoppedChildOutput(t *testing.T) {
 	stopped := make(chan struct{})
 	var observed eventLog
-	d := startDetached(t, passOnlyStop, []EventKind{ChildInput, Exited}, func(e Event, _ <-chan struct{}) {
+	d := startDetached(t, "detached", passOnlyStop, []EventKind{ChildInput, Exited}, func(e Event, _ <-chan struct{}) {
 		observed.record(e)
 		if e.Kind == ChildInput && bytes.Equal(e.Bytes, stopInput) {
 			close(stopped)
@@ -978,8 +1009,10 @@ func passOnlyStop(in Input) Disposition {
 	return Consume
 }
 
-// detachedRun is a session whose "detached" child writes output continuously
-// while a sleeper in another session holds the child PTY's slave.
+// detachedRun is a session whose detached child writes output continuously
+// while a sleeper in another session holds the child PTY's slave. A
+// "detached" child floods from the start; a "detached-on-input" child first
+// writes "ready" and floods once it reads a byte.
 type detachedRun struct {
 	h       *terminalHarness
 	before  string
@@ -989,14 +1022,15 @@ type detachedRun struct {
 	release func()
 }
 
-// startDetached starts a detachedRun with capture, when not nil, and passes
-// each observed event of kinds to observe. observe may block on hold, which
-// closes once the test has seen whether cleanup finished.
-func startDetached(t *testing.T, capture func(Input) Disposition, kinds []EventKind, observe func(e Event, hold <-chan struct{})) *detachedRun {
+// startDetached starts a detachedRun whose child runs in mode, with capture,
+// when not nil, and passes each observed event of kinds to observe. observe
+// may block on hold, which closes once the test has seen whether cleanup
+// finished.
+func startDetached(t *testing.T, mode string, capture func(Input) Disposition, kinds []EventKind, observe func(e Event, hold <-chan struct{})) *detachedRun {
 	t.Helper()
 	h := newHarness(t)
 	before := termiosState(t, h)
-	cmd, file := descendantCommand(t, "detached")
+	cmd, file := descendantCommand(t, mode)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	t.Cleanup(cancel)
 	leaders, hold := make(chan int, 1), make(chan struct{})
@@ -1075,10 +1109,10 @@ func (d *detachedRun) finish(t *testing.T, cleaned bool, want error) runOutcome 
 	return got
 }
 
-// descendantCommand returns a child in mode, "groups" or "detached", whose
-// descendant leads its own process group and writes its PID to the returned
-// file. Cleanup kills that group once its PID is published, even when the test
-// failed before reading it.
+// descendantCommand returns a child in mode, "groups", "detached" or
+// "detached-on-input", whose descendant leads its own process group and writes
+// its PID to the returned file. Cleanup kills that group once its PID is
+// published, even when the test failed before reading it.
 func descendantCommand(t *testing.T, mode string) (*exec.Cmd, string) {
 	t.Helper()
 	dir, err := os.MkdirTemp(".tmp", "session-"+mode+"-")
