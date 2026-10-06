@@ -42,16 +42,17 @@ _native target prefix cache:
     source="$root/ghostty"
     test "$(zig version)" = '0.16.0' || { printf 'Zig 0.16.0 is required.\n' >&2; exit 1; }
     command -v pkg-config >/dev/null
-    command -v shasum >/dev/null || { printf 'shasum is required.\n' >&2; exit 1; }
     mkdir -p "$root"
     if test -e "$source"; then
         test -f "$source/.frame-source-revision" && test "$(cat "$source/.frame-source-revision")" = "$revision" || { printf 'Existing native source is unmarked or uses another revision: %s\n' "$source" >&2; exit 1; }
     else
+        command -v shasum >/dev/null || { printf 'shasum is required.\n' >&2; exit 1; }
         archive="$root/ghostty-$revision.tar.gz"
         url="https://codeload.github.com/ghostty-org/ghostty/tar.gz/$revision"
-        # shasum --check exits 1 when the digest differs. Any other failure,
-        # such as shasum ending on Ctrl+C or Ctrl+\, stops the recipe with
-        # that status, so an interrupted check never counts as a mismatch.
+        # shasum --check exits 1 when the digest differs or the file cannot
+        # be read. Any other failure, such as shasum ending on Ctrl+C or
+        # Ctrl+\, stops the recipe with that status, so an interrupted check
+        # never counts as a failed archive.
         verify_archive() {
             local status=0
             printf '%s  %s\n' "$archive_sha" "$1" | shasum -a 256 --check || status=$?
@@ -74,11 +75,13 @@ _native target prefix cache:
         }
         # Ctrl+C and Ctrl+\ reach curl too, but a job started without job
         # control ignores SIGINT and SIGQUIT, so this trap stops curl,
-        # removes the file, and re-raises the signal ($1). bash, except
-        # macOS's /bin/bash 3.2, ignores SIGQUIT again once the trap is
-        # reset, so the shell then exits with $2, the status bash gives a
-        # command that the signal ends: 128 plus its POSIX number (INT 2,
-        # QUIT 3).
+        # removes the file, and re-raises the signal ($1). SIGTERM takes the
+        # same path: when the whole group gets it, just forwards a second
+        # one, which kills macOS's /bin/bash 3.2 before its EXIT trap runs.
+        # bash, except macOS's /bin/bash 3.2, ignores SIGQUIT again once the
+        # trap is reset, so the shell then exits with $2, the status bash
+        # gives a command that the signal ends: 128 plus its POSIX number
+        # (INT 2, QUIT 3, TERM 15).
         stop_download() {
             remove_download
             trap - EXIT "$1"
@@ -90,13 +93,14 @@ _native target prefix cache:
         # is removed and downloaded again.
         if test -f "$archive" && ! verify_archive "$archive"; then
             rm -f "$archive"
-            printf 'Removed cached archive %s: its SHA-256 is not %s.\n' "$archive" "$archive_sha" >&2
+            printf 'Removed cached archive %s: it failed the check against SHA-256 %s.\n' "$archive" "$archive_sha" >&2
         fi
         if ! test -f "$archive"; then
             download=$(mktemp "$archive.XXXXXX")
             trap remove_download EXIT
             trap 'stop_download INT 130' INT
             trap 'stop_download QUIT 131' QUIT
+            trap 'stop_download TERM 143' TERM
             curl --fail --location --retry 3 "$url" --output "$download" &
             curl_pid=$!
             curl_status=0
@@ -108,7 +112,7 @@ _native target prefix cache:
                 exit 1
             }
             mv "$download" "$archive"
-            trap - EXIT INT QUIT
+            trap - EXIT INT QUIT TERM
         fi
         extracted=$(mktemp -d "$root/source.XXXXXX")
         trap 'rm -rf "$extracted"' EXIT
