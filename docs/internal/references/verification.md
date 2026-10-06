@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 20:10
-last_modified: 2026-10-06 12:09
+last_modified: 2026-10-06 14:27
 status: current
 ---
 
@@ -318,13 +318,12 @@ that Lip Gloss is absent; the CLI demo uses it.
 | :--- | :--- |
 | [Real framed session](../../../session_test.go) | Idle push rendering, child title, native SID/group/argv/session inventory, real PTY window size, settings and foreground group, observer-copy isolation, termios restoration and closed-controller rejection. Cancellation restores the terminal before observers drain, returns the cause and ends every owned process group. An observer panic or `runtime.Goexit` ends the session through shutdown, also during the shutdown drain. Error and cancellation cleanup finish while a detached process holds the slave, also when flow control has stopped child output. |
 | [Wake pipe](../../../wake_test.go) | Native pipe wake, coalescing on a full pipe, and failure propagation to the event loop and cleanup. |
-| [Native routing](../../../routing_test.go) | Original-byte agreement, native key conversion, Alt and produced-character conversion, paste envelopes, focus, localized cell and pixel mouse reports, buttonless releases and capture gestures. |
-| [Cursor and keypad provenance](../../../routing_test.go) | SS3 and C1 cursor input converts for a normal child. SS3 and C1 keypad 0 and SS3 Enter convert for a numeric child; matching C1 application input stays exact. |
+| [Native routing](../../../routing_test.go) | Keys reach the child as the outer terminal sent them, also while outer and child keyboard modes differ and for a key without a native key code; paste envelopes, focus, localized cell and pixel mouse reports, buttonless releases, capture gestures, and the routed-input bound that mouse re-encoding reaches. |
 | [Native graphics profile](../../../internal/emulator/profile_test.go) | Disabled Kitty graphics does not return a positive capability reply before or after reset and alternate-screen switches. |
 | [Native process ownership](../../../internal/process/snapshot_test.go), [groups](../../../internal/process/groups_test.go), [Darwin groups](../../../internal/process/groups_darwin_test.go), [Darwin argv](../../../internal/process/args_darwin_test.go) | Current native fields, runtime cwd and owned copies. Same-session inventory survives a reaped launch leader. Darwin group exit follows member states, and Darwin empty argv0 and environment alignment have dedicated native tests. |
 | [Live border](../../../border_test.go) | Updates before and during Run, closed-session rejection, and the applied native grid and actual PTY size. Measured cell pixels are preserved when the outer winsize has only cells. |
-| [Capture negotiation](../../../console_test.go) | A native outer terminal gets Kitty disambiguation and alternate keys only with explicit capture, for a child that does not disambiguate; a disambiguating child keeps its own flags. The outer keyboard state is restored, and a Kitty reply that arrives after the probe leaves the flags the session found in place. With Kitty unavailable, capture selects the reported modifyOtherKeys mode 2 and restores its entry value. |
-| [Example CLI](../../../cmd/tui-frame/session_test.go) | Real-PTY Ctrl+1 layout, Ctrl+2 independent backgrounds, Ctrl+3 child border with actual PTY resize, excluded release reports, ordinary digits and unmatched keys, and termios restoration. Other CLI tests cover Ctrl+Q, shutdown failures after Ctrl+Q, complete argv, exit and signal outcomes, and the embedded guide and help. |
+| [Keyboard mode mirroring](../../../console_test.go) | With capture set, a native outer terminal runs the child's Kitty flags where it reported Kitty support and none otherwise, and the child's modifyOtherKeys mode where it reported one; restoration returns its entry modes. A child's Kitty keyboard query gets no reply until the terminal reports Kitty support, also after the probe, while DA1 and DECRQM replies in the same output arrive. A Kitty reply after the probe leaves the flags the session found in place. |
+| [Example CLI](../../../cmd/tui-frame/session_test.go) | Real-PTY Ctrl+B prefix with 1 for layout, 2 for independent backgrounds and 3 for the child border with actual PTY resize, in legacy and Kitty-with-release-events form: releases and repeats between the keys, a forwarded second Ctrl+B, a discarded other key, ordinary digits and unmatched keys, and termios restoration. Other CLI tests cover Ctrl+Q, shutdown failures after Ctrl+Q, complete argv, exit and signal outcomes, and the embedded guide and help. |
 
 Other root-package tests cover capture dispositions (`capture_test.go`),
 composition (`composition_test.go`), layout and invalidation
