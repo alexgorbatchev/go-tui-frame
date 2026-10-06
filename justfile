@@ -77,7 +77,8 @@ _native target prefix cache:
         # control ignores SIGINT and SIGQUIT, so this trap stops curl,
         # removes the file, and re-raises the signal ($1). SIGTERM takes the
         # same path: when the whole group gets it, just forwards a second
-        # one, which kills macOS's /bin/bash 3.2 before its EXIT trap runs.
+        # one, which can kill bash before its EXIT trap runs. This happens
+        # with macOS's /bin/bash 3.2, and with bash 5.2 during the check.
         # bash, except macOS's /bin/bash 3.2, ignores SIGQUIT again once the
         # trap is reset, so the shell then exits with $2, the status bash
         # gives a command that the signal ends: 128 plus its POSIX number
