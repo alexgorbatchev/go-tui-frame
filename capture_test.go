@@ -60,6 +60,47 @@ func TestConsumedPressKeepsRepeatAndReleaseOutOfChild(t *testing.T) {
 	}
 }
 
+// A press decides who owns its release even when the two reports identify the
+// key differently. Capture requests alternate keys only while the child lacks
+// disambiguation, so a child flag change between press and release adds or
+// drops the base layout key of a non-US key such as Russian и. A win32 report
+// keeps its virtual key while its code follows the modifiers. Distinct
+// physical keys on a Dvorak layout keep separate gestures.
+func TestConsumedPressOwnsReleaseAcrossKeyReportForms(t *testing.T) {
+	for _, tt := range []struct {
+		name, press, release string
+		want                 Disposition
+	}{
+		{"base layout key dropped", "\x1b[1080::98;5u", "\x1b[1080;5:3u", Consume},
+		{"base layout key added", "\x1b[1080;5u", "\x1b[1080::98;5:3u", Consume},
+		{"win32 code changes", "\x1b[66;48;1080;1;8;1_", "\x1b[66;48;0;0;8;1_", Consume},
+		{"different Dvorak key", "\x1b[120::98;5u", "\x1b[98::110;5:3u", Pass},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := keyboardFilter{handler: func(in Input) Disposition {
+				if _, press := in.Key.(uv.KeyPressEvent); press {
+					return Consume
+				}
+				return Pass
+			}}
+			f.setReleases(true)
+			press, release := routerPackets(t, tt.press), routerPackets(t, tt.release)
+			if len(press) != 1 || len(release) != 1 {
+				t.Fatalf("decoded %d press and %d release packets", len(press), len(release))
+			}
+			if got, err := f.handle(press[0]); err != nil || got != Consume {
+				t.Fatalf("press %q = %v, %v", tt.press, got, err)
+			}
+			if _, ok := release[0].Event.(uv.KeyReleaseEvent); !ok {
+				t.Fatalf("release %q decoded as %T", tt.release, release[0].Event)
+			}
+			if got, err := f.handle(release[0]); err != nil || got != tt.want {
+				t.Fatalf("release %q after press %q = %v, %v; want %v", tt.release, tt.press, got, err, tt.want)
+			}
+		})
+	}
+}
+
 func TestLegacyCaptureDoesNotLatchWithoutReleases(t *testing.T) {
 	f := keyboardFilter{handler: func(in Input) Disposition {
 		if in.Key.Key().MatchString("ctrl+q") {

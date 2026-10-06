@@ -13,7 +13,27 @@ import (
 type keyboardFilter struct {
 	handler  func(Input) Disposition
 	releases bool
-	gestures map[rune]Disposition
+	gestures []gesture
+}
+
+// gesture records who owns a held key's repeats and release.
+type gesture struct {
+	code, base  rune
+	disposition Disposition
+}
+
+// continues reports whether k is a later report of the held key. Two reports
+// that both carry a base layout key compare that physical key, because a
+// win32 report keeps its virtual key while its code follows the modifiers.
+// Otherwise they compare the code, which a Kitty report carries with or
+// without alternate keys: Capture requests those only while the child lacks
+// disambiguation, so a child flag change can add or drop the base layout key
+// between a press and its release.
+func (g gesture) continues(k uv.Key) bool {
+	if g.base != 0 && k.BaseCode != 0 {
+		return g.base == k.BaseCode
+	}
+	return g.code == k.Code
 }
 
 func (f *keyboardFilter) setReleases(enabled bool) {
@@ -35,27 +55,30 @@ func (f *keyboardFilter) handle(packet input.Packet) (Disposition, error) {
 	if !f.releases {
 		return disposition, nil
 	}
-	id := key.Key().Code
-	if base := key.Key().BaseCode; base != 0 {
-		id = base
+	k := key.Key()
+	held := -1
+	for i, g := range f.gestures {
+		if g.continues(k) {
+			held = i
+			break
+		}
 	}
-	previous, held := f.gestures[id]
 	switch ev := key.(type) {
 	case uv.KeyReleaseEvent:
-		if held {
-			disposition = previous
-			delete(f.gestures, id)
+		if held >= 0 {
+			disposition = f.gestures[held].disposition
+			f.gestures = slices.Delete(f.gestures, held, held+1)
 		}
 	case uv.KeyPressEvent:
-		if held && ev.IsRepeat {
-			if previous == Consume {
+		switch {
+		case held >= 0 && ev.IsRepeat:
+			if f.gestures[held].disposition == Consume {
 				disposition = Consume
 			}
-		} else {
-			if f.gestures == nil {
-				f.gestures = make(map[rune]Disposition)
-			}
-			f.gestures[id] = disposition
+		case held >= 0:
+			f.gestures[held] = gesture{code: k.Code, base: k.BaseCode, disposition: disposition}
+		default:
+			f.gestures = append(f.gestures, gesture{code: k.Code, base: k.BaseCode, disposition: disposition})
 		}
 	}
 	return disposition, nil
