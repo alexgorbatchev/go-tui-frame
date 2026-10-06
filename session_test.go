@@ -654,7 +654,9 @@ func TestSessionErrorCleanupIgnoresDetachedSlaveHolder(t *testing.T) {
 	// Holding the first child output until cleanup has finished overflows the
 	// observation queue, so the loop returns while the child is still writing.
 	d := startDetached(t, nil, []EventKind{ChildOutput}, func(_ Event, hold <-chan struct{}) { <-hold })
-	d.finish(t, awaitTermios(d.h, d.before, 5*time.Second))
+	// Reading the unread output releases the leader at once. Finishing within
+	// half the drain deadline rules out a release by the deadline's hangup.
+	d.finish(t, awaitTermios(d.h, d.before, drainTimeout/2))
 }
 
 // Output stopped by flow control cannot be read, so reading the child PTY
