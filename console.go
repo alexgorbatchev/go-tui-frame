@@ -31,7 +31,7 @@ var consoleOwners = struct {
 
 // Only modes with an observed entry value are changed. The alternate screen is
 // required because its prior contents cannot be reconstructed from a TTY.
-var consoleModes = []ansi.DECMode{1, 5, 7, 9, 12, 25, 66, 67, 1000, 1001, 1002, 1003, 1004, 1005, 1006, alternateScrollMode, 1015, 1016, 1035, 1036, 1039, 1049, 2004, synchronizedOutputMode, 2027, 2031}
+var consoleModes = []ansi.DECMode{1, 5, 7, 9, 12, 25, 66, 67, 1000, 1001, 1002, 1003, 1004, 1005, 1006, alternateScrollMode, 1015, 1016, 1035, 1036, 1039, ansi.ModeAltScreenSaveCursor, 2004, synchronizedOutputMode, 2027, 2031}
 
 // errAlternateScreen fails startup on a terminal whose screen the session
 // could not leave as it found it.
@@ -213,7 +213,7 @@ func (c *console) probe(ctx context.Context, events *eventDispatcher, timeout ti
 	// terminal can switch to. A terminal that cannot switch ignores the switch
 	// enter writes, so the first redraw would erase the screen it shows. A
 	// missing report reads as not recognized.
-	if c.entry[1049] != ansi.ModeReset {
+	if c.entry[ansi.ModeAltScreenSaveCursor] != ansi.ModeReset {
 		return nil, errAlternateScreen
 	}
 	return saved, nil
@@ -447,7 +447,7 @@ func (c *console) setModify(level int) error {
 
 func (c *console) writeEntryModes() error {
 	for _, m := range consoleModes {
-		if m == 1049 || !c.switchable(m) {
+		if m == ansi.ModeAltScreenSaveCursor || !c.switchable(m) {
 			continue
 		}
 		on := c.entry[m] == ansi.ModeSet
