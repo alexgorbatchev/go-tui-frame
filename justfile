@@ -68,7 +68,7 @@ _native target prefix cache:
         git_local_env=$(git rev-parse --local-env-vars)
     fi
     (
-        unset $git_local_env
+        unset -v $git_local_env
         GIT_CEILING_DIRECTORIES="$root" zig build -Demit-lib-vt -Demit-xcframework=false -Doptimize=ReleaseFast -Dtarget="$1" --prefix "$root/$2" --cache-dir "$root/$3" --global-cache-dir "$root/zig-global-cache"
     )
     PKG_CONFIG_PATH="$root/$2/share/pkgconfig" pkg-config --static --libs --cflags libghostty-vt-static
