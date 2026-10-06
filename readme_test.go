@@ -1,51 +1,206 @@
 package frame
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/alexgorbatchev/go-tui-frame/internal/emulator"
+	ghostty "go.mitchellh.com/libghostty"
+	"golang.org/x/sys/unix"
 )
 
-func TestReadmeExamplesBuild(t *testing.T) {
+// TestReadmeExamples builds each program the README's Go examples compose
+// and runs the Keyboard Capture program on a native terminal.
+func TestReadmeExamples(t *testing.T) {
 	doc, err := os.ReadFile("README.md")
 	if err != nil {
 		t.Fatal(err)
 	}
 	program := readmeGoExample(t, string(doc), "package main")
-	call := "result, err := app.Run(context.Background())"
-	if !strings.Contains(program, call) {
-		t.Fatal("README session call changed; update example composition")
+	call, imports := "result, err := app.Run(context.Background())", "import (\n"
+	if !strings.Contains(program, call) || !strings.Contains(program, imports) {
+		t.Fatal("README session call or imports changed; update example composition")
 	}
-	for _, tt := range []struct{ name, code string }{
-		{"showcase", program},
-		{"capture", strings.Replace(program, call, readmeGoExample(t, string(doc), "ctx, cancel"), 1)},
-		{"plain", strings.Replace(program, call, readmeGoExample(t, string(doc), "app.Header")+"\n"+call, 1)},
+	// Keyboard Capture adds the errors import, replaces the Run call, and adds
+	// package-level declarations.
+	capture := strings.Replace(program, imports, imports+"\t\"errors\"\n", 1)
+	capture = strings.Replace(capture, call, readmeGoExample(t, string(doc), "ctx, cancel"), 1) +
+		"\n\n" + readmeGoExample(t, string(doc), "var errQuit") + "\n"
+	for _, tt := range []struct {
+		name, code string
+		// run checks the built program's behavior; nil only builds it.
+		run func(t *testing.T, binary string)
+	}{
+		{"showcase", program, nil},
+		{"capture", capture, runReadmeCapture},
+		{"plain", strings.Replace(program, call, readmeGoExample(t, string(doc), "app.Header")+"\n"+call, 1), nil},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := os.MkdirAll(".tmp", 0o700); err != nil {
-				t.Fatal(err)
-			}
-			dir, err := os.MkdirTemp(".tmp", "readme-")
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() {
-				if err := os.RemoveAll(dir); err != nil {
-					t.Error(err)
-				}
-			})
+			dir := readmeTempDir(t)
 			source := filepath.Join(dir, "main.go")
 			if err := os.WriteFile(source, []byte(tt.code), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			cmd := exec.CommandContext(t.Context(), "go", "build", "-o", filepath.Join(dir, "example"), source)
+			binary := filepath.Join(dir, "example")
+			args := []string{"build", "-o", binary}
+			if runtime.GOOS == "linux" {
+				// The native build setup links Linux consumers statically with musl.
+				args = append(args, "-ldflags=-linkmode=external -extldflags=-static")
+			}
+			cmd := exec.CommandContext(t.Context(), "go", append(args, source)...)
 			if out, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("build README example: %v\n%s", err, out)
 			}
+			if tt.run != nil {
+				tt.run(t, binary)
+			}
 		})
 	}
+}
+
+// runReadmeCapture runs the Keyboard Capture program as a user does, with
+// standard input and output on a native terminal. Each case installs its
+// child as the nvim the program finds on PATH, so the documented source runs
+// unchanged.
+func runReadmeCapture(t *testing.T, binary string) {
+	for _, tt := range []struct {
+		name string
+		// child is the sh script the program runs as nvim.
+		child string
+		// quitAfter is child output after which the case presses Ctrl+Q; empty
+		// lets the child exit on its own.
+		quitAfter string
+		code      int
+		stderr    *regexp.Regexp
+	}{
+		{
+			name:      "Ctrl+Q",
+			child:     "printf started; exec sleep 30",
+			quitAfter: "started",
+			stderr:    regexp.MustCompile(`^$`),
+		},
+		{
+			name:   "child exit status",
+			child:  "exit 7",
+			code:   1,
+			stderr: regexp.MustCompile(`^exit status 7\n$`),
+		},
+		{
+			// The child answers the quit's SIGTERM by switching to 132 columns
+			// (DECCOLM), which the viewport cannot fit, so a session error
+			// follows the quit.
+			name:      "Ctrl+Q with a later session error",
+			child:     `trap 'printf "\033[?40h\033[?3h"' TERM; printf started; while :; do sleep 1; done`,
+			quitAfter: "started",
+			code:      1,
+			stderr:    regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(ErrGeometry.Error()) + `: `),
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, binary)
+			cmd.Env = readmeChildEnv(t, tt.child)
+			var stderr strings.Builder
+			cmd.Stdin, cmd.Stdout, cmd.Stderr = h.slave, h.slave, &stderr
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			var waitErr error
+			exited := make(chan struct{})
+			go func() {
+				defer close(exited)
+				waitErr = cmd.Wait()
+			}()
+			t.Cleanup(func() {
+				cancel()
+				<-exited
+				if t.Failed() {
+					t.Logf("README program: %v, stderr %q", waitErr, stderr.String())
+				}
+			})
+			if tt.quitAfter != "" {
+				awaitText(t, h, tt.quitAfter)
+				pressCtrlQ(t, h)
+			}
+			<-exited
+			if code := cmd.ProcessState.ExitCode(); code != tt.code || !tt.stderr.MatchString(stderr.String()) {
+				t.Fatalf("README program exited %d (%v) with stderr %q, want status %d and stderr matching %q",
+					code, waitErr, stderr.String(), tt.code, tt.stderr)
+			}
+		})
+	}
+}
+
+// readmeChildEnv returns this process's environment with a PATH whose nvim
+// runs script with sh, ignoring the arguments it receives.
+func readmeChildEnv(t *testing.T, script string) []string {
+	t.Helper()
+	// exec.LookPath rejects a relative PATH entry's result.
+	dir, err := filepath.Abs(readmeTempDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "nvim"), []byte("#!/bin/sh\n"+script+"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The last PATH entry wins in an exec.Cmd environment.
+	return append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// pressCtrlQ makes the outer terminal report a Ctrl+Q press under the
+// keyboard protocol the frame's capture negotiated.
+func pressCtrlQ(t *testing.T, h *terminalHarness) {
+	t.Helper()
+	awaitOuter(t, h, "the capture keyboard flags", func(s emulator.State) bool {
+		return s.KittyKeyboardFlags&ghostty.KittyKeyDisambiguate != 0
+	})
+	event, err := ghostty.NewKeyEvent()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer event.Close()
+	event.SetAction(ghostty.KeyActionPress)
+	event.SetKey(ghostty.KeyQ)
+	event.SetMods(ghostty.ModCtrl)
+	event.SetUTF8("q")
+	event.SetUnshiftedCodepoint('q')
+	h.mu.Lock()
+	report, err := h.em.EncodeKey(event, ghostty.OptionAsAltTrue)
+	h.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := unix.Write(h.fd, report); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// readmeTempDir returns a new directory under the repository's .tmp that is
+// removed when the test ends.
+func readmeTempDir(t *testing.T) string {
+	t.Helper()
+	if err := os.MkdirAll(".tmp", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.MkdirTemp(".tmp", "readme-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Error(err)
+		}
+	})
+	return dir
 }
 
 func readmeGoExample(t *testing.T, doc, prefix string) string {

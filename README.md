@@ -184,26 +184,53 @@ Region reservations stay fixed. Outer resize recomputes their canvases and the c
 
 `Result.ProcessState` contains the child exit outcome after a successful start and wait. A nonzero child exit is a result; configuration, startup, transport, observation, drain, and restoration failures are session errors. `DrainError` and `CleanupError` preserve their respective outcomes. Inspect the result as well as the returned error.
 
-Cancellation sends SIGTERM and SIGCONT to observed groups in the owned child session, then SIGKILL after one second if needed. If the launch leader has not exited two seconds after SIGKILL, the session closes the child PTY, discarding output it has not read, and waits for the leader; the discarded output is not reported as an error. This bound matters on macOS, where an exiting session leader waits for its queued output to be read, and output that flow control stopped, as Ctrl+S does, cannot be read. Output drain has a two-second deadline after the launch leader exits. Descendants that create another session can escape cleanup; suspend/resume of the wrapper's terminal session is unsupported.
+Cancellation sends SIGTERM and SIGCONT to observed groups in the owned child session, then SIGKILL after one second if needed. If the launch leader has not exited two seconds after SIGKILL, the session closes the child PTY, discarding output it has not read, and waits for the leader; the discarded output is not reported as an error. This bound matters on macOS, where an exiting session leader waits for its queued output to be read, and output that flow control stopped, as Ctrl+S does, cannot be read. Output drain has a two-second deadline after the launch leader exits. Descendants that create another session can escape cleanup; suspend/resume of the wrapper's terminal session is unsupported. Canceling the context while `Run` executes makes it return the context's cause (`context.Cause`), joined with any errors from the shutdown that follows; a session error that ended the session first is returned without the cause. A canceled session therefore returns an error even when nothing failed; cancel with a cause of your own to recognize a requested stop, as [Keyboard Capture](#keyboard-capture) does.
 
 # Keyboard Capture
 
-Capture is opt-in. To add Ctrl+Q to the Quick Start, import Ultraviolet as `uv` and replace its `Run` call with:
+Capture is opt-in. To add Ctrl+Q to the Quick Start, add `errors` to its imports and replace its `Run` call with the following, keeping the error and exit-status checks after it:
 
 ```go
-ctx, cancel := context.WithCancel(context.Background())
-defer cancel()
+ctx, cancel := context.WithCancelCause(context.Background())
+defer cancel(nil)
 
 result, err := app.Capture(func(input frame.Input) frame.Disposition {
 	if !input.Key.Key().MatchString("ctrl+q") {
 		return frame.Pass
 	}
 	if _, pressed := input.Key.(uv.KeyPressEvent); pressed {
-		cancel()
+		cancel(errQuit)
 	}
 	return frame.Consume
 }).Run(ctx)
+if quitOnly(err) {
+	return
+}
 ```
+
+Then add the quit cause and its check at package level:
+
+```go
+var errQuit = errors.New("quit requested")
+
+// quitOnly reports whether err holds errQuit and nothing else. Run joins the
+// cancellation cause with any errors from the shutdown that follows.
+func quitOnly(err error) bool {
+	joined, ok := err.(interface{ Unwrap() []error })
+	if !ok {
+		return err == errQuit
+	}
+	errs := joined.Unwrap()
+	for _, e := range errs {
+		if !quitOnly(e) {
+			return false
+		}
+	}
+	return len(errs) > 0
+}
+```
+
+When nothing else fails, a quit while the child runs makes `Run` return an error that holds only `errQuit`, the cancellation cause, and `Result.ProcessState` reports how the child ended once the frame terminated it rather than an outcome of its own. `main` therefore returns, with status 0, before the Quick Start's checks. Errors from the shutdown that follows, such as a terminal that could not be restored, are joined with the cause; `errors.Is(err, errQuit)` would match them too, while `quitOnly` leaves them to the error check, which reports them and exits 1.
 
 Use `uv "github.com/charmbracelet/ultraviolet"`. `Input.Key` carries the recognized key event; `Input.Raw` is an owned copy of its original bytes. A Kitty report fills the key's `BaseCode` and `ShiftedCode` only with alternate keys: the child's own, or those capture adds for a child without Kitty disambiguation. `String()` returns the key's text when it has any and otherwise falls back to `Keystroke()`, which prefers `BaseCode`. Russian Ctrl+й therefore reads as `ctrl+q` with alternate keys and as `ctrl+й` while a child that disambiguates without them runs; `MatchString("ctrl+q")` matches it in neither case. For a binding with Ctrl or Super, such as `ctrl+q`, `MatchString` compares only the reported key code and modifiers, which alternate keys do not change, so the binding holds for every child. Lock state does not count as a modifier unless the binding names it: a Kitty report carries the bit of an enabled Caps Lock or Num Lock, and `ctrl+q` still matches it. Caps Lock counts only for a key whose text has a character that `unicode.ToUpper` and `unicode.ToLower` map to different runes, so not `ß`; such a key matches through its text, so Caps Lock with `a` matches `A` but not `a`. An Alt binding holds the same way only where Alt does not type a character: on macOS, an Option key that types a character arrives as that text unless the outer terminal reports every key as an escape code. `MatchString` also compares text, which alternate keys can change, so a Shift-only printable binding such as `!` can depend on the child's flags: when the outer terminal reports every key as an escape code, US Shift+1 decodes with the text `1` without alternate keys or associated text and with `!` when either is on. `Pass` forwards input through normal child routing; `Consume` withholds it. This handler acts on presses, including reported repeats, and consumes matching releases without another action. Capture runs inline and must return promptly.
 
