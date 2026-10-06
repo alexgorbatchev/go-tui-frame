@@ -171,8 +171,10 @@ func TestPreferenceRepliesValidateAndRetainOnlySolicitedValues(t *testing.T) {
 			t.Errorf("solicited reply was not consumed: %q", reply)
 		}
 	}
-	if preferenceReply(t, c, "\x1b]11;#000000\x07") {
-		t.Error("duplicate reply was consumed")
+	for _, reply := range []string{"\x1b]11;#000000\x07", "\x1b[?997;1n"} {
+		if preferenceReply(t, c, reply) {
+			t.Errorf("duplicate reply was consumed: %q", reply)
+		}
 	}
 	em, err := emulator.New(c.childOptions(emulator.Size{Cols: 10, Rows: 3}))
 	if err != nil {
