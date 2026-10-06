@@ -155,7 +155,9 @@ func (f *Frame[T]) Capture(handler func(Input) Disposition) *Frame[T] {
 
 // Observe receives durable observations without consuming input.
 // A handler panic ends the session as cancellation does, and Run returns an
-// error with the panic value and stack.
+// error with the panic value and stack. A handler that calls runtime.Goexit,
+// as t.FailNow and t.Fatal do, ends the session the same way, and Run returns
+// an error that names runtime.Goexit, with the stack.
 func (f *Frame[T]) Observe(handler func(Event)) *Frame[T] {
 	f.configure(func() { f.observe, f.observedKinds = handler, allEvents })
 	return f
@@ -165,7 +167,9 @@ func (f *Frame[T]) Observe(handler func(Event)) *Frame[T] {
 // disables observations; unknown kinds fail configuration when Run begins.
 // StateChanged retains one owned snapshot per child-output read when selected.
 // A handler panic ends the session as cancellation does, and Run returns an
-// error with the panic value and stack.
+// error with the panic value and stack. A handler that calls runtime.Goexit,
+// as t.FailNow and t.Fatal do, ends the session the same way, and Run returns
+// an error that names runtime.Goexit, with the stack.
 func (f *Frame[T]) ObserveEvents(kinds []EventKind, handler func(Event)) *Frame[T] {
 	f.configure(func() {
 		mask, err := selectEvents(kinds)

@@ -2,6 +2,7 @@ package frame
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime/debug"
 	"slices"
@@ -20,12 +21,14 @@ const (
 
 // eventDispatcher separates consumer work from terminal transport. The budget
 // includes the current callback until it returns, as well as queued records;
-// bytes is their combined weight. err holds the first callback panic, after
-// which no record reaches the callback.
+// bytes is their combined weight. err holds the first callback failure, a
+// panic or runtime.Goexit, after which no record reaches the callback.
 type eventDispatcher struct {
 	mu       sync.Mutex
 	queue    chan eventRecord
 	done     chan struct{}
+	handler  func(Event)
+	fail     context.CancelCauseFunc
 	closed   bool
 	err      error
 	bytes    int
@@ -86,36 +89,76 @@ type eventRecord struct {
 }
 
 // newEventDispatcher delivers selected events to handler on a goroutine that
-// no session defer covers. A handler panic therefore becomes an error that
-// cancels the session through fail, so shutdown still terminates the child and
-// restores the terminal.
+// no session defer covers. A handler panic or runtime.Goexit therefore becomes
+// an error that cancels the session through fail, so shutdown still terminates
+// the child and restores the terminal.
 func newEventDispatcher(kinds eventMask, fail context.CancelCauseFunc, handler func(Event)) *eventDispatcher {
 	if handler == nil || kinds == 0 {
 		return nil
 	}
 	d := &eventDispatcher{queue: make(chan eventRecord, observationQueueLimit), done: make(chan struct{}),
-		offsets: make(map[EventKind]uint64), kinds: kinds}
-	go func() {
-		defer close(d.done)
-		delivering := true
-		for record := range d.queue {
-			// Records admitted before a panic are still drained, releasing their
-			// weight, so close joins and the budget stays exact.
-			if delivering {
-				if err := callObserver(handler, record.event); err != nil {
-					delivering = false
-					d.mu.Lock()
-					d.err = err
-					d.mu.Unlock()
-					fail(err)
-				}
-			}
-			d.mu.Lock()
-			d.bytes -= record.weight
-			d.mu.Unlock()
-		}
-	}()
+		handler: handler, fail: fail, offsets: make(map[EventKind]uint64), kinds: kinds}
+	go d.drain(true)
 	return d
+}
+
+// drain receives admitted records until close, then closes done. It runs the
+// callback on each record while delivering is true. Records admitted before a
+// callback failure are still drained, releasing their weight, so close joins
+// and the budget stays exact.
+func (d *eventDispatcher) drain(delivering bool) {
+	for record := range d.queue {
+		if delivering {
+			delivering = d.deliver(record)
+		}
+		d.release(record.weight)
+	}
+	close(d.done)
+}
+
+// deliver runs the callback for one record and reports whether delivery
+// continues. runtime.Goexit cannot be recovered: after running the deferred
+// calls, it ends this goroutine, which never returns to drain. The deferred
+// call therefore stops delivery, releases the record, and starts another drain
+// for the records still queued.
+func (d *eventDispatcher) deliver(record eventRecord) bool {
+	returned := false
+	defer func() {
+		// callObserver recovers panics, so only Goexit skips the assignment. A
+		// nil recover value would not identify Goexit: with GODEBUG=panicnil=1,
+		// recover returns nil for panic(nil) too, and this goroutine resumes.
+		if returned {
+			return
+		}
+		// Goexit runs this call on top of the callback's frames, so the stack
+		// shows where the callback exited.
+		d.stop(fmt.Errorf("%w\n\n%s", errObserverGoexit, debug.Stack()))
+		d.release(record.weight)
+		go d.drain(false)
+	}()
+	err := callObserver(d.handler, record.event)
+	returned = true
+	if err != nil {
+		d.stop(err)
+		return false
+	}
+	return true
+}
+
+// stop ends delivery with the callback failure err and cancels the session
+// with it as the cause.
+func (d *eventDispatcher) stop(err error) {
+	d.mu.Lock()
+	d.err = err
+	d.mu.Unlock()
+	d.fail(err)
+}
+
+// release returns a drained record's weight to the budget.
+func (d *eventDispatcher) release(weight int) {
+	d.mu.Lock()
+	d.bytes -= weight
+	d.mu.Unlock()
 }
 
 // callObserver runs one callback and converts its panic into an error carrying
@@ -130,6 +173,10 @@ func callObserver(handler func(Event), ev Event) (err error) {
 	return nil
 }
 
+// errObserverGoexit reports a callback that ended the dispatcher's goroutine
+// with runtime.Goexit, as t.FailNow, t.Fatal, and t.SkipNow do.
+var errObserverGoexit = errors.New("observer called runtime.Goexit")
+
 func observerPanicError(value any, stack []byte) error {
 	if err, ok := value.(error); ok {
 		return fmt.Errorf("observer panicked: %w\n\n%s", err, stack)
@@ -137,7 +184,8 @@ func observerPanicError(value any, stack []byte) error {
 	return fmt.Errorf("observer panicked: %v\n\n%s", value, stack)
 }
 
-// failure returns the callback panic that ended delivery, if any.
+// failure returns the callback panic or runtime.Goexit that ended delivery, if
+// any.
 func (d *eventDispatcher) failure() error {
 	if d == nil {
 		return nil
@@ -157,7 +205,7 @@ func (d *eventDispatcher) emit(ev Event) error {
 		return ErrSessionClosed
 	}
 	if d.err != nil {
-		// No callback will run again. The session learns of the panic through
+		// No callback will run again. The session learns of the failure through
 		// its canceled context; copying or queueing the record would only spend
 		// the budget during shutdown.
 		return nil

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -602,94 +603,126 @@ func TestCancellationTerminatesAllOwnedSessionGroups(t *testing.T) {
 	awaitGone(t, pid, "owned descendant in separate process group survived cancellation")
 }
 
-func TestObserverPanicEndsSessionThroughShutdown(t *testing.T) {
-	h := newHarness(t)
-	before := termiosState(t, h)
-	cmd, file := descendantCommand(t, "groups")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	fault := errors.New("observer fault on Started")
-	leaders, release := make(chan int, 1), make(chan struct{})
-	// Capture makes the frame enable Kitty disambiguation, a keyboard mode only
-	// restoration can disable on the outer terminal.
-	app := New(cmd, struct{}{}).Terminal(h.slave, h.slave).Capture(func(Input) Disposition { return Pass }).
-		ObserveEvents([]EventKind{Started}, func(e Event) {
-			leaders <- e.Snapshot.Child.PID
-			<-release
-			panic(fault)
-		})
-	done := startRun(ctx, app)
-	var leader int
-	select {
-	case leader = <-leaders:
-	case <-ctx.Done():
-		t.Fatal("Started was not observed", ctx.Err())
-	}
-	descendant := awaitDescendantGroup(t, file, leader)
-	awaitOuter(t, h, "the framed session's modes", func(s emulator.State) bool {
-		return s.Alternate && s.Modes[ghostty.ModeBracketedPaste] && s.KittyKeyboardFlags&ghostty.KittyKeyDisambiguate != 0
-	})
-	close(release)
-	var got runOutcome
-	select {
-	case got = <-done:
-	case <-ctx.Done():
-		t.Fatal("Run did not finish after the observer panicked", ctx.Err())
-	}
-	// The loop adopts the panic as its cancellation cause; Run's drain join
-	// must not report it a second time.
-	requireObserverPanic(t, got.err, fault)
-	if got.result.ProcessState == nil {
-		t.Fatal("Run did not wait for the terminated child")
-	}
-	awaitOuter(t, h, "its entry modes", func(s emulator.State) bool {
-		return !s.Alternate && !s.Modes[ghostty.ModeBracketedPaste] && s.KittyKeyboardFlags == 0
-	})
-	if after := termiosState(t, h); after != before {
-		t.Fatalf("termios was not restored: before %s after %s", before, after)
-	}
-	awaitGone(t, -leader, "launch leader's process group survived the observer panic")
-	awaitGone(t, -descendant, "descendant process group survived the observer panic")
+// observerFault is a way for an observer callback to fail, with the error Run
+// reports for it.
+type observerFault struct {
+	name string
+	fail func()
+	want error
 }
 
-func TestObserverPanicDuringShutdownDrainReachesRun(t *testing.T) {
-	h := newHarness(t)
-	before := termiosState(t, h)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	fault := errors.New("observer fault on Exited")
-	exited, release := make(chan struct{}), make(chan struct{})
-	app := New(childCommand(t), struct{}{}).Terminal(h.slave, h.slave).ObserveEvents([]EventKind{Exited}, func(Event) {
-		close(exited)
-		<-release
-		panic(fault)
-	})
-	done := startRun(ctx, app)
-	awaitText(t, h, "child")
-	if _, err := unix.Write(h.fd, []byte("q")); err != nil {
-		t.Fatal(err)
+// observerFaults lists the callback failures the dispatcher turns into session
+// errors: a panic, reported with its value, and runtime.Goexit, which no
+// recover stops.
+func observerFaults(event EventKind) []observerFault {
+	fault := fmt.Errorf("observer fault on %s", event)
+	return []observerFault{
+		{"panic", func() { panic(fault) }, fault},
+		{"runtime.Goexit", runtime.Goexit, errObserverGoexit},
 	}
-	select {
-	case <-exited:
-	case <-ctx.Done():
-		t.Fatal("Exited was not observed", ctx.Err())
+}
+
+func TestObserverFailureEndsSessionThroughShutdown(t *testing.T) {
+	// The failing callback is a closure of this test, so its name appears in
+	// the reported stack.
+	test := t.Name()
+	for _, fault := range observerFaults(Started) {
+		t.Run(fault.name, func(t *testing.T) {
+			h := newHarness(t)
+			before := termiosState(t, h)
+			cmd, file := descendantCommand(t, "groups")
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			leaders, release := make(chan int, 1), make(chan struct{})
+			// Capture makes the frame enable Kitty disambiguation, a keyboard mode
+			// only restoration can disable on the outer terminal.
+			app := New(cmd, struct{}{}).Terminal(h.slave, h.slave).Capture(func(Input) Disposition { return Pass }).
+				ObserveEvents([]EventKind{Started}, func(e Event) {
+					leaders <- e.Snapshot.Child.PID
+					<-release
+					fault.fail()
+				})
+			done := startRun(ctx, app)
+			var leader int
+			select {
+			case leader = <-leaders:
+			case <-ctx.Done():
+				t.Fatal("Started was not observed", ctx.Err())
+			}
+			descendant := awaitDescendantGroup(t, file, leader)
+			awaitOuter(t, h, "the framed session's modes", func(s emulator.State) bool {
+				return s.Alternate && s.Modes[ghostty.ModeBracketedPaste] && s.KittyKeyboardFlags&ghostty.KittyKeyDisambiguate != 0
+			})
+			close(release)
+			var got runOutcome
+			select {
+			case got = <-done:
+			case <-ctx.Done():
+				t.Fatal("Run did not finish after the observer failed", ctx.Err())
+			}
+			// The loop adopts the failure as its cancellation cause; Run's drain
+			// join must not report it a second time.
+			requireObserverFailure(t, got.err, fault.want, test)
+			if got.result.ProcessState == nil {
+				t.Fatal("Run did not wait for the terminated child")
+			}
+			awaitOuter(t, h, "its entry modes", func(s emulator.State) bool {
+				return !s.Alternate && !s.Modes[ghostty.ModeBracketedPaste] && s.KittyKeyboardFlags == 0
+			})
+			if after := termiosState(t, h); after != before {
+				t.Fatalf("termios was not restored: before %s after %s", before, after)
+			}
+			awaitGone(t, -leader, "launch leader's process group survived the observer failure")
+			awaitGone(t, -descendant, "descendant process group survived the observer failure")
+		})
 	}
-	// Restored termios proves the session loop has returned, so the panic can
-	// reach Run only through the dispatcher's shutdown drain. Release the
-	// observer before asserting so a failure cannot leave Run joined forever.
-	restored := awaitTermios(h, before, 5*time.Second)
-	close(release)
-	select {
-	case got := <-done:
-		if !restored {
-			t.Fatal("terminal was not restored while the observer held Exited")
-		}
-		requireObserverPanic(t, got.err, fault)
-		if got.result.ProcessState == nil || !got.result.ProcessState.Success() {
-			t.Fatalf("child outcome = %v, want its successful exit", got.result.ProcessState)
-		}
-	case <-ctx.Done():
-		t.Fatal("Run did not finish after the observer panicked", ctx.Err())
+}
+
+func TestObserverFailureDuringShutdownDrainReachesRun(t *testing.T) {
+	// The failing callback is a closure of this test, so its name appears in
+	// the reported stack.
+	test := t.Name()
+	for _, fault := range observerFaults(Exited) {
+		t.Run(fault.name, func(t *testing.T) {
+			h := newHarness(t)
+			before := termiosState(t, h)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			exited, release := make(chan struct{}), make(chan struct{})
+			app := New(childCommand(t), struct{}{}).Terminal(h.slave, h.slave).ObserveEvents([]EventKind{Exited}, func(Event) {
+				close(exited)
+				<-release
+				fault.fail()
+			})
+			done := startRun(ctx, app)
+			awaitText(t, h, "child")
+			if _, err := unix.Write(h.fd, []byte("q")); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-exited:
+			case <-ctx.Done():
+				t.Fatal("Exited was not observed", ctx.Err())
+			}
+			// Restored termios proves the session loop has returned, so the failure
+			// can reach Run only through the dispatcher's shutdown drain. Release
+			// the observer before asserting so a failure cannot leave Run joined
+			// forever.
+			restored := awaitTermios(h, before, 5*time.Second)
+			close(release)
+			select {
+			case got := <-done:
+				if !restored {
+					t.Fatal("terminal was not restored while the observer held Exited")
+				}
+				requireObserverFailure(t, got.err, fault.want, test)
+				if got.result.ProcessState == nil || !got.result.ProcessState.Success() {
+					t.Fatalf("child outcome = %v, want its successful exit", got.result.ProcessState)
+				}
+			case <-ctx.Done():
+				t.Fatal("Run did not finish after the observer failed", ctx.Err())
+			}
+		})
 	}
 }
 
@@ -1005,16 +1038,16 @@ func awaitTermios(h *terminalHarness, want string, timeout time.Duration) bool {
 	return false
 }
 
-// requireObserverPanic checks that Run reported fault exactly once, with the
-// stack of the panicking callback, which the calling test function encloses.
-func requireObserverPanic(t *testing.T, err, fault error) {
+// requireObserverFailure checks that Run reported fault exactly once, with the
+// stack of the failing callback, which the test function named test encloses.
+func requireObserverFailure(t *testing.T, err, fault error, test string) {
 	t.Helper()
-	if !errors.Is(err, fault) || !strings.Contains(err.Error(), t.Name()) {
-		t.Fatalf("Run error = %v, want the observer panic value and its stack", err)
+	if !errors.Is(err, fault) || !strings.Contains(err.Error(), test) {
+		t.Fatalf("Run error = %v, want %q and the callback's stack", err, fault)
 	}
-	// Each report of the panic carries the value's text once; the recovered
-	// stack prints argument words, not the value.
+	// Each report carries the fault's text once; the stack prints function
+	// names and argument words, not that text.
 	if n := strings.Count(err.Error(), fault.Error()); n != 1 {
-		t.Fatalf("Run reported the observer panic %d times, want once: %v", n, err)
+		t.Fatalf("Run reported the observer failure %d times, want once: %v", n, err)
 	}
 }

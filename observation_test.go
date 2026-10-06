@@ -204,7 +204,7 @@ func pausedDispatcher(t *testing.T, handler func(Event)) (*eventDispatcher, <-ch
 
 // pausedSelectedDispatcher observes kinds and holds the first delivered
 // record's callback until release, so later records meet a non-idle budget.
-// A callback panic cancels the session through fail.
+// A callback panic or runtime.Goexit cancels the session through fail.
 func pausedSelectedDispatcher(t *testing.T, kinds eventMask, fail context.CancelCauseFunc, handler func(Event)) (*eventDispatcher, <-chan struct{}, func()) {
 	t.Helper()
 	entered, resume := make(chan struct{}), make(chan struct{})
@@ -219,10 +219,11 @@ func pausedSelectedDispatcher(t *testing.T, kinds eventMask, fail context.Cancel
 }
 
 // sessionCancel returns the session cancellation a dispatcher reports a
-// callback panic through, for tests whose handlers must not panic. The
-// dispatcher would otherwise swallow such a panic, so a recorded cause fails
-// the test. Call it before registering the dispatcher's close as a cleanup:
-// cleanups run in reverse order, so the check then follows the final drain.
+// callback panic or runtime.Goexit through, for tests whose handlers must
+// return normally. The dispatcher would otherwise swallow such a failure, so a
+// recorded cause fails the test. Call it before registering the dispatcher's
+// close as a cleanup: cleanups run in reverse order, so the check then follows
+// the final drain.
 func sessionCancel(t *testing.T) context.CancelCauseFunc {
 	t.Helper()
 	// t.Context is canceled before cleanups run, which would set a cause here.
@@ -236,9 +237,9 @@ func sessionCancel(t *testing.T) context.CancelCauseFunc {
 	return cancel
 }
 
-func TestObserverPanicCancelsSessionAndDiscardsLaterRecords(t *testing.T) {
-	// The panicking callbacks are closures of this test, so its name appears in
-	// the recovered stack.
+func TestObserverFailureCancelsSessionAndDiscardsLaterRecords(t *testing.T) {
+	// The failing callbacks are closures of this test, so its name appears in
+	// the stack the dispatcher reports.
 	test := t.Name()
 	var empty []int
 	for _, tt := range []struct {
@@ -252,6 +253,10 @@ func TestObserverPanicCancelsSessionAndDiscardsLaterRecords(t *testing.T) {
 		{"runtime error", func(ev Event) { _ = empty[len(ev.Bytes)] }, func(err error) bool {
 			var runtimeErr runtime.Error
 			return errors.As(err, &runtimeErr) && strings.Contains(err.Error(), "index out of range")
+		}},
+		// No recover stops runtime.Goexit, so the callback's goroutine ends.
+		{"runtime.Goexit", func(Event) { runtime.Goexit() }, func(err error) bool {
+			return errors.Is(err, errObserverGoexit)
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -274,11 +279,11 @@ func TestObserverPanicCancelsSessionAndDiscardsLaterRecords(t *testing.T) {
 			select {
 			case <-ctx.Done():
 			case <-time.After(5 * time.Second):
-				t.Fatal("observer panic did not cancel the session")
+				t.Fatal("observer failure did not cancel the session")
 			}
 			cause := context.Cause(ctx)
 			if !tt.want(cause) || !strings.Contains(cause.Error(), test) {
-				t.Fatalf("session cause = %v, want the panic value and its stack", cause)
+				t.Fatalf("session cause = %v, want the failure and the callback's stack", cause)
 			}
 			snap := Snapshot{Terminal: TerminalSnapshot{Cells: []uv.Cell{{Content: "state", Width: 1}}}}
 			// Over the queue limit: a record still copied and queued would overflow.
@@ -287,11 +292,11 @@ func TestObserverPanicCancelsSessionAndDiscardsLaterRecords(t *testing.T) {
 					t.Fatal(err)
 				}
 			}); allocs != 0 {
-				t.Fatalf("record emitted after the panic allocated %.0f times", allocs)
+				t.Fatalf("record emitted after the failure allocated %.0f times", allocs)
 			}
 			d.close()
 			if calls != 1 {
-				t.Fatalf("callback ran %d times, want only the call that panicked", calls)
+				t.Fatalf("callback ran %d times, want only the call that failed", calls)
 			}
 			if d.bytes != 0 {
 				t.Fatalf("drained dispatcher holds %d bytes", d.bytes)
