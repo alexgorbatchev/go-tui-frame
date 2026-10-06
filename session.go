@@ -733,15 +733,23 @@ func (s *session[T]) monitor(ctx context.Context, stop <-chan struct{}, done cha
 	}
 }
 
-func signalChild(pid int, sig syscall.Signal) error {
-	err := unix.Kill(-pid, sig)
-	if errors.Is(err, unix.ESRCH) {
+// signalChild signals process group pgid. A group that no longer exists, or
+// whose members have all exited, has nothing left to signal.
+func signalChild(pgid int, sig syscall.Signal) error {
+	err := unix.Kill(-pgid, sig)
+	if err == nil || errors.Is(err, unix.ESRCH) {
 		return nil
 	}
-	if err != nil {
-		return fmt.Errorf("signal child process group: %w", err)
+	if errors.Is(err, unix.EPERM) {
+		exited, recheckErr := deniedByExitedGroup(pgid)
+		if exited {
+			return nil
+		}
+		if recheckErr != nil {
+			err = errors.Join(err, recheckErr)
+		}
 	}
-	return nil
+	return fmt.Errorf("signal child process group: %w", err)
 }
 
 func (s *session[T]) signalGroups(sig syscall.Signal) error {
