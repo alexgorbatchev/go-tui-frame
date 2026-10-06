@@ -9,8 +9,9 @@ import (
 )
 
 // keyboardFilter is owned by the session input router. When the negotiated
-// protocol reports releases, the press determines who owns its repeats and
-// final release.
+// protocol reports releases, the press determines who owns its reported
+// repeats and final release. A repeat the terminal sends as plain text or a
+// legacy byte decodes as a new press, which takes over the held key.
 type keyboardFilter struct {
 	handler  func(Input) Disposition
 	releases bool
