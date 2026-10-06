@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alexgorbatchev/go-tui-frame/internal/emulator"
 	ghostty "go.mitchellh.com/libghostty"
 	"golang.org/x/sys/unix"
 )
@@ -186,12 +185,9 @@ func readmeChildEnv(t *testing.T, script string) []string {
 }
 
 // pressCtrlQ makes the outer terminal report a Ctrl+Q press under the
-// keyboard protocol the frame's capture negotiated.
+// keyboard modes the frame mirrored from its child.
 func pressCtrlQ(t *testing.T, h *terminalHarness) {
 	t.Helper()
-	awaitOuter(t, h, "the capture keyboard flags", func(s emulator.State) bool {
-		return s.KittyKeyboardFlags&ghostty.KittyKeyDisambiguate != 0
-	})
 	event, err := ghostty.NewKeyEvent()
 	if err != nil {
 		t.Fatal(err)
@@ -202,15 +198,45 @@ func pressCtrlQ(t *testing.T, h *terminalHarness) {
 	event.SetMods(ghostty.ModCtrl)
 	event.SetUTF8("q")
 	event.SetUnshiftedCodepoint('q')
+	if _, err := unix.Write(h.fd, outerKeyReport(t, h, event)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// outerKeyReport encodes event as the harness terminal reports it in its
+// current keyboard modes, using the native key encoder.
+func outerKeyReport(t *testing.T, h *terminalHarness, event *ghostty.KeyEvent) []byte {
+	t.Helper()
 	h.mu.Lock()
-	report, err := h.em.EncodeKey(event, ghostty.OptionAsAltTrue)
+	s, err := h.em.State()
 	h.mu.Unlock()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := unix.Write(h.fd, report); err != nil {
+	encoder, err := ghostty.NewKeyEncoder()
+	if err != nil {
 		t.Fatal(err)
 	}
+	defer encoder.Close()
+	encoder.SetOptKittyFlags(s.KittyKeyboardFlags)
+	for _, opt := range []struct {
+		option ghostty.KeyEncoderOption
+		on     bool
+	}{
+		{ghostty.KeyEncoderOptModifyOtherKeysState2, s.ModifyOtherKeys2},
+		{ghostty.KeyEncoderOptCursorKeyApplication, s.Modes[ghostty.ModeDECCKM]},
+		{ghostty.KeyEncoderOptKeypadKeyApplication, s.Modes[ghostty.ModeKeypadKeys]},
+		{ghostty.KeyEncoderOptIgnoreKeypadWithNumlock, s.Modes[ghostty.ModeNumlockKeypad]},
+		{ghostty.KeyEncoderOptAltEscPrefix, s.Modes[ghostty.ModeAltEscPrefix]},
+		{ghostty.KeyEncoderOptBackarrowKeyMode, s.Modes[ghostty.ModeBackarrowKeyMode]},
+	} {
+		encoder.SetOptBool(opt.option, opt.on)
+	}
+	report, err := encoder.Encode(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return report
 }
 
 // readmeTempDir returns a new directory under the repository's .tmp that is

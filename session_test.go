@@ -39,6 +39,11 @@ func TestSessionChild(t *testing.T) {
 		countInput(os.Getenv("FRAME_TEST_COUNT_FILE"))
 	}
 	if os.Getenv("FRAME_TEST_MODE") == "groups" {
+		// Kitty disambiguation is a keyboard mode the frame mirrors to the outer
+		// terminal, where only restoration disables it.
+		if _, err := fmt.Fprint(os.Stdout, ansi.PushKittyKeyboard(int(ghostty.KittyKeyDisambiguate))); err != nil {
+			os.Exit(92)
+		}
 		sleeper := startSleeper(&syscall.SysProcAttr{Setpgid: true})
 		if err := sleeper.Wait(); err != nil {
 			os.Exit(97)
@@ -162,15 +167,15 @@ type terminalHarness struct {
 	// keeps the output tail where a query may continue in the next read.
 	answers map[string]string
 	carry   []byte
-	// reports replace the native emulator's DECRPM replies for some modes.
-	reports []modeReport
+	// replacements change the native emulator's replies.
+	replacements []replyReplacement
 	// transcript records what the terminal receives once transcribe is called.
 	transcript *bytes.Buffer
 }
 
-// modeReport is the reply a harness terminal sends in place of each native
-// DECRPM report that native matches.
-type modeReport struct {
+// replyReplacement is the reply a harness terminal sends in place of each
+// native reply that native matches.
+type replyReplacement struct {
 	native *regexp.Regexp
 	reply  []byte
 }
@@ -286,7 +291,7 @@ func (h *terminalHarness) read() {
 				replies = append(replies, e.Bytes...)
 			}
 		}
-		for _, r := range h.reports {
+		for _, r := range h.replacements {
 			replies = r.native.ReplaceAllLiteral(replies, r.reply)
 		}
 		replies = append(replies, h.answerQueries(buf[:n])...)
@@ -379,8 +384,20 @@ func (h *terminalHarness) answerQueries(output []byte) []byte {
 // does. An empty reply models a terminal that does not answer.
 func (h *terminalHarness) report(m ansi.DECMode, reply string) {
 	native := regexp.MustCompile(regexp.QuoteMeta(fmt.Sprintf("\x1b[?%d;", m)) + `\d+` + regexp.QuoteMeta("$y"))
+	h.replace(native, reply)
+}
+
+// withholdKittyKeyboard makes the terminal leave every Kitty keyboard query
+// (CSI ? u) unanswered, as a terminal without the protocol does.
+func (h *terminalHarness) withholdKittyKeyboard() {
+	h.replace(regexp.MustCompile(`\x1b\[\?\d+u`), "")
+}
+
+// replace makes the terminal send reply in place of each native reply that
+// native matches.
+func (h *terminalHarness) replace(native *regexp.Regexp, reply string) {
 	h.mu.Lock()
-	h.reports = append(h.reports, modeReport{native: native, reply: []byte(reply)})
+	h.replacements = append(h.replacements, replyReplacement{native: native, reply: []byte(reply)})
 	h.mu.Unlock()
 }
 
@@ -651,9 +668,9 @@ func TestObserverFailureEndsSessionThroughShutdown(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			leaders, release := make(chan int, 1), make(chan struct{})
-			// Capture makes the frame enable Kitty disambiguation, a keyboard mode
-			// only restoration can disable on the outer terminal.
-			app := New(cmd, struct{}{}).Terminal(h.slave, h.slave).Capture(func(Input) Disposition { return Pass }).
+			// The child requests Kitty disambiguation, which the frame mirrors to
+			// the outer terminal and only restoration disables there.
+			app := New(cmd, struct{}{}).Terminal(h.slave, h.slave).
 				ObserveEvents([]EventKind{Started}, func(e Event) {
 					leaders <- e.Snapshot.Child.PID
 					<-release

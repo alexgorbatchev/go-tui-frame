@@ -148,6 +148,13 @@ func (f *Frame[T]) InheritTerminal(enabled bool) *Frame[T] {
 }
 
 // Capture explicitly filters recognized keyboard events before child routing.
+// It does not change what the outer terminal sends: the terminal runs the
+// child's keyboard modes, and a key the handler passes reaches the child as
+// the terminal sent it. The handler can tell apart only keys the child's
+// protocol distinguishes. With a legacy child, Ctrl+digit arrives as the
+// digit or control character a legacy terminal sends for it, Ctrl+I as Tab,
+// Ctrl+M as Enter, and Ctrl+[ as Escape. A child that enables Kitty
+// disambiguation or modifyOtherKeys mode 2 makes those keys distinct.
 func (f *Frame[T]) Capture(handler func(Input) Disposition) *Frame[T] {
 	f.configure(func() { f.capture = handler })
 	return f

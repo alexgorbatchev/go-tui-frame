@@ -61,9 +61,9 @@ func TestConsumedPressKeepsRepeatAndReleaseOutOfChild(t *testing.T) {
 }
 
 // A press decides who owns its release even when the two reports identify the
-// key differently. Capture requests alternate keys only while the child lacks
-// disambiguation, so a child flag change between press and release adds or
-// drops the base layout key of a non-US key such as Russian и. A win32 report
+// key differently. The outer terminal runs the child's Kitty flags, so a child
+// that turns alternate keys on or off between press and release adds or drops
+// the base layout key of a non-US key such as Russian и. A win32 report
 // keeps its virtual key while its code follows the modifiers. Distinct
 // physical keys on a Dvorak layout keep separate gestures.
 func TestConsumedPressOwnsReleaseAcrossKeyReportForms(t *testing.T) {

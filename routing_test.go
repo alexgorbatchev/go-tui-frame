@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"image"
-	"runtime"
-	"strings"
 	"testing"
 
 	"github.com/alexgorbatchev/go-tui-frame/internal/emulator"
@@ -27,18 +25,7 @@ func newRouterTest(t *testing.T, handler func(Input) Disposition) (*inputRouter,
 	}
 	t.Cleanup(r.close)
 	r.viewport = image.Rect(2, 3, 10, 8)
-	s := routerState(t, em, "")
-	r.host = matchingRouterProfile(s)
 	return r, em
-}
-
-func matchingRouterProfile(s emulator.State) hostInputProfile {
-	return hostInputProfile{
-		KittyFlags: s.KittyKeyboardFlags, ModifyOtherKeys2: s.ModifyOtherKeys2, ModifyOtherKeysKnown: true,
-		ApplicationCursor: s.Modes[ghostty.ModeDECCKM], ApplicationKeypad: s.Modes[ghostty.ModeKeypadKeys],
-		Backarrow: s.Modes[ghostty.ModeBackarrowKeyMode], Numlock: s.Modes[ghostty.ModeNumlockKeypad],
-		AltEscPrefix: s.Modes[ghostty.ModeAltEscPrefix], AltSendsEsc: s.Modes[ghostty.ModeAltSendsEsc],
-	}
 }
 
 func routerState(t *testing.T, em *emulator.Terminal, controls string) emulator.State {
@@ -84,7 +71,6 @@ func routeBytes(t *testing.T, r *inputRouter, s emulator.State, raw string) []by
 func TestRoutingPreservesMatchingKeyboardAndUnknownBytes(t *testing.T) {
 	r, em := newRouterTest(t, nil)
 	s := routerState(t, em, "")
-	r.host = matchingRouterProfile(s)
 	for _, raw := range []string{"é\x1b界\x11", "\x1b[27;6;65~", "\x1b]9999;unknown\x1b\\", "\x1bOP"} {
 		t.Run(raw, func(t *testing.T) {
 			if got := routeBytes(t, r, s, raw); !bytes.Equal(got, []byte(raw)) {
@@ -94,200 +80,53 @@ func TestRoutingPreservesMatchingKeyboardAndUnknownBytes(t *testing.T) {
 	}
 }
 
-func TestRoutingUsesNativeKeyboardEncodingForDifferentModes(t *testing.T) {
-	for _, tt := range []struct{ name, modes, input, want string }{
-		{"application cursor", "\x1b[?1h", "\x1b[A", "\x1bOA"},
-		{"Kitty ctrl", "\x1b[>1u", "\x11", "\x1b[113;5u"},
-		{"Kitty Unicode", "\x1b[>8u", "界", "\x1b[30028u"},
-		{"modifyOtherKeys", "\x1b[>4;2m", "\x11", "\x1b[27;5;113~"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			r, em := newRouterTest(t, nil)
-			s := routerState(t, em, tt.modes)
-			if got := routeBytes(t, r, s, tt.input); string(got) != tt.want {
-				t.Fatalf("native delivery = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-// An outer terminal reports Option that means Alt as Alt with no text, or with
-// the key's own or shifted character, so the child receives its Alt encoding.
-// Host profiles mirror console.syncInput: Capture adds Kitty disambiguation
-// and alternate keys for a child without disambiguation, or modifyOtherKeys
-// mode 2 when Kitty is unavailable.
-// Ghostty applies option-as-alt only on macOS, so these cases go red only there.
-func TestRoutingConvertsAltModifiedKeysToChildAltEncoding(t *testing.T) {
-	const (
-		capture        = ghostty.KittyKeyDisambiguate | ghostty.KittyKeyReportAlternates
-		associatedHost = capture | ghostty.KittyKeyReportAssociated
-	)
+// The outer terminal runs the child's keyboard modes, so a key it reports is
+// already in the child's protocol and reaches the child as the terminal sent
+// it. The modes can still differ: a key typed between a child mode change and
+// the next synchronization arrives in the previous form, and a mode the
+// terminal cannot switch keeps the terminal's form. Neither is rewritten,
+// including a key no native key code describes.
+func TestRoutingForwardsKeysAsSent(t *testing.T) {
 	for _, tt := range []struct {
-		name, modes, input, want string
-		hostKitty                ghostty.KittyKeyFlags
-		hostModifyOtherKeys2     bool
+		name, modes, raw string
+		// hostKitty is the Kitty flags the outer terminal still applies.
+		hostKitty ghostty.KittyKeyFlags
 	}{
-		{name: "Kitty host to legacy child", input: "\x1b[98;3u", want: "\x1bb", hostKitty: capture},
-		{name: "modifyOtherKeys host to legacy child", input: "\x1b[27;3;98~", want: "\x1bb", hostModifyOtherKeys2: true},
-		{
-			name: "Kitty host to modifyOtherKeys child", modes: "\x1b[>4;2m", input: "\x1b[98;3u", want: "\x1b[27;3;98~",
-			hostKitty: capture, hostModifyOtherKeys2: true,
-		},
-		{name: "Kitty host to associated-text child", modes: "\x1b[>16u", input: "\x1b[98;3u", want: "\x1b[98;3u", hostKitty: associatedHost},
-		{name: "own text to associated-text child", modes: "\x1b[>16u", input: "\x1b[98;3;98u", want: "\x1b[98;3u", hostKitty: associatedHost},
-		{name: "reported shifted text to associated-text child", modes: "\x1b[>16u", input: "\x1b[98:66;4;66u", want: "\x1b[98;4u", hostKitty: associatedHost},
-		{name: "upper-case shifted text to associated-text child", modes: "\x1b[>16u", input: "\x1b[98;4;66u", want: "\x1b[98;4u", hostKitty: associatedHost},
+		{name: "normal cursor key to application-cursor child", modes: "\x1b[?1h", raw: "\x1b[A"},
+		{name: "SS3 cursor key to normal-cursor child", raw: "\x1bOA"},
+		{name: "C1 SS3 cursor key to normal-cursor child", raw: "\x8fA"},
+		{name: "SS3 keypad digit to numeric-keypad child", raw: "\x1bOp"},
+		{name: "legacy Ctrl+Q to Kitty child", modes: "\x1b[>1u", raw: "\x11"},
+		{name: "legacy text to Kitty child reporting all keys", modes: "\x1b[>8u", raw: "界"},
+		{name: "legacy Ctrl+Q to modifyOtherKeys child", modes: "\x1b[>4;2m", raw: "\x11"},
+		{name: "modifyOtherKeys Ctrl+Q to legacy child", raw: "\x1b[27;5;113~"},
+		{name: "Kitty Ctrl+Q after the child left Kitty", raw: "\x1b[113;5u", hostKitty: ghostty.KittyKeyDisambiguate},
+		{name: "Kitty Alt+Shift+comma to legacy child", raw: "\x1b[44:60;4u", hostKitty: ghostty.KittyKeyDisambiguate | ghostty.KittyKeyReportAlternates},
+		{name: "Russian Ctrl+и to legacy child", raw: "\x1b[1080::98;5u", hostKitty: ghostty.KittyKeyDisambiguate | ghostty.KittyKeyReportAlternates},
+		{name: "Option-composed text to modifyOtherKeys child", modes: "\x1b[>4;2m", raw: "\x1b[98;3;8747u", hostKitty: ghostty.KittyKeyDisambiguate | ghostty.KittyKeyReportAll | ghostty.KittyKeyReportAssociated},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			r, em := newRouterTest(t, nil)
 			s := routerState(t, em, tt.modes)
-			r.host.KittyFlags, r.host.ModifyOtherKeys2 = tt.hostKitty, tt.hostModifyOtherKeys2
-			if got := routeBytes(t, r, s, tt.input); string(got) != tt.want {
-				t.Fatalf("converted Alt+b = %q, want %q", got, tt.want)
+			r.host.KittyFlags = tt.hostKitty
+			packets := routerPackets(t, tt.raw)
+			if len(packets) != 1 {
+				t.Fatalf("decoded %d packets from %q, want one key", len(packets), tt.raw)
+			}
+			if _, ok := packets[0].Event.(uv.KeyEvent); !ok {
+				t.Fatalf("%q decoded as %T, want a key", tt.raw, packets[0].Event)
+			}
+			got, err := r.route(packets[0], s)
+			if err != nil || string(got.Bytes) != tt.raw || got.Disposition != Pass || got.Origin != "user-input" {
+				t.Fatalf("routed %q as %q (%v, %q), %v; want the exact bytes passed as user input", tt.raw, got.Bytes, got.Disposition, got.Origin, err)
 			}
 		})
 	}
-}
-
-// UV reports no text for a key with a modifier beyond Shift. A converted key
-// still carries the character the user produced: the shifted key the outer
-// terminal reported, or else the upper case Shift or Caps Lock alone selects.
-// Ctrl keeps the unshifted key, so a legacy child still receives its C0 byte.
-// Host profiles mirror console.syncInput: Capture adds disambiguation and
-// alternate keys for a child without disambiguation, or modifyOtherKeys mode 2
-// when Kitty is unavailable.
-//
-// On a layout other than US, alternate keys also report the base layout key:
-// the key in the same position on a US layout. It never replaces the character
-// the user produced. Under Ctrl alone it selects the native C0 byte, as
-// Ghostty's own Russian Ctrl+с does; Ctrl with Shift falls through to CSI u.
-func TestRoutingConvertedKeysKeepProducedCharacter(t *testing.T) {
-	const capture = ghostty.KittyKeyDisambiguate | ghostty.KittyKeyReportAlternates
-	// Pinned Ghostty's legacy Alt prefix writes a multi-byte character's
-	// unshifted code point on macOS and the character itself elsewhere.
-	nonASCIIAltShift := "\x1bИ"
-	if runtime.GOOS == "darwin" {
-		nonASCIIAltShift = "\x1bи"
-	}
-	for _, tt := range []struct {
-		name, modes, input, want string
-		hostKitty                ghostty.KittyKeyFlags
-		hostModifyOtherKeys2     bool
-	}{
-		{name: "Shift+Alt+b", input: "\x1b[98;4u", want: "\x1bB", hostKitty: capture},
-		{name: "Shift+Alt+b with shifted key", input: "\x1b[98:66;4u", want: "\x1bB", hostKitty: capture},
-		{name: "Shift+Alt+comma with shifted key", input: "\x1b[44:60;4u", want: "\x1b<", hostKitty: capture},
-		{name: "Caps Lock+Alt+b", input: "\x1b[98;67u", want: "\x1bB", hostKitty: capture},
-		{name: "Shift+Caps Lock+Alt+b", input: "\x1b[98;68u", want: "\x1bb", hostKitty: capture},
-		{name: "Shift+Caps Lock+Alt+b with shifted key", input: "\x1b[98:66;68u", want: "\x1bB", hostKitty: capture},
-		{name: "Ctrl+Shift+b", input: "\x1b[98;6u", want: "\x02", hostKitty: capture},
-		{name: "Ctrl+Shift+b with shifted key", input: "\x1b[98:66;6u", want: "\x02", hostKitty: capture},
-		{name: "Dvorak Alt+x", input: "\x1b[120::98;3u", want: "\x1bx", hostKitty: capture},
-		{name: "Dvorak Alt+Shift+X", input: "\x1b[120:88:98;4u", want: "\x1bX", hostKitty: capture},
-		{name: "Russian Alt+и", input: "\x1b[1080::98;3u", want: "\x1bи", hostKitty: capture},
-		{name: "Russian Alt+Shift+И", input: "\x1b[1080:1048:98;4u", want: nonASCIIAltShift, hostKitty: capture},
-		{name: "Dvorak Ctrl+x", input: "\x1b[120::98;5u", want: "\x18", hostKitty: capture},
-		{name: "Russian Ctrl+и", input: "\x1b[1080::98;5u", want: "\x02", hostKitty: capture},
-		{name: "Russian Ctrl+и without base layout key", input: "\x1b[1080;5u", want: "\x1b[1080;5u", hostKitty: capture},
-		{name: "Russian Ctrl+Shift+И", input: "\x1b[1080:1048:98;6u", want: "\x1b[1080;6u", hostKitty: capture},
-		{
-			name: "Shift+Alt+b to modifyOtherKeys child", modes: "\x1b[>4;2m", input: "\x1b[98;4u", want: "\x1b[27;4;66~",
-			hostKitty: capture, hostModifyOtherKeys2: true,
-		},
-		{name: "legacy Alt+B to alternate-key child", modes: "\x1b[>5u", input: "\x1bB", want: "\x1b[98:66;4u"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			r, em := newRouterTest(t, nil)
-			s := routerState(t, em, tt.modes)
-			r.host.KittyFlags, r.host.ModifyOtherKeys2 = tt.hostKitty, tt.hostModifyOtherKeys2
-			if got := routeBytes(t, r, s, tt.input); string(got) != tt.want {
-				t.Fatalf("converted %q = %q, want %q", tt.input, got, tt.want)
-			}
-		})
-	}
-}
-
-// With all keys and associated text reported, an outer terminal whose Option
-// is not Alt still sets the Alt bit and attaches the text Option composed. A
-// child requesting Kitty flags 24 gets host flags 29 under Capture, which adds
-// disambiguation and alternate keys. Every child protocol receives that text,
-// as it did before Option was treated as Alt.
-func TestRoutingKeepsOptionComposedText(t *testing.T) {
-	if runtime.GOOS != "darwin" {
-		t.Skip("the native encoder honors option-as-alt only on macOS")
-	}
-	// Option+L on a German layout composes "@"; Option+b on a US layout, "∫".
-	const optionL, optionB = "\x1b[108;3;64u", "\x1b[98;3;8747u"
-	for _, tt := range []struct{ name, modes, input, want string }{
-		{"Kitty child, Option+L", "\x1b[>24u", optionL, optionL},
-		{"Kitty child, Option+b", "\x1b[>24u", optionB, optionB},
-		{"legacy child, Option+L", "", optionL, "@"},
-		{"legacy child, Option+b", "", optionB, "∫"},
-		{"modifyOtherKeys child, Option+L", "\x1b[>4;2m", optionL, "@"},
-		{"modifyOtherKeys child, Option+b", "\x1b[>4;2m", optionB, "∫"},
-		{"Kitty child, text starting with the key", "\x1b[>24u", "\x1b[98;3;98:769u", "\x1b[98;3;98:769u"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			r, em := newRouterTest(t, nil)
-			s := routerState(t, em, tt.modes)
-			r.host.KittyFlags = ghostty.KittyKeyDisambiguate | ghostty.KittyKeyReportAlternates | ghostty.KittyKeyReportAll | ghostty.KittyKeyReportAssociated
-			if got := routeBytes(t, r, s, tt.input); string(got) != tt.want {
-				t.Fatalf("converted Option-composed text = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestRoutingUnknownHostModifyOtherKeysUsesWireProvenance(t *testing.T) {
 	r, em := newRouterTest(t, nil)
-	r.host.ModifyOtherKeysKnown = false
-	s := routerState(t, em, "")
-	modified := "\x1b[27;5;113~"
-	if got := routeBytes(t, r, s, modified); string(got) != "\x11" {
-		t.Fatalf("unknown outer modified-key mode delivered %q to legacy child", got)
-	}
-	s = routerState(t, em, "\x1b[>4;2m")
-	if got := routeBytes(t, r, s, modified); string(got) != modified {
-		t.Fatalf("matching modified-key wire changed to %q", got)
-	}
-	s = routerState(t, em, "\x1b[>3u")
-	r.host.KittyFlags = s.KittyKeyboardFlags
-	kittypacket := "\x1b[113;17u"
-	if got := routeBytes(t, r, s, kittypacket); string(got) != kittypacket {
-		t.Fatalf("Kitty takes precedence over modified-key mode: %q", got)
-	}
-}
-
-func TestRoutingCursorUsesObservedWireWhenHostModeIsUnavailable(t *testing.T) {
-	for _, tt := range []struct{ name, raw, want string }{
-		{"SS3 arrow", "\x1bOA", "\x1b[A"},
-		{"C1 SS3 arrow", "\x8fA", "\x1b[A"},
-		{"SS3 home", "\x1bOH", "\x1b[H"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			r, em := newRouterTest(t, nil)
-			s := routerState(t, em, "")
-			if got := routeBytes(t, r, s, tt.raw); string(got) != tt.want {
-				t.Fatalf("observed application-cursor input = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestRoutingKeypadUsesObservedWireWhenHostModeIsUnavailable(t *testing.T) {
-	for _, tt := range []struct{ name, modes, raw, want string }{
-		{"SS3 digit", "", "\x1bOp", "0"},
-		{"C1 SS3 digit", "", "\x8fp", "0"},
-		{"SS3 enter", "", "\x1bOM", "\r"},
-		{"matching application keypad", "\x1b[?66h\x1b[?1035l", "\x8fp", "\x8fp"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			r, em := newRouterTest(t, nil)
-			s := routerState(t, em, tt.modes)
-			if got := routeBytes(t, r, s, tt.raw); string(got) != tt.want {
-				t.Fatalf("observed application-keypad input = %q, want %q", got, tt.want)
-			}
-		})
+	s := routerState(t, em, "\x1b[>1u")
+	got, err := r.route(input.Packet{Raw: []byte("unsupported"), Event: uv.KeyPressEvent{Code: uv.KeyF63}}, s)
+	if err != nil || string(got.Bytes) != "unsupported" {
+		t.Fatalf("key without a native key code routed as %q, %v; want its exact bytes", got.Bytes, err)
 	}
 }
 
@@ -425,7 +264,7 @@ func TestRoutingButtonlessReleaseEndsEveryGesture(t *testing.T) {
 	}
 }
 
-func TestRoutingFocusRequiresChildModeAndUnknownKeysAreExplicit(t *testing.T) {
+func TestRoutingFocusRequiresChildMode(t *testing.T) {
 	r, em := newRouterTest(t, nil)
 	s := routerState(t, em, "")
 	if got := routeBytes(t, r, s, "\x1b[I\x1b[O"); len(got) != 0 {
@@ -435,10 +274,15 @@ func TestRoutingFocusRequiresChildModeAndUnknownKeysAreExplicit(t *testing.T) {
 	if got := routeBytes(t, r, s, "\x1b[I\x1b[O"); string(got) != "\x1b[I\x1b[O" {
 		t.Fatalf("enabled focus = %q", got)
 	}
-	s = routerState(t, em, "\x1b[>1u")
-	_, err := r.route(input.Packet{Raw: []byte("unsupported"), Event: uv.KeyPressEvent{Code: uv.KeyF63}}, s)
-	if err == nil || !strings.Contains(err.Error(), "unsupported") {
-		t.Fatalf("unsupported native key = %v", err)
+}
+
+// Run closes the router when the session ends, and a test may close it again.
+func TestRoutingCloseReleasesNativeEventOnce(t *testing.T) {
+	r, _ := newRouterTest(t, nil)
+	r.close()
+	r.close()
+	if r.mouse != nil {
+		t.Fatal("closed router kept its native mouse event")
 	}
 }
 
@@ -528,11 +372,12 @@ func TestRoutingDropsPixelReportsWithoutMeasuredCells(t *testing.T) {
 	}
 }
 
-// The session admits outer input by routedLimit, so it must bound what the
-// native encoders write for every keyboard protocol and mouse format a child
-// can select, including SGR pixel reports at four-digit coordinates and an X10
-// release that releases every button the child owns. The widest expansion must
-// also reach the bound, keeping its documented worst case real.
+// The session admits outer input by routedLimit, so it must bound what routing
+// delivers for every keyboard protocol and mouse format a child can select.
+// Keys reach the child as sent; the native mouse encoders write the rest,
+// including SGR pixel reports at four-digit coordinates and an X10 release
+// that releases every button the child owns. The widest expansion must also
+// reach the bound, keeping its documented worst case real.
 func TestRoutedLimitBoundsNativeEncoding(t *testing.T) {
 	var keys []string
 	for b := range 256 {
@@ -611,23 +456,4 @@ func TestRoutedLimitBoundsNativeEncoding(t *testing.T) {
 	if widest != maxRoutedExpansion {
 		t.Fatalf("widest routed expansion %.2f, want the %d-byte bound", widest, maxRoutedExpansion)
 	}
-}
-
-func TestRoutingNativeTextSurvivesGCAndReleasesBorrow(t *testing.T) {
-	r, em := newRouterTest(t, nil)
-	text := strings.Repeat("界", 256)
-	if err := r.setKey(uv.KeyPressEvent{Code: uv.KeyExtended, Text: text}); err != nil {
-		t.Fatal(err)
-	}
-	runtime.GC()
-	got, err := em.EncodeKey(r.key, ghostty.OptionAsAltTrue)
-	if err != nil || string(got) != text {
-		t.Fatalf("borrowed native text = %q, %v", got, err)
-	}
-	r.releaseKeyText()
-	if retained := r.key.UTF8(); retained != "" {
-		t.Fatalf("native event retained completed text: %q", retained)
-	}
-	r.close()
-	r.close()
 }

@@ -26,9 +26,9 @@ type gesture struct {
 // that both carry a base layout key compare that physical key, because a
 // win32 report keeps its virtual key while its code follows the modifiers.
 // Otherwise they compare the code, which a Kitty report carries with or
-// without alternate keys: Capture requests those only while the child lacks
-// disambiguation, so a child flag change can add or drop the base layout key
-// between a press and its release.
+// without alternate keys: the outer terminal runs the child's Kitty flags, so
+// a child flag change can add or drop the base layout key between a press and
+// its release.
 func (g gesture) continues(k uv.Key) bool {
 	if g.base != 0 && k.BaseCode != 0 {
 		return g.base == k.BaseCode

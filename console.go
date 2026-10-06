@@ -45,7 +45,6 @@ type console struct {
 	fd                                                   int
 	device                                               uint64
 	raw                                                  *term.State
-	capture                                              bool
 	entry                                                map[ansi.DECMode]ansi.ModeSetting
 	applied                                              map[ansi.DECMode]bool
 	pending                                              map[ansi.DECMode]bool
@@ -405,14 +404,9 @@ func (c *console) syncInput(s emulator.State) error {
 	if err := c.pushKittyKeyboard(); err != nil {
 		return err
 	}
+	// The outer keyboard runs exactly the child's modes, so the keys it sends
+	// are already in the child's protocol and reach the child unchanged.
 	flags := s.KittyKeyboardFlags
-	if c.capture && flags&ghostty.KittyKeyDisambiguate == 0 {
-		// Disambiguation makes the host flags differ from the child's, so the
-		// router converts every key. Alternate keys then report the shifted key
-		// that keeps Alt+Shift punctuation such as M-< intact. A child that
-		// already disambiguates keeps its own flags and unconverted input.
-		flags |= ghostty.KittyKeyDisambiguate | ghostty.KittyKeyReportAlternates
-	}
 	if !c.kittySupported {
 		flags = 0
 	}
@@ -424,7 +418,7 @@ func (c *console) syncInput(s emulator.State) error {
 	}
 	if c.modifySupported {
 		level := 0
-		if s.ModifyOtherKeys2 || c.capture && !c.kittySupported {
+		if s.ModifyOtherKeys2 {
 			level = 2
 		}
 		if err := c.setModify(level); err != nil {

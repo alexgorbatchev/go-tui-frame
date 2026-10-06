@@ -20,193 +20,133 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Capture adds Kitty disambiguation and, for a child whose input it therefore
-// converts, alternate keys that carry the shifted key. A child that already
-// disambiguates keeps its own flags, so its input still passes unconverted.
-func TestCaptureNegotiatesDistinctKeysAndRestoresOuterMode(t *testing.T) {
-	const (
-		disambiguate = ghostty.KittyKeyDisambiguate
-		events       = ghostty.KittyKeyReportEvents
-		alternates   = ghostty.KittyKeyReportAlternates
-	)
+// With Capture set, the outer keyboard runs exactly the child's modes: the
+// child's Kitty flags where the terminal reported Kitty support and none
+// otherwise, and the child's modifyOtherKeys level where the terminal reported
+// that mode. Restoration returns the terminal to its entry modes.
+func TestCaptureMirrorsChildKeyboardModes(t *testing.T) {
 	for _, tt := range []struct {
-		capture bool
-		child   ghostty.KittyKeyFlags
-		want    ghostty.KittyKeyFlags
+		name, modes string
+		kitty       bool
+		flags       ghostty.KittyKeyFlags
+		modify2     bool
 	}{
-		{false, 0, 0}, {true, 0, disambiguate | alternates},
-		{false, events, events}, {true, events, events | disambiguate | alternates},
-		{true, disambiguate, disambiguate}, {true, disambiguate | events, disambiguate | events},
+		{name: "legacy child", kitty: true},
+		{name: "disambiguating child", modes: "\x1b[>1u", kitty: true, flags: ghostty.KittyKeyDisambiguate},
+		{name: "event-reporting child", modes: "\x1b[>2u", kitty: true, flags: ghostty.KittyKeyReportEvents},
+		{name: "legacy child without Kitty support"},
+		{name: "Kitty child without Kitty support", modes: "\x1b[>1u"},
+		{name: "modifyOtherKeys child without Kitty support", modes: "\x1b[>4;2m", modify2: true},
 	} {
-		t.Run(fmt.Sprintf("capture=%v/child=%d", tt.capture, tt.child), func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 			h := newHarness(t)
-			fd, device, _, err := inspectConsole(h.slave, h.slave)
-			if err != nil {
-				t.Fatal(err)
+			if !tt.kitty {
+				h.withholdKittyKeyboard()
 			}
-			c, err := acquireConsole(h.slave, h.slave, fd, device)
-			if err != nil {
-				t.Fatal(err)
-			}
-			restored := false
-			t.Cleanup(func() {
-				if !restored {
-					if err := c.restore(); err != nil {
-						t.Error(err)
-					}
-				}
-			})
-			c.capture = tt.capture
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			// libghostty-vt does not answer this optional query.
+			h.answer(ansi.QueryModifyOtherKeys, "\x1b[>4;0m")
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			if _, err := c.probe(ctx, nil, capabilityTimeout); err != nil {
-				t.Fatal(err)
-			}
-			if !c.kittySupported {
-				t.Fatal("native test outer terminal did not report Kitty support")
-			}
-			child, err := emulator.New(emulator.Options{Size: emulator.Size{Cols: 10, Rows: 5}})
+			child := exec.Command("sh", "-c", `printf '%sready' "$1"; exec sleep 30`, "sh", tt.modes)
+			app := New(child, struct{}{}).Terminal(h.slave, h.slave).Capture(func(Input) Disposition { return Pass })
+			done := startRun(ctx, app)
+			// The session writes the outer modes for child output before it paints
+			// that output, so they are in place once the text shows.
+			awaitText(t, h, "ready")
+			h.mu.Lock()
+			outer, err := h.em.State()
+			h.mu.Unlock()
 			if err != nil {
 				t.Fatal(err)
 			}
-			t.Cleanup(child.Close)
-			if _, err := child.Write([]byte(fmt.Sprintf("\x1b[>%du", tt.child))); err != nil {
-				t.Fatal(err)
+			if outer.KittyKeyboardFlags != tt.flags || outer.ModifyOtherKeys2 != tt.modify2 {
+				t.Errorf("outer Kitty flags=%d modifyOtherKeys2=%v, want %d and %v", outer.KittyKeyboardFlags, outer.ModifyOtherKeys2, tt.flags, tt.modify2)
 			}
-			state, err := child.State()
-			if err != nil {
-				t.Fatal(err)
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("Run did not return after cancellation")
 			}
-			if err := c.enter(); err != nil {
-				t.Fatal(err)
-			}
-			if err := c.syncInput(state); err != nil {
-				t.Fatal(err)
-			}
-			// A marker after the mode write proves the native outer parsed it.
-			if _, err := c.renderer.WriteString("\x1b]2;capture-mode-test\x07"); err != nil {
-				t.Fatal(err)
-			}
-			if err := c.renderer.Flush(); err != nil {
-				t.Fatal(err)
-			}
-			for {
-				h.mu.Lock()
-				outer, err := h.em.State()
-				h.mu.Unlock()
-				if err != nil {
-					t.Fatal(err)
-				}
-				if outer.Title == "capture-mode-test" {
-					if outer.KittyKeyboardFlags != tt.want {
-						t.Fatalf("outer flags=%d, want %d", outer.KittyKeyboardFlags, tt.want)
-					}
-					break
-				}
-				if ctx.Err() != nil {
-					t.Fatal("mode marker did not arrive", ctx.Err())
-				}
-				time.Sleep(time.Millisecond)
-			}
-			if err := c.restore(); err != nil {
-				t.Fatal(err)
-			}
-			restored = true
-			for {
-				h.mu.Lock()
-				outer, err := h.em.State()
-				h.mu.Unlock()
-				if err != nil {
-					t.Fatal(err)
-				}
-				if !outer.Alternate {
-					if outer.KittyKeyboardFlags != 0 {
-						t.Fatalf("restored flags=%d", outer.KittyKeyboardFlags)
-					}
-					break
-				}
-				if ctx.Err() != nil {
-					t.Fatal("outer mode was not restored", ctx.Err())
-				}
-				time.Sleep(time.Millisecond)
-			}
+			awaitOuter(t, h, "its entry keyboard modes", func(s emulator.State) bool {
+				return !s.Alternate && s.KittyKeyboardFlags == 0 && !s.ModifyOtherKeys2
+			})
 		})
 	}
 }
 
-// Under Capture, the native outer terminal encodes each key with the flags the
-// frame requested, and the frame converts it for the legacy child. Without
-// alternate keys, Alt+Shift+comma arrives as Alt+Shift+"," and loses its "<".
-// The child must receive what a legacy terminal sends: M-< and M-B, and on a
-// Dvorak layout M-X from the key in the US B position, not that position's b.
-// Russian Ctrl+и in the same position sends Ctrl+B, as Ghostty's own Ctrl+с
-// sends Ctrl+C.
-func TestCaptureDeliversShiftedAltKeysToLegacyChild(t *testing.T) {
-	h := newHarness(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	converted := make(chan []byte, 4)
-	app := New(childCommand(t), struct{}{}).Terminal(h.slave, h.slave).Capture(func(Input) Disposition { return Pass }).
-		ObserveEvents([]EventKind{ChildInput}, func(e Event) {
-			if e.Origin == "key-protocol" {
-				converted <- e.Bytes
+// A child's Kitty keyboard query (CSI ? u) gets no reply while the outer
+// terminal has not reported Kitty support: the child would enable a protocol
+// the terminal never sends. Replies to the child's other queries in the same
+// output still arrive, and a Kitty reply the terminal sends after the startup
+// probe makes later queries answered.
+func TestKittyKeyboardQueryAnsweredOnlyWithOuterSupport(t *testing.T) {
+	const da1, decrpm, kittyReply = "\x1b[?62;22c", "\x1b[?7;1$y", "\x1b[?0u"
+	for _, tt := range []struct {
+		name  string
+		kitty bool
+	}{{"reported at startup", true}, {"reported late", false}} {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t)
+			if !tt.kitty {
+				h.withholdKittyKeyboard()
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			var (
+				mu      sync.Mutex
+				replies []byte
+			)
+			child := exec.Command("sh", "-c", "printf '\\033[?u\\033[c\\033[?7$p'; read line; printf '\\033[?u\\033[c'; exec sleep 30")
+			app := New(child, struct{}{}).Terminal(h.slave, h.slave).ObserveEvents([]EventKind{ChildInput}, func(e Event) {
+				if e.Origin == "terminal-reply" {
+					mu.Lock()
+					replies = append(replies, e.Bytes...)
+					mu.Unlock()
+				}
+			})
+			done := startRun(ctx, app)
+			awaitReplies := func(what string, ready func(string) bool) string {
+				t.Helper()
+				for {
+					mu.Lock()
+					got := string(replies)
+					mu.Unlock()
+					if ready(got) {
+						return got
+					}
+					if ctx.Err() != nil {
+						t.Fatalf("child did not receive %s: %q", what, got)
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+			}
+			first := awaitReplies("its first replies", func(got string) bool { return strings.Contains(got, decrpm) })
+			if !strings.Contains(first, da1) {
+				t.Errorf("first replies %q lack the DA1 reply %q", first, da1)
+			}
+			if answered := strings.Contains(first, kittyReply); answered != tt.kitty {
+				t.Errorf("first replies %q answer the Kitty query = %v, want %v", first, answered, tt.kitty)
+			}
+			next := []byte("x\n")
+			if !tt.kitty {
+				// The terminal answers the frame's startup query after the probe.
+				next = append([]byte(kittyReply), next...)
+			}
+			if _, err := unix.Write(h.fd, next); err != nil {
+				t.Fatal(err)
+			}
+			all := awaitReplies("its second replies", func(got string) bool { return strings.Count(got, da1) == 2 })
+			if second := all[len(first):]; !strings.Contains(second, kittyReply) {
+				t.Errorf("second replies %q do not answer the Kitty query", second)
+			}
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("Run did not return after cancellation")
 			}
 		})
-	done := startRun(ctx, app)
-	awaitText(t, h, "child")
-	awaitOuter(t, h, "the capture keyboard flags", func(s emulator.State) bool {
-		return s.Alternate && s.KittyKeyboardFlags&ghostty.KittyKeyDisambiguate != 0
-	})
-	event, err := ghostty.NewKeyEvent()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer event.Close()
-	event.SetAction(ghostty.KeyActionPress)
-	const altShift = ghostty.ModAlt | ghostty.ModShift
-	for _, tt := range []struct {
-		name, text, want string
-		key              ghostty.Key
-		mods             ghostty.Mods
-		unshifted        rune
-	}{
-		{"Alt+Shift+comma", "<", "\x1b<", ghostty.KeyComma, altShift, ','},
-		{"Alt+Shift+b", "B", "\x1bB", ghostty.KeyB, altShift, 'b'},
-		{"Dvorak Alt+Shift+X", "X", "\x1bX", ghostty.KeyB, altShift, 'x'},
-		{"Russian Ctrl+и", "и", "\x02", ghostty.KeyB, ghostty.ModCtrl, 'и'},
-	} {
-		event.SetKey(tt.key)
-		event.SetMods(tt.mods)
-		event.SetUTF8(tt.text)
-		event.SetUnshiftedCodepoint(tt.unshifted)
-		h.mu.Lock()
-		report, err := h.em.EncodeKey(event, ghostty.OptionAsAltTrue)
-		h.mu.Unlock()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := unix.Write(h.fd, report); err != nil {
-			t.Fatal(err)
-		}
-		select {
-		case got := <-converted:
-			if string(got) != tt.want {
-				t.Errorf("%s reported as %q reached the child as %q, want %q", tt.name, report, got, tt.want)
-			}
-		case <-ctx.Done():
-			t.Fatalf("%s reported as %q was not converted: %v", tt.name, report, ctx.Err())
-		}
-	}
-	if _, err := unix.Write(h.fd, []byte("q")); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case got := <-done:
-		if got.err != nil || got.result.ProcessState == nil || !got.result.ProcessState.Success() {
-			t.Fatalf("Run = %#v, %v", got.result, got.err)
-		}
-	case <-ctx.Done():
-		t.Fatal("Run did not finish", ctx.Err())
 	}
 }
 
@@ -235,8 +175,14 @@ func TestLateKittyReplyLeavesOuterKeyboardAsFound(t *testing.T) {
 	// Reconstruct the state the probe leaves at its deadline when the outer
 	// terminal has not answered the Kitty query yet.
 	c.kittyPending, c.kittySupported = true, false
-	c.capture = true
 	if err := c.enter(); err != nil {
+		t.Fatal(err)
+	}
+	// The child requests Kitty disambiguation before the late reply arrives.
+	if _, err := s.terminal.Write([]byte(ansi.PushKittyKeyboard(int(ghostty.KittyKeyDisambiguate)))); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.terminal.InputState(&s.inputState); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.route(decodePacket(t, "\x1b[?1u")); err != nil {
@@ -261,10 +207,9 @@ func TestLateKittyReplyLeavesOuterKeyboardAsFound(t *testing.T) {
 		outer = got
 		return got.Title == marker
 	})
-	// Capture of the legacy child converts its keys, with alternate keys.
-	const capture = ghostty.KittyKeyDisambiguate | ghostty.KittyKeyReportAlternates
-	if !outer.Alternate || outer.KittyKeyboardFlags != capture {
-		t.Fatalf("session outer alternate=%v flags=%d, want alternate flags=%d", outer.Alternate, outer.KittyKeyboardFlags, capture)
+	// The reported support lets the outer terminal run the child's flags.
+	if !outer.Alternate || outer.KittyKeyboardFlags != ghostty.KittyKeyDisambiguate {
+		t.Fatalf("session outer alternate=%v flags=%d, want alternate flags=%d", outer.Alternate, outer.KittyKeyboardFlags, ghostty.KittyKeyDisambiguate)
 	}
 	if err := c.restore(); err != nil {
 		t.Fatal(err)
@@ -699,7 +644,7 @@ func TestConsoleKeepsPermanentInputModes(t *testing.T) {
 		child           string
 		written, absent []string
 		applied         map[ansi.DECMode]bool
-		cursor, pixels  bool
+		pixels          bool
 		outer, routed   string
 		// unmeasured cases start before the cell-size reply arrives. pixelless
 		// cases resize to a winsize without pixels before outer is routed. late
@@ -712,12 +657,13 @@ func TestConsoleKeepsPermanentInputModes(t *testing.T) {
 		{
 			name: "cursor keys permanently reset", reports: modes{1: ansi.ModePermanentlyReset},
 			child: "\x1b[?1h", absent: []string{"\x1b[?1h"}, applied: map[ansi.DECMode]bool{1: false},
-			outer: "\x1b[A", routed: "\x1bOA",
+			// The terminal keeps its own cursor-key form, which reaches the child as sent.
+			outer: "\x1b[A", routed: "\x1b[A",
 		},
 		{
 			name: "cursor keys permanently set", reports: modes{1: ansi.ModePermanentlySet},
-			child: "\x1b[?1l", absent: []string{"\x1b[?1l"}, applied: map[ansi.DECMode]bool{1: true}, cursor: true,
-			outer: "\x1bOA", routed: "\x1b[A",
+			child: "\x1b[?1l", absent: []string{"\x1b[?1l"}, applied: map[ansi.DECMode]bool{1: true},
+			outer: "\x1bOA", routed: "\x1bOA",
 		},
 		{
 			name: "pixel mouse switchable", reports: modes{1006: ansi.ModeReset, 1016: ansi.ModeReset},
@@ -821,8 +767,8 @@ func TestConsoleKeepsPermanentInputModes(t *testing.T) {
 				}
 				rest = rest[at+len(tt.late[i]):]
 			}
-			if host := s.router.host; host.ApplicationCursor != tt.cursor || host.MousePixels != tt.pixels {
-				t.Errorf("host profile cursor=%v pixels=%v, want cursor=%v pixels=%v", host.ApplicationCursor, host.MousePixels, tt.cursor, tt.pixels)
+			if host := s.router.host; host.MousePixels != tt.pixels {
+				t.Errorf("host profile pixels=%v, want %v", host.MousePixels, tt.pixels)
 			}
 			var routed []byte
 			for _, p := range s.queue[queued:] {
@@ -916,10 +862,9 @@ func TestConsoleAppliesAndRestoresReportedModifyOtherKeys(t *testing.T) {
 	if !disabled {
 		t.Fatal("outer modifyOtherKeys did not match child legacy mode")
 	}
-	// Select the observed MOK2 profile without relying on Kitty negotiation.
-	// The native outer's mode agrees with the solicited report decoded above.
-	c.capture, c.kittySupported = true, false
-	if err := c.syncInput(NativeState{}); err != nil {
+	// A child in modifyOtherKeys mode 2 gets the reported mode on the outer
+	// terminal, whose native state agrees with the report decoded above.
+	if err := c.syncInput(NativeState{ModifyOtherKeys2: true}); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.renderer.Flush(); err != nil {
@@ -941,7 +886,7 @@ func TestConsoleAppliesAndRestoresReportedModifyOtherKeys(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	if !enabled {
-		t.Fatal("capture did not select the reported modifyOtherKeys fallback")
+		t.Fatal("outer modifyOtherKeys did not match child mode 2")
 	}
 	if err := c.restore(); err != nil {
 		t.Fatal(err)

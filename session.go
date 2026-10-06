@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -65,7 +66,6 @@ func (f *Frame[T]) Run(ctx context.Context) (result Result, err error) {
 	if err != nil {
 		return result, err
 	}
-	c.capture = f.capture != nil
 	c.inherit = f.inheritTerminal
 	defer func() {
 		result.CleanupError = errors.Join(result.CleanupError, c.restore())
@@ -431,7 +431,7 @@ func (s *session[T]) route(p input.Packet) error {
 		return s.console.syncInput(s.inputState)
 	}
 	s.router.viewport = s.geometry.child
-	s.router.host = hostInputProfile{KittyFlags: s.console.kittyFlags, ApplicationCursor: s.console.applied[1], ApplicationKeypad: s.console.applied[66], Backarrow: s.console.applied[67], Numlock: s.console.applied[1035], AltEscPrefix: s.console.applied[1036], AltSendsEsc: s.console.applied[1039], ModifyOtherKeysKnown: s.console.modifySupported, ModifyOtherKeys2: s.console.modifyLevel == 2, MousePixels: s.console.applied[1016], CellWidthPx: s.console.cellWidth, CellHeightPx: s.console.cellHeight}
+	s.router.host = hostInputProfile{KittyFlags: s.console.kittyFlags, MousePixels: s.console.applied[1016], CellWidthPx: s.console.cellWidth, CellHeightPx: s.console.cellHeight}
 	r, err := s.router.route(p, s.inputState)
 	if err != nil {
 		return err
@@ -520,8 +520,20 @@ func (s *session[T]) writeInput() error {
 	return nil
 }
 
+// kittyKeyboardReply matches the whole reply the child's native terminal
+// writes for a Kitty keyboard query (CSI ? u): CSI ? flags u from its own
+// Kitty stack. Each native reply write is one Reply effect.
+var kittyKeyboardReply = regexp.MustCompile(`\A\x1b\[\?[0-9]+u\z`)
+
 func (s *session[T]) effects() error {
 	for _, e := range s.terminal.Effects() {
+		if e.Kind == emulator.Reply && !s.console.kittySupported && kittyKeyboardReply.Match(e.Bytes) {
+			// The child would enable a protocol the outer terminal never sends.
+			// Unanswered, the query reads as a terminal without it, so the reply
+			// is neither written nor observed. A Kitty reply from the outer
+			// terminal after the probe deadline makes later queries answered.
+			continue
+		}
 		if e.Kind == emulator.Reply {
 			if err := s.enqueue(e.Bytes, "terminal-reply"); err != nil {
 				return err
