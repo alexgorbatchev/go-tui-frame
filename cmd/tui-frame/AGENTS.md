@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 13:56
-last_modified: 2026-10-06 14:48
+last_modified: 2026-10-06 16:49
 status: current
 ---
 
@@ -56,6 +56,10 @@ Demo painting can also be checked independently with
   discarded. Reported releases and repeats and lone
   modifier or lock keys never advance or end the prefix. Pass other keys outside
   the prefix, such as plain digits and F5/F6, to the child.
+- Keep the wrapper transparent in its exit status: return how the child ended,
+  its exit code or `128 + signal number`, whether it exited on its own or
+  Ctrl+Q terminated it. Ctrl+Q has no status of its own; report only session
+  failures, never the quit request.
 - Use only keys legacy input distinguishes, since the outer terminal runs the
   child's keyboard modes and the frame never re-encodes keys. Test the prefix
   through real sessions in legacy and Kitty-with-release-events form, native

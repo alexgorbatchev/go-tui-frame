@@ -75,17 +75,87 @@ func TestExecuteUsesNativeCobraAndChildExitStatuses(t *testing.T) {
 	}
 }
 
+// Ctrl+Q only starts the child's termination; the wrapper stays transparent
+// and returns however the child then ends, as it does when the child exits on
+// its own.
 func TestExecuteCtrlQStopsItsRealChild(t *testing.T) {
-	ready := filepath.Join(projectTempDir(t), "child-started")
-	master, _ := cliTTY(t, "--showcase", "--", "sh", "-c", `printf started > "$1"; exec sleep 30`, "sh", ready)
-	done := make(chan int, 1)
+	for _, tt := range []struct {
+		name   string
+		script string
+		code   int
+	}{
+		// The frame's SIGTERM ends the child: the shell's 128+15.
+		{"terminated", `printf started > "$1"; exec sleep 30`, 143},
+		// The child handles SIGTERM and exits with a status of its own.
+		{"handles SIGTERM", `trap 'exit 9' TERM; printf started > "$1"; while :; do sleep 1; done`, 9},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ready := filepath.Join(projectTempDir(t), "child-started")
+			master, diagnostic := cliTTY(t, "--showcase", "--", "sh", "-c", tt.script, "sh", ready)
+			done := make(chan int, 1)
+			exited := make(chan struct{})
+			go func() {
+				defer close(exited)
+				done <- execute()
+			}()
+			t.Cleanup(func() {
+				if err := master.Close(); err != nil {
+					t.Errorf("close CLI terminal: %v", err)
+				}
+				select {
+				case <-exited:
+				case <-time.After(sessionTimeout):
+					t.Error("CLI did not stop after terminal closure")
+				}
+			})
+			awaitFile(t, ready, exited)
+			if _, err := master.Write([]byte{0x11}); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case got := <-done:
+				message, err := os.ReadFile(diagnostic)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got != tt.code || len(message) != 0 {
+					t.Fatalf("Ctrl+Q returned %d with stderr %q; want the child's status %d and no diagnostic", got, message, tt.code)
+				}
+			case <-time.After(sessionTimeout):
+				t.Fatal("Ctrl+Q did not finish the CLI")
+			}
+		})
+	}
+}
+
+// frameInputQueue mirrors the library's inputQueueLimit: the most child input
+// the frame queues before it holds outer input and pauses outer reads.
+const frameInputQueue = 1 << 20
+
+// A Ctrl+Q that the frame holds while its child still runs is captured only
+// after the child has exited and been reaped. The CLI still returns the
+// child's own status.
+//
+// The child puts its PTY in raw mode and never reads, so the frame's input
+// queue fills. A paste leaves less room in that queue than the APC string that
+// follows it, and the frame frames that string only once its terminator
+// arrives. The terminator and Ctrl+Q are written together and so read
+// together: both are held behind the string, and outer reads pause until the
+// child exits.
+func TestExecuteReturnsChildStatusWhenCtrlQFollowsItsExit(t *testing.T) {
+	dir := projectTempDir(t)
+	started, exit := filepath.Join(dir, "started"), filepath.Join(dir, "exit")
+	script := `stty raw -echo; printf started > "$1"; while [ ! -e "$2" ]; do sleep 0.01; done; exit 7`
+	master, diagnostic := cliTTY(t, "--", "sh", "-c", script, "sh", started, exit)
+	outer := int(os.Stdin.Fd())
+	code := make(chan int, 1)
 	exited := make(chan struct{})
 	go func() {
 		defer close(exited)
-		done <- execute()
+		code <- execute()
 	}()
 	t.Cleanup(func() {
-		if err := master.Close(); err != nil {
+		if err := master.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
 			t.Errorf("close CLI terminal: %v", err)
 		}
 		select {
@@ -94,33 +164,64 @@ func TestExecuteCtrlQStopsItsRealChild(t *testing.T) {
 			t.Error("CLI did not stop after terminal closure")
 		}
 	})
+	awaitFile(t, started, exited)
+	if err := master.SetWriteDeadline(time.Now().Add(sessionTimeout)); err != nil {
+		t.Fatal(err)
+	}
+	const room = 8 << 10
+	fill := "\x1b[200~" + strings.Repeat("a", frameInputQueue-room) + "\x1b[201~"
+	held := "\x1b_" + strings.Repeat("x", 32*room)
+	for _, input := range []string{fill, held} {
+		if _, err := master.WriteString(input); err != nil {
+			t.Fatal(err)
+		}
+		awaitOuterRead(t, outer, exited)
+	}
+	// String Terminator, then Ctrl+Q.
+	if _, err := master.WriteString("\x1b\\\x11"); err != nil {
+		t.Fatal(err)
+	}
+	awaitOuterRead(t, outer, exited)
+	if err := os.WriteFile(exit, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-code:
+		message, err := os.ReadFile(diagnostic)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != 7 {
+			t.Fatalf("execute returned %d, want the child's own status 7: %q", got, message)
+		}
+	case <-time.After(sessionTimeout):
+		t.Fatal("CLI did not finish after its child exited")
+	}
+}
+
+// awaitOuterRead waits until the CLI has read every byte written to its
+// terminal, whose input descriptor is fd, failing if the CLI exits first. A
+// zero-timeout poll reports unread input without consuming it.
+func awaitOuterRead(t *testing.T, fd int, exited <-chan struct{}) {
+	t.Helper()
 	deadline := time.NewTimer(sessionTimeout)
 	defer deadline.Stop()
-	tick := time.NewTicker(10 * time.Millisecond)
+	tick := time.NewTicker(time.Millisecond)
 	defer tick.Stop()
 	for {
+		fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+		if _, err := unix.Poll(fds, 0); err != nil && !errors.Is(err, unix.EINTR) {
+			t.Fatal(err)
+		}
+		if fds[0].Revents&unix.POLLIN == 0 {
+			return
+		}
 		select {
 		case <-tick.C:
-			if _, err := os.Stat(ready); err == nil {
-				if _, err := master.Write([]byte{0x11}); err != nil {
-					t.Fatal(err)
-				}
-				select {
-				case got := <-done:
-					if got != 0 {
-						t.Fatalf("Ctrl+Q returned %d", got)
-					}
-					return
-				case <-deadline.C:
-					t.Fatal("Ctrl+Q did not finish the CLI")
-				}
-			} else if !os.IsNotExist(err) {
-				t.Fatal(err)
-			}
-		case got := <-done:
-			t.Fatalf("CLI exited before its child started: %d", got)
+		case <-exited:
+			t.Fatal("CLI exited before it read its input")
 		case <-deadline.C:
-			t.Fatal("CLI did not start its child")
+			t.Fatal("CLI left its input unread")
 		}
 	}
 }

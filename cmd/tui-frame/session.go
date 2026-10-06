@@ -34,11 +34,8 @@ func runDemo(ctx context.Context, child *exec.Cmd, showcase, inheritTerminal boo
 	if failure := sessionFailure(err); failure != nil {
 		return failure
 	}
-	if errors.Is(err, errDemoQuit) {
-		// The frame terminated the child on request, so its status records that
-		// termination rather than a result of its own.
-		return nil
-	}
+	// The wrapper is transparent: a quit only starts the child's termination,
+	// so the status is however the child ended, as when it exits on its own.
 	if result.ProcessState == nil {
 		return errors.New("child frame returned without a process exit state")
 	}
@@ -57,9 +54,11 @@ func runDemo(ctx context.Context, child *exec.Cmd, showcase, inheritTerminal boo
 }
 
 // sessionFailure reports err, the error Frame.Run returned, without the quit
-// request, or nil when the quit was its only error. Frame.Run joins the
-// context's cause with the later signal, render, deadline, read, drain, and
-// cleanup errors, so a quit fails when any of those fails.
+// request, or nil when the quit was its only error: the quit is the user's own
+// request rather than a failure, and the child's status reports how the child
+// ended. Frame.Run joins the context's cause with the later signal, render,
+// deadline, read, drain, and cleanup errors, so a quit fails when any of those
+// fails.
 func sessionFailure(err error) error {
 	if rest := withoutQuit(err); rest != nil {
 		return fmt.Errorf("run child frame: %w", rest)

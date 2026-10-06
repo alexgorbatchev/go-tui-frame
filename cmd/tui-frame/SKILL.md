@@ -9,7 +9,7 @@ description: >-
 author: alexgorbatchev
 metadata:
   created_on: 2026-10-01 13:23
-  last_modified: 2026-10-06 14:48
+  last_modified: 2026-10-06 16:49
   status: current
 ---
 
@@ -178,11 +178,15 @@ paths and displays the selected command's help, including the root when a
 trailing topic does not resolve to a subcommand.
 A child exiting normally returns its own exit code;
 a signal termination maps to `128 + signal number`. The status alone reports
-the child's result; the wrapper writes no diagnostic for it. Ctrl+Q returns 0
-when no session operation fails. A failure while Ctrl+Q ends the session, such
-as painting the child's final output, signalling its process groups, draining,
-or restoring the terminal, is reported on stderr as `run child frame: <error>`
-and returns a nonzero status. SIGHUP, SIGINT, or SIGTERM sent
+the child's result; the wrapper writes no diagnostic for it. Ctrl+Q follows the
+same rule. It sends SIGTERM to the child's process groups, then SIGKILL one
+second later if needed, and returns however the child ends: 143 when SIGTERM
+ends it, 137 after SIGKILL, or the child's own code when it handles SIGTERM and
+exits. A Ctrl+Q handled after the child has already exited returns that exit's
+status. A failure while Ctrl+Q ends the session, such as painting the child's
+final output, signalling its process groups, draining, or restoring the
+terminal, is reported on stderr as `run child frame: <error>` and returns a
+nonzero status. SIGHUP, SIGINT, or SIGTERM sent
 to the wrapper cancels the session and returns `128 + signal number`: 129 for
 SIGHUP, 130 for SIGINT, and 143 for SIGTERM. Stderr reports
 `run child frame: <name> signal received`, where `<name>` is `hangup`,
