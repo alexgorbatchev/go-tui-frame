@@ -113,21 +113,25 @@ func TestRoutingUsesNativeKeyboardEncodingForDifferentModes(t *testing.T) {
 
 // An outer terminal reports Option that means Alt as Alt with no text, or with
 // the key's own or shifted character, so the child receives its Alt encoding.
-// Host profiles mirror console.syncInput: Capture adds Kitty disambiguation,
-// or modifyOtherKeys mode 2 when Kitty is unavailable.
+// Host profiles mirror console.syncInput: Capture adds Kitty disambiguation
+// and alternate keys for a child without disambiguation, or modifyOtherKeys
+// mode 2 when Kitty is unavailable.
 // Ghostty applies option-as-alt only on macOS, so these cases go red only there.
 func TestRoutingConvertsAltModifiedKeysToChildAltEncoding(t *testing.T) {
-	const associatedHost = ghostty.KittyKeyDisambiguate | ghostty.KittyKeyReportAssociated
+	const (
+		capture        = ghostty.KittyKeyDisambiguate | ghostty.KittyKeyReportAlternates
+		associatedHost = capture | ghostty.KittyKeyReportAssociated
+	)
 	for _, tt := range []struct {
 		name, modes, input, want string
 		hostKitty                ghostty.KittyKeyFlags
 		hostModifyOtherKeys2     bool
 	}{
-		{name: "Kitty host to legacy child", input: "\x1b[98;3u", want: "\x1bb", hostKitty: ghostty.KittyKeyDisambiguate},
+		{name: "Kitty host to legacy child", input: "\x1b[98;3u", want: "\x1bb", hostKitty: capture},
 		{name: "modifyOtherKeys host to legacy child", input: "\x1b[27;3;98~", want: "\x1bb", hostModifyOtherKeys2: true},
 		{
 			name: "Kitty host to modifyOtherKeys child", modes: "\x1b[>4;2m", input: "\x1b[98;3u", want: "\x1b[27;3;98~",
-			hostKitty: ghostty.KittyKeyDisambiguate, hostModifyOtherKeys2: true,
+			hostKitty: capture, hostModifyOtherKeys2: true,
 		},
 		{name: "Kitty host to associated-text child", modes: "\x1b[>16u", input: "\x1b[98;3u", want: "\x1b[98;3u", hostKitty: associatedHost},
 		{name: "own text to associated-text child", modes: "\x1b[>16u", input: "\x1b[98;3;98u", want: "\x1b[98;3u", hostKitty: associatedHost},
@@ -183,8 +187,9 @@ func TestRoutingConvertedKeysKeepProducedCharacter(t *testing.T) {
 
 // With all keys and associated text reported, an outer terminal whose Option
 // is not Alt still sets the Alt bit and attaches the text Option composed. A
-// child requesting Kitty flags 24 gets host flags 25 under Capture. Every child
-// protocol receives that text, as it did before Option was treated as Alt.
+// child requesting Kitty flags 24 gets host flags 29 under Capture, which adds
+// disambiguation and alternate keys. Every child protocol receives that text,
+// as it did before Option was treated as Alt.
 func TestRoutingKeepsOptionComposedText(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("the native encoder honors option-as-alt only on macOS")
@@ -203,7 +208,7 @@ func TestRoutingKeepsOptionComposedText(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			r, em := newRouterTest(t, nil)
 			s := routerState(t, em, tt.modes)
-			r.host.KittyFlags = ghostty.KittyKeyDisambiguate | ghostty.KittyKeyReportAll | ghostty.KittyKeyReportAssociated
+			r.host.KittyFlags = ghostty.KittyKeyDisambiguate | ghostty.KittyKeyReportAlternates | ghostty.KittyKeyReportAll | ghostty.KittyKeyReportAssociated
 			if got := routeBytes(t, r, s, tt.input); string(got) != tt.want {
 				t.Fatalf("converted Option-composed text = %q, want %q", got, tt.want)
 			}
