@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-02 14:14
-last_modified: 2026-10-02 14:56
+last_modified: 2026-10-06 14:27
 status: current
 ---
 
@@ -11,9 +11,10 @@ recorder patches. Follow [the recording guide](../docs/internal/references/demo-
 for pinned builds, validation, and rendering.
 
 - Show the wrapper's layouts, colors, and border resizing while Yazi stays inside.
-- Display a genuine pressed-key overlay. Send actual Ctrl+1/2/3 browser events;
-  do not substitute action labels, autoplay, synthetic terminal reports, or
-  ambiguous key aliases in the published tape.
+- Display a genuine pressed-key overlay. Send actual browser key events for the
+  Ctrl+B prefix and the 1/2/3 that follows it; do not substitute action labels,
+  autoplay, synthetic terminal reports, or ambiguous key aliases in the
+  published tape.
 - Place the pressed-key overlay in the bottom-right corner.
 - Observe actual browser key-down/key-up events: show `↓`/`↑`, highlight held
   keys, and dim released keys. Never infer event phases from chord captions.

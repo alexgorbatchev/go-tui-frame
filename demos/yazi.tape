@@ -37,25 +37,33 @@ Sleep 500ms
 Show
 CaptionOn
 Sleep 1.5s
-Ctrl+"1"
+Ctrl+B
+Type "1"
 Wait+Screen /Layered badge/
 Sleep 1.8s
-Ctrl+"2"
+Ctrl+B
+Type "2"
 Sleep 1.8s
-Ctrl+"2"
+Ctrl+B
+Type "2"
 Sleep 1.8s
-Ctrl+"3"
+Ctrl+B
+Type "3"
 Wait+Screen /100×23 \| border off/
 Sleep 1.8s
-Ctrl+"1"
+Ctrl+B
+Type "1"
 Wait+Screen /Bordered card/
 Sleep 1.8s
-Ctrl+"3"
+Ctrl+B
+Type "3"
 Wait+Screen /98×21 \| border on/
 Sleep 1.8s
-Ctrl+"2"
+Ctrl+B
+Type "2"
 Sleep 1.8s
-Ctrl+"1"
+Ctrl+B
+Type "1"
 Wait+Screen /Signal bar/
 Wait+Screen /The border toggles and Yazi resizes\./
 Sleep 2s

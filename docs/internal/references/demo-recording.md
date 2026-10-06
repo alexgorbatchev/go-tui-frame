@@ -1,16 +1,17 @@
 ---
 created_on: 2026-10-02 14:14
-last_modified: 2026-10-02 14:56
+last_modified: 2026-10-06 14:27
 status: current
 ---
 
 # Record the demo with pressed keys
 
 This guide reproduces `assets/demo.gif` for maintainers. Run commands from the
-repository root. The tape sends actual browser Ctrl+1/2/3 events to the wrapper;
-it does not use `--showcase`, synthetic terminal reports, or action labels.
-The browser overlay observes native key-down/key-up events. For Ctrl+1, it shows
-`Ctrl ↓`, `1 ↓`, `1 ↑`, and `Ctrl ↑`; held keys are highlighted and released
+repository root. The tape sends actual browser key events to the wrapper: the
+Ctrl+B prefix, then 1, 2 or 3. It does not use `--showcase`, synthetic terminal
+reports, or action labels. The browser overlay observes native key-down/key-up
+events. For Ctrl+B, then 1, it records `Ctrl ↓`, `B ↓`, `B ↑`, `Ctrl ↑`, `1 ↓`,
+and `1 ↑` and shows the latest four; held keys are highlighted and released
 keys are dimmed. It does not intercept input or derive phases from chord text.
 
 ## Requirements
@@ -97,8 +98,8 @@ the child viewport to change between 98×21 and 100×23. Startup and teardown ar
 hidden, and Yazi stays on the sample preview throughout. Four keycaps sit in the
 bottom-right corner and clear after 1.5 seconds of inactivity with no held keys.
 Browser margins are relative to the captured terminal screen; the GIF also has
-18 pixels of outer padding. Numeric keys are quoted in the tape because
-this PR's parser accepts `Ctrl+"1"` rather than an unquoted numeric token.
+18 pixels of outer padding. The tape sends Ctrl+B as a native chord and types
+each digit after it.
 
 Inspect representative GIF frames after rendering, including a visible key,
 both border states, and the final Signal bar. Font or browser changes can affect
