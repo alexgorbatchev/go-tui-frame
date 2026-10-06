@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 10:47
-last_modified: 2026-10-06 12:01
+last_modified: 2026-10-06 12:09
 status: current
 ---
 
@@ -8,7 +8,7 @@ status: current
 
 **`go-tui-frame` uses a real child terminal endpoint, a stateful terminal emulator, and a compositor to surround one external TUI with consumer information.** Removing pane management does not remove terminal emulation: cursor movement, erase/reset operations, alternate screens, and queries still need a child-local display. Default forwarding preserves uncaptured keyboard bytes when negotiated protocols agree; mouse coordinates require viewport translation, and paste markers adapt independently of their opaque payload. The user selected **statically linked libghostty**, requiring a standalone wrapper binary without a separately installed native emulator. The confirmed module is `github.com/alexgorbatchev/go-tui-frame`, with Linux/macOS implementation and Windows excluded. **Core configuration/drawing, native emulation, input/capture/routing, bounded observations, and Run exist; real PTY session/CLI tests and macOS/Linux-amd64/Linux-arm64 linkage audits have execution evidence.** Complete arbitrary-TUI fidelity remains unestablished: graphics, richer terminal metadata and platform coverage still have explicit gaps. ([PTY semantics](https://man7.org/linux/man-pages/man7/pty.7.html), [current core](../frame.go), [session](../session.go), [routing](../routing.go), [verification record](../docs/internal/references/verification.md).)
 
-The user explicitly requests a [README written in present tense as the consumer implementation specification](../README.md), subsequently authorizing implementation and the example CLI. The README distinguishes the current supported profile from the broader outstanding specification. Repository evidence does not establish a published module, released binaries, or a successful consumer `go get`; verification here is local and capability-specific.
+The user explicitly requests a [README written in present tense as the consumer implementation specification](../README.md), subsequently authorizing implementation and the example CLI. The README distinguishes the current supported profile from the broader outstanding specification. The module is published as v1.0.0, without release binaries; a consumer `go get` of it is unverified. Verification is capability-specific.
 
 ## One framed child still requires a virtual terminal
 
@@ -188,7 +188,7 @@ Compatibility needs a **capability matrix rather than a blanket “all TUIs” c
 | Contract area | Current boundary and remaining requirement |
 | :--- | :--- |
 | Static packaging | Actual macOS-arm64, Linux-amd64 and Linux-arm64 executable audits pass. Reaudit artifacts after source changes; no extra native runtime dependency is permitted. |
-| Platforms | Linux/macOS code and CI exist; local terminal tests run on macOS arm64. Linux runtime and CI results are not established by cross-compilation. Other Unix platforms are unverified, Windows excluded. |
+| Platforms | CI runs the race suite on Linux x86_64 and macOS arm64. Linux arm64 executables are only cross-built and audited. Other Unix platforms are unverified, Windows excluded. |
 | Terminal identity | xterm-256color/truecolor virtual environment; mode-1049-reset outer query required; optional unknown modes are left unchanged. Feature advertisement must remain limited to the composed endpoint. |
 | Pointer boundaries | No outside clamping; frame-origin gestures are excluded, outside releases can leave child state held. Pixel precision/coordinate limits/native-invalid events fail explicitly. Richer crossing behavior remains open. |
 | Layout/width | Region reservations stay fixed; concurrent SetBorder coalesces live inset changes and resizes native/PTY geometry before further input routing. No positive viewport returns ErrViewportTooSmall; out-of-allocation native grid changes return GeometryError. Native canvas grapheme widths and terminals lacking mode 2027 retain a fidelity constraint. |
@@ -201,22 +201,10 @@ The implementation validation plan uses real child probes under real PTYs on eac
 
 **Implemented components and real PTY sessions have behavioral/race evidence; this is not arbitrary-TUI conformance.** The [module](../go.mod) uses Go 1.27.1, Lip Gloss v2.0.6, UV `878653296cfd` replaced by the `alexgorbatchev/ultraviolet` fork at `0ff1fafbd555` (upstream plus a Kitty alternate-key decoder fix and a `MatchString` lock-state fix), x/ansi v0.11.8, Cobra v1.10.2, cobra-help-tree/v2 v2.1.0 and the selected backend pins. Independent current checks cover root configuration/composition/Run, framing and native emulation. Real session tests exercise child/frame isolation, title, generated queries, idle push updates, terminal restoration, cancellation and multiple owned groups. The current control tests exercise Ctrl-1 layout, independent Ctrl-2 header backgrounds, Ctrl-3 border/native PTY resizing and Ctrl-Q, with ordinary digits and unmatched keys retained for the child. The CLI race suite passes with 93.5% statement coverage; complete argv including empty/spaced/flag arguments, native exit/signal outcomes and embedded help/guide have separate behavioral tests. CI runs the race suite and linkage audits on Linux x86_64 and macOS arm64; Linux arm64 executables are cross-built and audited but not run. ([session tests](../session_test.go), [verification record](../docs/internal/references/verification.md), [native behavior tests](../internal/emulator/encoding_test.go), [CLI session tests](../cmd/tui-frame/session_test.go).)
 
-```text
-# Inspected current component race results:
-ok github.com/alexgorbatchev/go-tui-frame 7.576s
-ok github.com/alexgorbatchev/go-tui-frame/internal/input 1.604s
-ok github.com/alexgorbatchev/go-tui-frame/internal/emulator 1.858s
-ok github.com/alexgorbatchev/go-tui-frame/internal/process 18.313s
-exit: 0
-
-# Baseline component vet:
-exit: 0; no diagnostics
-```
-
-Use `CGO_ENABLED=1 PKG_CONFIG_PATH="$PWD/.tmp/native/prefix/share/pkgconfig"` with the locally built native prefix. Component checks are actual reviewer executions; CLI/linkage outputs are inspected owner logs. Maintained README tests build the showcase and its capture/plain-text variants against the actual module and run the capture program on a real PTY; separate native/PTY tests verify the rest of the runtime behavior. The core dependency test resolves the production graph and excludes Lip Gloss. The repeated `just check` exits 0 after live-border, capture negotiation and measured-pixel changes, passing module hygiene, whole-repository builds/vet and all race-test packages (root `13.097s`, CLI `9.379s`). Selected native border/capture race checks pass; the CLI race suite passes with 93.5% statement coverage, and rebuilt macOS-arm64/Linux-amd64/Linux-arm64 linkage audits exit 0 after the drawing-interface revision. The [verification record](../docs/internal/references/verification.md) preserves command/result excerpts without depending on ignored local logs. CI runs the race suite on Linux x86_64 and macOS arm64, and v1.0.0 is published; a consumer installation of the module and a Linux arm64 runtime are unverified.
+Use `CGO_ENABLED=1 PKG_CONFIG_PATH="$PWD/.tmp/native/prefix/share/pkgconfig"` with the locally built native prefix. Maintained README tests build the showcase and its capture/plain-text variants against the actual module and run the capture program on a real PTY; separate native/PTY tests verify the rest of the runtime behavior. The core dependency test resolves the production graph and excludes Lip Gloss. `just check` runs module hygiene, the native, library and CLI builds, vet and the race suite; `just linkage` audits an executable's dynamic dependencies. The verification record's [Whole-repository gate](../docs/internal/references/verification.md#whole-repository-gate) and [Artifact audits](../docs/internal/references/verification.md#artifact-audits) sections give the current results.
 
 ## Conclusion
 
 The selected native emulator reduces protocol implementation but introduces a pinned native build and a young Go binding. Archive and executable audits verify static emulator linkage for the inspected macOS/Linux artifacts. The compact API centers on typed region drawing, direct invalidation, child execution and observation; it does not require consumer-managed synchronization plumbing. Every advertised child capability still requires a complete input/state/render/reply/cleanup path.
 
-The repository contains the requested research/consumer specification, implemented native session path and an exercised example CLI. The README presents the library's current API and supported-profile boundaries. Static libghostty is selected and pinned; graphics, complete native history/screen observations, and platform coverage remain material gaps against the original broad request. The module, native Ultraviolet screen, typed DrawContext, callback-last declarations and direct region invalidation are implemented. Local race tests and linkage audits establish those inspected behaviors, not full arbitrary-TUI fidelity, published installation or a CI result. The project [MIT license](../LICENSE) is Copyright (c) 2026 Alex Gorbatchev.
+The repository contains the requested research/consumer specification, implemented native session path and an exercised example CLI. The README presents the library's current API and supported-profile boundaries. Static libghostty is selected and pinned; graphics, complete native history/screen observations, and platform coverage remain material gaps against the original broad request. The module, native Ultraviolet screen, typed DrawContext, callback-last declarations and direct region invalidation are implemented. Race tests and linkage audits, locally and in CI, establish those inspected behaviors, not full arbitrary-TUI fidelity or a consumer installation of the published module. The project [MIT license](../LICENSE) is Copyright (c) 2026 Alex Gorbatchev.

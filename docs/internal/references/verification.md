@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 20:10
-last_modified: 2026-10-06 12:01
+last_modified: 2026-10-06 12:09
 status: current
 ---
 
@@ -32,13 +32,14 @@ Linux uses a different prefix and compiler; see the
 
 Allocation counts are deterministic: each benchmark reports the same count in
 every run. Byte counts are also identical across runs, except for owned
-captures, which vary by a few bytes/op between runs. Re-measure both when a change touches
-capture, repaint or input delivery.
+captures, which vary by a few bytes/op between runs. Re-measure both when a
+change touches capture, repaint or input delivery.
 
 Timings depend on machine load and are indicative only. The machine was shared
 with other work during the benchmark runs: load averages were 3.1–3.5 over
-1 minute and 7.6–8.7 over 5 minutes. Each table reports the median of three one-second runs.
-Compare a timing only with a run on the same machine under similar load.
+1 minute and 7.6–8.7 over 5 minutes. Each table reports the median of three
+one-second runs. Compare a timing only with a run on the same machine under
+similar load.
 
 ## Capture benchmarks
 
@@ -62,8 +63,9 @@ go test -run '^$' -bench 'BenchmarkBorrowedState|BenchmarkStateCapture' -benchme
 | Internal, one row | 14.14 µs | 2,472 | 83 |
 | Input modes only | 2.327 µs | 328 | 50 |
 
-The owned one-row median is below the owned unchanged median. An owned capture allocates about 1 MB more than an internal
-one because `State` clones the viewport's cell storage.
+The owned one-row median is below the owned unchanged median. An owned capture
+allocates about 1 MB more than an internal one because `State` clones the
+viewport's cell storage.
 
 The allocation profile of an internal one-row capture attributes 99.9% of
 allocated objects to libghostty binding calls. These are terminal getters
@@ -305,10 +307,10 @@ Capture and plain-text programs against the module and native archive. They
 run the Keyboard Capture program on a real PTY whose outer terminal is a
 libghostty emulator. A shell script stands in for nvim on `PATH`, so the
 documented source runs unchanged. Three cases check the exit status and
-standard error: Ctrl+Q exits 0 with empty standard error, a child exit status is
-reported, and a session error after Ctrl+Q is reported. The core dependency test resolves
-the production package graph with `go list -deps` and confirms that Lip Gloss
-is absent; the CLI demo uses it.
+standard error: Ctrl+Q exits 0 with empty standard error, a child exit status
+is reported, and a session error after Ctrl+Q is reported. The core dependency
+test resolves the production package graph with `go list -deps` and confirms
+that Lip Gloss is absent; the CLI demo uses it.
 
 ### Sessions, routing and the CLI
 
