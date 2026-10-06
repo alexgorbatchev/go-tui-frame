@@ -154,6 +154,8 @@ func (f *Frame[T]) Capture(handler func(Input) Disposition) *Frame[T] {
 }
 
 // Observe receives durable observations without consuming input.
+// Exited follows Started exactly once before Run returns, unless observation
+// fails; see Exited.
 // A handler panic ends the session as cancellation does, and Run returns an
 // error with the panic value and stack. A handler that calls runtime.Goexit,
 // as t.FailNow and t.Fatal do, ends the session the same way, and Run returns
@@ -166,6 +168,9 @@ func (f *Frame[T]) Observe(handler func(Event)) *Frame[T] {
 // ObserveEvents receives only the selected event kinds. An empty selection
 // disables observations; unknown kinds fail configuration when Run begins.
 // StateChanged retains one owned snapshot per child-output read when selected.
+// A selected Exited arrives exactly once before Run returns for a session that
+// emitted Started, whether Started is selected or not, unless observation
+// fails; see Exited.
 // A handler panic ends the session as cancellation does, and Run returns an
 // error with the panic value and stack. A handler that calls runtime.Goexit,
 // as t.FailNow and t.Fatal do, ends the session the same way, and Run returns

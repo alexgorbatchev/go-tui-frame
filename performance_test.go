@@ -2,9 +2,11 @@ package frame
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -384,20 +386,52 @@ func TestObservationSelectionPreservesPerReadSnapshotsAndDamage(t *testing.T) {
 	}
 }
 
+// The session loop reaps the launch leader while it runs, and cleanup once it
+// has returned. After Started, either reap emits one Exited carrying the
+// display the child's last output left, also when Wait fails without reporting
+// an exit status. Cleanup for a session that failed before Started emits none.
 func TestExitSubscriptionCapturesPendingOutput(t *testing.T) {
-	s, _, slave := newRepaintSession(t, ansi.ModeReset, nil)
-	var got Event
-	s.events = newEventDispatcher(eventBit(Exited), sessionCancel(t), func(ev Event) { got = ev })
-	t.Cleanup(s.events.close)
-	readRepaintChunk(t, s, slave, "final")
-	s.wait = make(chan error, 1)
-	s.wait <- nil
-	if err := s.reap(); err != nil {
-		t.Fatal(err)
+	loopReap := func(s *session[string], waitErr error) error {
+		s.wait = make(chan error, 1)
+		s.wait <- waitErr
+		return s.reap()
 	}
-	s.events.close()
-	if got.Kind != Exited || got.Snapshot.Terminal.Cells[0].Content != "f" {
-		t.Fatal("exit-only subscriber received stale display state")
+	cleanupReap := (*session[string]).finishWait
+	waitFailure := errors.New("wait failed")
+	for _, tt := range []struct {
+		name    string
+		reap    func(s *session[string], waitErr error) error
+		started bool
+		waitErr error
+	}{
+		{"session loop", loopReap, true, nil},
+		{"session loop after Wait failure", loopReap, true, waitFailure},
+		{"cleanup", cleanupReap, true, nil},
+		{"cleanup after Wait failure", cleanupReap, true, waitFailure},
+		{"cleanup before Started", cleanupReap, false, nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s, _, slave := newRepaintSession(t, ansi.ModeReset, nil)
+			s.started = tt.started
+			var got []Event
+			s.events = newEventDispatcher(eventBit(Exited), sessionCancel(t), func(ev Event) { got = append(got, ev) })
+			t.Cleanup(s.events.close)
+			readRepaintChunk(t, s, slave, "final")
+			if err := tt.reap(s, tt.waitErr); !errors.Is(err, tt.waitErr) || !s.waited {
+				t.Fatalf("reap = %v, waited %v; want %v and the leader reaped", err, s.waited, tt.waitErr)
+			}
+			s.events.close()
+			want := []EventKind{Exited}
+			if !tt.started {
+				want = nil
+			}
+			if kinds := eventKinds(got); !slices.Equal(kinds, want) {
+				t.Fatalf("exit-only subscriber received %v, want %v", kinds, want)
+			}
+			if tt.started && got[0].Snapshot.Terminal.Cells[0].Content != "f" {
+				t.Fatal("exit-only subscriber received stale display state")
+			}
+		})
 	}
 }
 

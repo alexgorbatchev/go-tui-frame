@@ -132,6 +132,7 @@ func (f *Frame[T]) Run(ctx context.Context) (result Result, err error) {
 	if err = events.emit(Event{Kind: Started, Snapshot: &s.snapshot}); err != nil {
 		return result, err
 	}
+	s.started = true
 	if err = s.hold(saved...); err != nil {
 		return result, err
 	}
@@ -173,7 +174,7 @@ type session[T any] struct {
 	wait                                                      chan error
 	waitDone                                                  chan struct{}
 	waited, ptyEOF                                            bool
-	terminationStarted                                        bool
+	started, terminationStarted                               bool
 	waitErr, drainErr                                         error
 	queue                                                     []pendingInput
 	held                                                      []input.Packet
@@ -234,16 +235,13 @@ func (s *session[T]) refresh(force bool) error {
 	return s.render(force)
 }
 
+// refreshState captures the virtual terminal's state and synchronizes outer
+// input modes and routing with it.
 func (s *session[T]) refreshState() error {
-	if err := s.terminal.UpdateState(&s.nextState); err != nil {
+	if err := s.captureState(); err != nil {
 		return err
 	}
-	state := s.nextState
-	s.metadataDirty = s.metadataDirty || regionMetadataChanged(s.state, state)
-	s.nextState, s.state = s.state, state
-	s.statePending = false
-	s.snapshot.ObservedAt = time.Now()
-	s.snapshot.Terminal = TerminalSnapshot{Title: state.Title, Directory: state.Directory, Size: Size{Cols: state.Size.Cols, Rows: state.Size.Rows}, Cells: state.Cells, Cursor: Cursor{X: int(state.Cursor.ViewportX), Y: int(state.Cursor.ViewportY), Visible: state.Cursor.Visible && state.Cursor.ViewportHasValue}, Alternate: state.Alternate, Native: state}
+	state := s.state
 	// Keep separate routing maps: per-read updates must not mutate the last
 	// metadata sample used to decide whether region callbacks need redrawing.
 	input := &s.inputState
@@ -259,6 +257,20 @@ func (s *session[T]) refreshState() error {
 	input.KittyKeyboardFlags, input.ModifyOtherKeys2 = state.KittyKeyboardFlags, state.ModifyOtherKeys2
 	input.MouseTracking = state.MouseTracking
 	return s.syncInput()
+}
+
+// captureState copies the virtual terminal's state into the snapshot.
+func (s *session[T]) captureState() error {
+	if err := s.terminal.UpdateState(&s.nextState); err != nil {
+		return err
+	}
+	state := s.nextState
+	s.metadataDirty = s.metadataDirty || regionMetadataChanged(s.state, state)
+	s.nextState, s.state = s.state, state
+	s.statePending = false
+	s.snapshot.ObservedAt = time.Now()
+	s.snapshot.Terminal = TerminalSnapshot{Title: state.Title, Directory: state.Directory, Size: Size{Cols: state.Size.Cols, Rows: state.Size.Rows}, Cells: state.Cells, Cursor: Cursor{X: int(state.Cursor.ViewportX), Y: int(state.Cursor.ViewportY), Visible: state.Cursor.Visible && state.Cursor.ViewportHasValue}, Alternate: state.Alternate, Native: state}
+	return nil
 }
 
 func (s *session[T]) refreshInput() error {
@@ -794,35 +806,66 @@ func (s *session[T]) reapOverdue() bool {
 	return !s.waited && !s.reapDeadline.IsZero() && !time.Now().Before(s.reapDeadline)
 }
 
+// reap handles Wait's report of the launch leader while the session loop
+// runs. The output drain that follows still draws, so the snapshot is sampled
+// whether or not Exited is observed.
 func (s *session[T]) reap() error {
 	select {
 	case err := <-s.wait:
-		s.waited = true
+		waitErr := s.recordReap(err)
 		s.waitErr = err
 		s.queue = nil
 		s.queuedBytes = 0
-		s.snapshot.Child.ProcessState = s.frame.cmd.ProcessState
 		s.collectMetadata()
 		s.reapDeadline = time.Time{}
 		s.drainDeadline = time.Now().Add(drainTimeout)
-		var exit *exec.ExitError
-		if err != nil && !errors.As(err, &exit) {
-			return fmt.Errorf("wait child: %w", err)
-		}
 		// Held input can no longer reach the child. Route it for capture and
 		// observers as its read would have; enqueue now discards its bytes.
-		if err := s.routeHeld(); err != nil {
-			return err
-		}
+		errs := []error{waitErr, s.routeHeld()}
 		if s.statePending && s.events.wants(Exited) {
-			if err := s.refreshState(); err != nil {
-				return err
-			}
+			errs = append(errs, s.refreshState())
 		}
-		return s.events.emit(Event{Kind: Exited, Snapshot: &s.snapshot})
+		return errors.Join(append(errs, s.events.emit(Event{Kind: Exited, Snapshot: &s.snapshot}))...)
 	default:
 		return nil
 	}
+}
+
+// finishWait handles Wait's report of the launch leader after the session
+// loop has returned. Nothing draws any more, so the snapshot is sampled only
+// for Exited, and outer input modes stay as the loop left them for
+// restoration.
+func (s *session[T]) finishWait(err error) error {
+	errs := []error{s.recordReap(err)}
+	if s.reportsExit() {
+		s.collectMetadata()
+		if s.statePending {
+			errs = append(errs, s.captureState())
+		}
+		errs = append(errs, s.events.emit(Event{Kind: Exited, Snapshot: &s.snapshot}))
+	}
+	return errors.Join(errs...)
+}
+
+// recordReap records Wait's report of the launch leader: the leader is reaped,
+// and the snapshot carries the process state Run returns in Result. It returns
+// Wait's error unless that only reports the leader's exit status.
+func (s *session[T]) recordReap(err error) error {
+	s.waited = true
+	s.snapshot.Child.ProcessState = s.frame.cmd.ProcessState
+	var exit *exec.ExitError
+	if err != nil && !errors.As(err, &exit) {
+		return fmt.Errorf("wait child: %w", err)
+	}
+	return nil
+}
+
+// reportsExit reports whether cleanup's reap of the launch leader emits
+// Exited: Run emitted Started, which a session that fails earlier never
+// does, and Exited is observed. The session loop runs only after Started, so
+// its reap emits Exited whenever it is observed.
+func (s *session[T]) reportsExit() bool {
+	return s.started && s.events.wants(Exited)
 }
 
 func (s *session[T]) cleanupChild() error {
@@ -838,8 +881,14 @@ func (s *session[T]) cleanupChild() error {
 	// one. A leader the drain could not release has been exiting since its
 	// SIGKILL; the hangup releases it, and it discards the hangup's SIGHUP.
 	if s.master != nil {
+		if !s.waited && s.reportsExit() {
+			// The leader's reap follows the close, which ends PTY sampling, so
+			// Exited carries this last sample.
+			s.collectPTY()
+		}
 		errs = append(errs, s.master.Close())
-		s.master = nil
+		// The closed descriptor's number can be reused by another file.
+		s.master, s.fd = nil, -1
 	}
 	if !s.waited {
 		errs = append(errs, s.finishWait(<-s.wait))
@@ -894,17 +943,6 @@ func (s *session[T]) discardUntilReaped() error {
 			}
 		}
 	}
-}
-
-// finishWait records that the launch leader was reaped and returns Wait's
-// error unless it only reports the leader's exit status.
-func (s *session[T]) finishWait(err error) error {
-	s.waited = true
-	var exit *exec.ExitError
-	if err != nil && !errors.As(err, &exit) {
-		return err
-	}
-	return nil
 }
 
 func (s *session[T]) loop(ctx context.Context) error {

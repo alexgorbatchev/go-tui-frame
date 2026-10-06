@@ -256,6 +256,19 @@ empty selection disables observations; unknown kinds make `Run` fail before
 touching the terminal. Event sequence numbers count delivered events, and byte
 offsets remain local to each selected transport stream.
 
+`Started` carries the child's first snapshot once the session has entered the
+outer terminal and painted its first frame. `Exited` follows it exactly once,
+before `Run` returns, when `Wait` reports the launch leader: after the child
+exits, after cancellation, or after a session error that ends the session while
+the child runs. Its snapshot's `Child.ProcessState` is the state
+`Result.ProcessState` reports. When the session closes the child PTY to release
+a launch leader that cannot finish exiting, that snapshot's PTY data is the
+sample taken just before the close. A session that fails before emitting
+`Started`, including a `Started` that overflows the queue, emits no `Exited`.
+`Exited` is lost only when observation fails: a callback panic or
+`runtime.Goexit` discards it with every later event, and an `Exited` that
+overflows the queue is dropped, with `ErrObservationOverflow` in `Run`'s error.
+
 Selecting `StateChanged` captures an owned terminal snapshot after every child
 output read, including reads coalesced into one repaint. A subscription without
 `StateChanged` captures the viewport when painting or delivering a selected

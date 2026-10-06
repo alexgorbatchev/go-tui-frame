@@ -775,12 +775,15 @@ func TestSessionErrorCleanupReleasesStoppedChildOutput(t *testing.T) {
 // cleanup must share that bound rather than start its own.
 func TestCancellationReleasesStoppedChildOutput(t *testing.T) {
 	stopped := make(chan struct{})
-	d := startDetached(t, passOnlyStop, []EventKind{ChildInput}, func(e Event, _ <-chan struct{}) {
-		if bytes.Equal(e.Bytes, stopInput) {
+	var observed eventLog
+	d := startDetached(t, passOnlyStop, []EventKind{ChildInput, Exited}, func(e Event, _ <-chan struct{}) {
+		observed.record(e)
+		if e.Kind == ChildInput && bytes.Equal(e.Bytes, stopInput) {
 			close(stopped)
 		}
 	})
 	d.stopOutput(t, stopped)
+	canceled := time.Now()
 	d.cancel()
 	// SIGKILL follows SIGTERM after terminationTimeout and the reap bound
 	// drainTimeout after that. Half a drain deadline of margin fails a second
@@ -791,6 +794,155 @@ func TestCancellationReleasesStoppedChildOutput(t *testing.T) {
 	if status, ok := got.result.ProcessState.Sys().(syscall.WaitStatus); !ok || !status.Signaled() || status.Signal() != syscall.SIGTERM {
 		t.Fatalf("launch leader exit = %v, want the frame's SIGTERM", got.result.ProcessState)
 	}
+	// Cleanup reaps the leader only after closing the child PTY, which released
+	// it. Exited must still report that exit, with a PTY sample cleanup took
+	// before the close rather than one read through the closed descriptor. The
+	// loop's last sample predates the reap deadline, which the loop returns at.
+	pty := requireExited(t, observed.events(), got.result).Snapshot.Child.PTY
+	reapDeadline := canceled.Add(terminationTimeout + drainTimeout)
+	if pty.Window == nil || pty.WindowError != nil || pty.SettingsError != nil || pty.ObservedAt.Before(reapDeadline) {
+		t.Fatalf("Exited PTY sample = %#v, want one taken at %v or later while the child PTY was open", pty, reapDeadline)
+	}
+}
+
+// A session error that ends the session while the child runs leaves the launch
+// leader to cleanup, which kills and reaps it. Exited must still follow Started
+// once before Run returns, reporting the exit Result.ProcessState reports. A
+// failed observer receives nothing after its failure, Exited included.
+func TestSessionErrorReportsExitedBeforeRunReturns(t *testing.T) {
+	type sessionError struct {
+		name string
+		// startup types the key before the terminal answers the frame's first
+		// query, so the frame routes it after Started, before the session loop.
+		startup bool
+		// fault, when not nil, fails the observer on Started.
+		fault *observerFault
+	}
+	cases := []sessionError{{name: "startup input", startup: true}, {name: "session loop input"}}
+	for _, fault := range observerFaults(Started) {
+		cases = append(cases, sessionError{name: "observer " + fault.name, startup: true, fault: &fault})
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t)
+			if tt.startup {
+				h.precede(borderKey)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			started := make(chan struct{})
+			var observed eventLog
+			app := New(childCommand(t), struct{}{}).Terminal(h.slave, h.slave)
+			// The header leaves the child one of the terminal's 12 rows, too few
+			// for a border, so the border the key requests fails the session.
+			app.Header(11, func(DrawContext[struct{}]) {}).Capture(func(in Input) Disposition {
+				if bytes.Equal(in.Raw, borderKey) {
+					if err := app.SetBorder(true); err != nil {
+						t.Error(err)
+					}
+				}
+				return Consume
+			}).ObserveEvents([]EventKind{Started, Exited}, func(e Event) {
+				observed.record(e)
+				if e.Kind == Started {
+					close(started)
+					if tt.fault != nil {
+						tt.fault.fail()
+					}
+				}
+			})
+			done := startRun(ctx, app)
+			if !tt.startup {
+				select {
+				case <-started:
+				case got := <-done:
+					t.Fatalf("Run returned before the child started: %#v, %v", got.result, got.err)
+				case <-ctx.Done():
+					t.Fatal("Started was not observed", ctx.Err())
+				}
+				if _, err := unix.Write(h.fd, borderKey); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var got runOutcome
+			select {
+			case got = <-done:
+			case <-ctx.Done():
+				t.Fatal("Run did not return after the session error", ctx.Err())
+			}
+			if !errors.Is(got.err, ErrViewportTooSmall) || got.result.CleanupError != nil {
+				t.Fatalf("Run = %#v, %v; want %v and no cleanup error", got.result, got.err, ErrViewportTooSmall)
+			}
+			// Only cleanup's SIGKILL ends this child, so cleanup reaped it.
+			if status, ok := got.result.ProcessState.Sys().(syscall.WaitStatus); !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+				t.Fatalf("launch leader exit = %v, want cleanup's SIGKILL", got.result.ProcessState)
+			}
+			events := observed.events()
+			if tt.fault != nil {
+				if !errors.Is(got.err, tt.fault.want) || len(events) != 1 || events[0].Kind != Started {
+					t.Fatalf("failed observer received %v; Run error %v, want only Started and %v", eventKinds(events), got.err, tt.fault.want)
+				}
+				return
+			}
+			if kinds := eventKinds(events); !slices.Equal(kinds, []EventKind{Started, Exited}) {
+				t.Fatalf("observer received %v, want Started then Exited", kinds)
+			}
+			requireExited(t, events, got.result)
+		})
+	}
+}
+
+// borderKey is the key TestSessionErrorReportsExitedBeforeRunReturns captures
+// to request a border.
+var borderKey = []byte("b")
+
+// eventLog records the events an observer receives.
+type eventLog struct {
+	mu       sync.Mutex
+	recorded []Event
+}
+
+func (l *eventLog) record(e Event) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.recorded = append(l.recorded, e)
+}
+
+// events returns the events recorded so far. Once Run has returned, they are
+// every event the observer received.
+func (l *eventLog) events() []Event {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Clone(l.recorded)
+}
+
+// eventKinds returns the kind of each event, in order.
+func eventKinds(events []Event) []EventKind {
+	kinds := make([]EventKind, len(events))
+	for i, e := range events {
+		kinds[i] = e.Kind
+	}
+	return kinds
+}
+
+// requireExited checks that events hold exactly one Exited, reporting the
+// launch leader's exit as result does, and returns it.
+func requireExited(t *testing.T, events []Event, result Result) Event {
+	t.Helper()
+	var exited []Event
+	for _, e := range events {
+		if e.Kind == Exited {
+			exited = append(exited, e)
+		}
+	}
+	if len(exited) != 1 {
+		t.Fatalf("observer received %d Exited events, want 1", len(exited))
+	}
+	state, want := exited[0].Snapshot.Child.ProcessState, result.ProcessState
+	if state == nil || want == nil || state.String() != want.String() {
+		t.Fatalf("Exited process state = %v, want Result.ProcessState %v", state, want)
+	}
+	return exited[0]
 }
 
 // stopInput is VSTOP (^S), which the default line discipline applies with IXON.

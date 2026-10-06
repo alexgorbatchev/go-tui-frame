@@ -133,10 +133,20 @@ type Input struct {
 type EventKind string
 
 const (
-	OuterInput   EventKind = "outer-input"
-	ChildOutput  EventKind = "child-output"
-	ChildInput   EventKind = "child-input"
-	Started      EventKind = "started"
+	OuterInput  EventKind = "outer-input"
+	ChildOutput EventKind = "child-output"
+	ChildInput  EventKind = "child-input"
+	// Started carries the child's first snapshot, once the session has entered
+	// the outer terminal and painted its first frame.
+	Started EventKind = "started"
+	// Exited follows Started exactly once, before Run returns, when Wait reports
+	// the launch leader: after the child exits, after cancellation, or after a
+	// session error that ends the session while the child runs. Its snapshot's
+	// Child.ProcessState is the state Result.ProcessState reports. A session
+	// that fails before Started emits neither. Exited is lost only when
+	// observation fails: after a callback panic or runtime.Goexit, or when it
+	// overflows the queue, which Run's error then reports as
+	// ErrObservationOverflow.
 	Exited       EventKind = "exited"
 	Resized      EventKind = "resized"
 	Captured     EventKind = "captured"
