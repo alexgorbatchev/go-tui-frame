@@ -72,7 +72,22 @@ func TestBeginFreezesConfigurationAndHonorsCancellation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			f := New(exec.Command("sh"), "ready")
+			// Pipes instead of the default stdin and stdout: if Run ever got
+			// past the canceled context, it could not put a developer's
+			// terminal in raw mode and would fail on the non-terminal files.
+			input, output, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := input.Close(); err != nil {
+					t.Error(err)
+				}
+				if err := output.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			f := New(exec.Command("sh"), "ready").Terminal(input, output)
 			if _, err := f.Run(tt.canceled()); !errors.Is(err, tt.want) || f.cmd.Process != nil {
 				t.Fatalf("canceled startup = %v, want %v; process = %v", err, tt.want, f.cmd.Process)
 			}
