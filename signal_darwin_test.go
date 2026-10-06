@@ -126,7 +126,7 @@ func (c *lingeringChild) awaitExiting(t *testing.T, deadline time.Time) bool {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatalf("child %d did not start exiting", c.pgid)
+	t.Fatalf("the exit window was never caught before the deadline: child %d had not started to exit", c.pgid)
 	return false
 }
 
