@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 20:10
-last_modified: 2026-10-06 11:41
+last_modified: 2026-10-06 12:01
 status: current
 ---
 
@@ -31,8 +31,8 @@ Linux uses a different prefix and compiler; see the
 [pinned native build](native-build.md).
 
 Allocation counts are deterministic: each benchmark reports the same count in
-all three runs. Byte counts are also identical across runs, except for owned
-captures, which vary by up to 3 bytes/op. Re-measure both when a change touches
+every run. Byte counts are also identical across runs, except for owned
+captures, which vary by a few bytes/op between runs. Re-measure both when a change touches
 capture, repaint or input delivery.
 
 Timings depend on machine load and are indicative only. The machine was shared
@@ -56,14 +56,13 @@ go test -run '^$' -bench 'BenchmarkBorrowedState|BenchmarkStateCapture' -benchme
 
 | Capture | Time/op (indicative) | Bytes/op | Allocations/op |
 | :--- | ---: | ---: | ---: |
-| Owned, unchanged | 156.0 µs | 1,010,488–1,010,489 | 84 |
-| Owned, one row | 132.9 µs | 1,010,561–1,010,564 | 91 |
+| Owned, unchanged | 156.0 µs | about 1,010,490 | 84 |
+| Owned, one row | 132.9 µs | about 1,010,560 | 91 |
 | Internal, unchanged | 3.521 µs | 2,408 | 74 |
 | Internal, one row | 14.14 µs | 2,472 | 83 |
 | Input modes only | 2.327 µs | 328 | 50 |
 
-Under this load the owned medians are out of order: the one-row median is below
-the unchanged one. An owned capture allocates about 1 MB more than an internal
+The owned one-row median is below the owned unchanged median. An owned capture allocates about 1 MB more than an internal
 one because `State` clones the viewport's cell storage.
 
 The allocation profile of an internal one-row capture attributes 99.9% of
@@ -136,8 +135,8 @@ These component measurements do not establish physical terminal latency.
 ### Native formatter comparison
 
 The [native formatter benchmark](../../../internal/emulator/formatter_benchmark_test.go)
-measures libghostty's VT export of the whole screen after the same one-character
-child write. It excludes placement, clearing, composition and terminal
+measures the same one-character child write plus libghostty's VT export of the
+whole screen. It excludes placement, clearing, composition and terminal
 delivery. For the populated 120×40 fixture it exports 4,838 bytes per frame:
 8.200 µs/op with 4 allocations into a buffer, and 8.745 µs/op with 3 allocations
 through a writer. The session's incremental repaint emits 9 bytes for the same
@@ -203,8 +202,10 @@ libghostty's own getters. They also reject unsupported manifests.
 [Color tests](../../../internal/emulator/colors_test.go) verify that RGB and
 palette backgrounds survive erase-line and erase-display, and that a later erase
 with default attributes restores the default background. In
-[repaint tests](../../../repaint_test.go), an erased background reaches a native
-outer terminal through a real PTY without overwriting the header.
+[repaint tests](../../../repaint_test.go), child output that erases with a
+background color arrives through a real PTY. Replaying the repaint on a native
+outer terminal shows that background on the erased rows without overwriting the
+header.
 
 ### Damage, reuse and repaint
 
@@ -316,7 +317,7 @@ is absent; the CLI demo uses it.
 | [Real framed session](../../../session_test.go) | Idle push rendering, child title, native SID/group/argv/session inventory, real PTY window size, settings and foreground group, observer-copy isolation, termios restoration and closed-controller rejection. Cancellation restores the terminal before observers drain, returns the cause and ends every owned process group. An observer panic or `runtime.Goexit` ends the session through shutdown, also during the shutdown drain. Error and cancellation cleanup finish while a detached process holds the slave, also when flow control has stopped child output. |
 | [Wake pipe](../../../wake_test.go) | Native pipe wake, coalescing on a full pipe, and failure propagation to the event loop and cleanup. |
 | [Native routing](../../../routing_test.go) | Original-byte agreement, native key conversion, Alt and produced-character conversion, paste envelopes, focus, localized cell and pixel mouse reports, buttonless releases and capture gestures. |
-| [Cursor and keypad provenance](../../../routing_test.go) | SS3 and C1 cursor input converts for a normal child. SS3 keypad digits and Enter convert for a numeric child; matching C1 application input stays exact. |
+| [Cursor and keypad provenance](../../../routing_test.go) | SS3 and C1 cursor input converts for a normal child. SS3 and C1 keypad 0 and SS3 Enter convert for a numeric child; matching C1 application input stays exact. |
 | [Native graphics profile](../../../internal/emulator/profile_test.go) | Disabled Kitty graphics does not return a positive capability reply before or after reset and alternate-screen switches. |
 | [Native process ownership](../../../internal/process/snapshot_test.go), [groups](../../../internal/process/groups_test.go), [Darwin groups](../../../internal/process/groups_darwin_test.go), [Darwin argv](../../../internal/process/args_darwin_test.go) | Current native fields, runtime cwd and owned copies. Same-session inventory survives a reaped launch leader. Darwin group exit follows member states, and Darwin empty argv0 and environment alignment have dedicated native tests. |
 | [Live border](../../../border_test.go) | Updates before and during Run, closed-session rejection, and the applied native grid and actual PTY size. Measured cell pixels are preserved when the outer winsize has only cells. |
