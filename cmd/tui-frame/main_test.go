@@ -156,6 +156,11 @@ func TestCLIQuitChild(t *testing.T) {
 // After Ctrl+Q the frame keeps painting the child's output until the child
 // exits, then restores the terminal. Failures in that shutdown are session
 // errors, so the quit request must not hide them.
+//
+// The test depends on the library's terminationTimeout: the frame sends
+// SIGKILL one second after its SIGTERM. The hangup and the child's after-quit
+// write must both happen inside that window. If they do not, the child dies
+// before the frame has failed to paint, and the test fails.
 func TestExecuteCtrlQReportsShutdownFailures(t *testing.T) {
 	dir := projectTempDir(t)
 	t.Setenv("FRAME_CLI_QUIT_DIR", dir)
