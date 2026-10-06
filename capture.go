@@ -9,7 +9,8 @@ import (
 )
 
 // keyboardFilter is owned by the session input router. When the negotiated
-// protocol reports releases, the press determines who owns the final release.
+// protocol reports releases, the press determines who owns its repeats and
+// final release.
 type keyboardFilter struct {
 	handler  func(Input) Disposition
 	releases bool
@@ -72,9 +73,7 @@ func (f *keyboardFilter) handle(packet input.Packet) (Disposition, error) {
 	case uv.KeyPressEvent:
 		switch {
 		case held >= 0 && ev.IsRepeat:
-			if f.gestures[held].disposition == Consume {
-				disposition = Consume
-			}
+			disposition = f.gestures[held].disposition
 		case held >= 0:
 			f.gestures[held] = gesture{code: k.Code, base: k.BaseCode, disposition: disposition}
 		default:

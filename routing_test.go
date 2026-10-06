@@ -155,6 +155,52 @@ func TestRoutingCaptureOwnsConsumedReleaseAndLeavesPassedBytes(t *testing.T) {
 	}
 }
 
+// A press the handler passes owns its repeats as it owns its release. A
+// handler whose answer changes while the key is held still sees every repeat,
+// but the child receives the whole gesture rather than a press and release
+// with repeats missing between them.
+func TestRoutingPassedPressKeepsRepeatsAndReleaseInChild(t *testing.T) {
+	var handled []uv.KeyEvent
+	r, em := newRouterTest(t, func(in Input) Disposition {
+		handled = append(handled, in.Key)
+		if len(handled) == 1 {
+			return Pass
+		}
+		return Consume
+	})
+	s := routerState(t, em, "\x1b[>3u")
+	r.host.KittyFlags = s.KittyKeyboardFlags
+	gesture := []struct {
+		raw    string
+		repeat bool
+	}{
+		{raw: "\x1b[113;5u"},
+		{raw: "\x1b[113;5:2u", repeat: true},
+		{raw: "\x1b[113;5:2u", repeat: true},
+		{raw: "\x1b[113;5:3u"},
+	}
+	for _, phase := range gesture {
+		packets := routerPackets(t, phase.raw)
+		if len(packets) != 1 {
+			t.Fatalf("decoded %d packets from %q, want one key", len(packets), phase.raw)
+		}
+		if press, ok := packets[0].Event.(uv.KeyPressEvent); ok && press.IsRepeat != phase.repeat {
+			t.Fatalf("%q decoded with IsRepeat %v, want %v", phase.raw, press.IsRepeat, phase.repeat)
+		}
+		got, err := r.route(packets[0], s)
+		if err != nil || got.Disposition != Pass || string(got.Bytes) != phase.raw {
+			t.Fatalf("passed gesture phase %q routed as %q (%v), %v; want its exact bytes passed", phase.raw, got.Bytes, got.Disposition, err)
+		}
+	}
+	if len(handled) != len(gesture) {
+		t.Fatalf("handler observed %d gesture phases, want %d", len(handled), len(gesture))
+	}
+	press := gesture[0].raw
+	if got := routeBytes(t, r, s, press); len(got) != 0 {
+		t.Fatalf("press after the release delivered %q; the handler consumes it", got)
+	}
+}
+
 func TestRoutingPasteChangesOnlyEnvelopeAndNeverCapturesPayload(t *testing.T) {
 	for _, bracketed := range []bool{false, true} {
 		t.Run(map[bool]string{false: "unbracketed", true: "bracketed"}[bracketed], func(t *testing.T) {
