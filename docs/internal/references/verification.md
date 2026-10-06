@@ -1,387 +1,374 @@
 ---
 created_on: 2026-10-01 20:10
-last_modified: 2026-10-02 22:40
+last_modified: 2026-10-06 11:41
 status: current
 ---
 
 # Verified native sessions and standalone packaging
 
-This record summarizes inspected local execution results for maintainers of
-`go-tui-frame`. It distinguishes actual macOS runtime checks from Linux
-cross-build/linkage checks. Raw logs and temporary mutation copies are local
-ignored artifacts; the source tests linked here are retained in the repository.
+This reference is for maintainers of `go-tui-frame` who compare a change
+against the library's measured costs and verified behavior. It records the
+benchmark and allocation results the current code produces, what the retained
+tests verify, and the standalone-binary audits. macOS results come from local
+runs and CI. Linux results come from CI and from executables cross-built and
+inspected on macOS.
 
-## Whole-repository checks
+## Measurement method
+
+The figures below were measured on 2026-10-06 at commit `f674572` on macOS
+arm64 (Apple M4 Pro, 14 cores) with Go 1.27.1 and the pinned Ghostty revision
+`33da6848d63b3bba2b4f31ab1531d618f2795192`.
+
+Direct Go commands need the native environment that the justfile exports. Run
+`just native` once, then export the environment from the repository root. On
+macOS:
+
+```sh
+export CGO_ENABLED=1 PKG_CONFIG_PATH="$PWD/.tmp/native/prefix/share/pkgconfig" TMPDIR="$PWD/.tmp"
+```
+
+Linux uses a different prefix and compiler; see the
+[pinned native build](native-build.md).
+
+Allocation counts are deterministic: each benchmark reports the same count in
+all three runs. Byte counts are also identical across runs, except for owned
+captures, which vary by up to 3 bytes/op. Re-measure both when a change touches
+capture, repaint or input delivery.
+
+Timings depend on machine load and are indicative only. The machine was shared
+with other work during the benchmark runs: load averages were 3.1–3.5 over
+1 minute and 7.6–8.7 over 5 minutes. Each table reports the median of three one-second runs.
+Compare a timing only with a run on the same machine under similar load.
+
+## Capture benchmarks
+
+`BenchmarkStateCapture` in [damage tests](../../../internal/emulator/damage_test.go)
+and `BenchmarkBorrowedState` in [reuse tests](../../../internal/emulator/reuse_test.go)
+capture a 120×40 native viewport with plain ASCII text. Owned captures
+(`State`) copy storage for a durable caller. Internal captures (`UpdateState`)
+reuse the viewport and its maps. A one-row capture first writes
+`\x1b[Hupdated`. Input modes only reads the terminal modes, keyboard protocol
+flags and mouse tracking (`InputState`), without the display.
+
+```sh
+go test -run '^$' -bench 'BenchmarkBorrowedState|BenchmarkStateCapture' -benchmem -count=3 ./internal/emulator
+```
+
+| Capture | Time/op (indicative) | Bytes/op | Allocations/op |
+| :--- | ---: | ---: | ---: |
+| Owned, unchanged | 156.0 µs | 1,010,488–1,010,489 | 84 |
+| Owned, one row | 132.9 µs | 1,010,561–1,010,564 | 91 |
+| Internal, unchanged | 3.521 µs | 2,408 | 74 |
+| Internal, one row | 14.14 µs | 2,472 | 83 |
+| Input modes only | 2.327 µs | 328 | 50 |
+
+Under this load the owned medians are out of order: the one-row median is below
+the unchanged one. An owned capture allocates about 1 MB more than an internal
+one because `State` clones the viewport's cell storage.
+
+The allocation profile of an internal one-row capture attributes 99.9% of
+allocated objects to libghostty binding calls. These are terminal getters
+(`Terminal.Mode` alone is 34%), render-state cursor, color and row reads, and
+the key-encoder call that derives `ModifyOtherKeys2`:
+
+```sh
+go test -run '^$' -bench 'BenchmarkBorrowedState/one_row' -benchmem -memprofile .tmp/borrowed.mem -memprofilerate=1 -o .tmp/emulator.test ./internal/emulator
+go tool pprof -sample_index=alloc_objects -top .tmp/emulator.test .tmp/borrowed.mem
+```
+
+### Row capture allocations
+
+`TestRowCaptureAllocationsDoNotScaleWithWidth` in
+[row tests](../../../internal/emulator/row_test.go) logs the allocations of an
+unchanged internal capture and of a capture after one damaged row. It runs at
+20, 120 and 240 columns:
+
+```sh
+go test -count=1 -v -run 'TestRowCaptureAllocationsDoNotScaleWithWidth' ./internal/emulator
+```
+
+| Damaged row | Unchanged | Damaged | Additional | Test limit |
+| :--- | ---: | ---: | ---: | ---: |
+| Plain text (`updated`) | 74 | 83 | 9 | 12 |
+| Two styles across the full width | 74 | 93 | 19 | 24 |
+
+Each count is the same at all three widths, and the same with `-race`.
+
+## Session benchmarks
+
+The session benchmarks in [performance tests](../../../performance_test.go)
+paint a session without regions to an outer output file. The child side is a
+real PTY pair; no child process runs. Outer synchronized output is unsupported
+in these sessions; the behavioral tests cover negotiated synchronization. The
+repaint benchmarks write child output directly to the session's native terminal,
+so they do not exercise the PTY read path, region painting or scrolling.
+
+A changing-row benchmark changes one character of `\x1b[Hupdated` per
+iteration, so each repaint has a visible change. The populated benchmark first
+fills each row of a 120×40 child with 119 ASCII characters. Outer bytes/op is
+the output written to the outer file per iteration. Warmed input delivery
+queues 5 bytes, writes them to the PTY master and reads them from the slave.
+
+```sh
+go test -run '^$' -bench 'BenchmarkSessionRepaint|BenchmarkPopulatedSessionRepaint|BenchmarkSessionInputQueue' -benchmem -count=3 .
+```
+
+| Session operation | Viewport | Time/op (indicative) | Outer bytes/op | Bytes/op | Allocations/op |
+| :--- | :--- | ---: | ---: | ---: | ---: |
+| Unchanged render | 20×6 | 166.9 ns | 0 | 0 | 0 |
+| Unchanged capture and render | 20×6 | 5.460 µs | 0 | 2,408 | 74 |
+| Changing-row capture and repaint | 20×6 | 10.49 µs | 9 | 2,504 | 89 |
+| Populated changing-row capture and repaint | 120×40 | 23.06 µs | 9 | 2,504 | 89 |
+| Warmed input delivery | 20×6 | 1.057 µs | — | 0 | 0 |
+
+The allocation profile of a 20×6 changing-row repaint attributes 92% of
+allocated objects to capture, through the same libghostty binding calls as the
+capture benchmarks. Rendering accounts for 6%, mostly Ultraviolet's cursor
+movement and the cursor-position sequences it builds with `x/ansi`:
+
+```sh
+go test -run '^$' -bench 'BenchmarkSessionRepaint/changing_row' -benchmem -memprofile .tmp/session.mem -memprofilerate=1 -o .tmp/frame.test .
+go tool pprof -sample_index=alloc_objects -top .tmp/frame.test .tmp/session.mem
+```
+
+These component measurements do not establish physical terminal latency.
+
+### Native formatter comparison
+
+The [native formatter benchmark](../../../internal/emulator/formatter_benchmark_test.go)
+measures libghostty's VT export of the whole screen after the same one-character
+child write. It excludes placement, clearing, composition and terminal
+delivery. For the populated 120×40 fixture it exports 4,838 bytes per frame:
+8.200 µs/op with 4 allocations into a buffer, and 8.745 µs/op with 3 allocations
+through a writer. The session's incremental repaint emits 9 bytes for the same
+change.
+
+```sh
+go test -run '^$' -bench 'BenchmarkGhosttyVTFormatter' -benchmem -count=3 ./internal/emulator
+```
+
+## Whole-repository gate
+
+CI ([workflow](../../../.github/workflows/ci.yml)) runs `just check` and then
+`just linkage` on `ubuntu-latest` (Linux x86_64) and `macos-latest` (macOS
+arm64). `just check` runs `go mod tidy -diff`, the native archive build,
+`go build ./...`, the CLI build to `bin/tui-frame`, `go vet ./...` and
+`go test -race ./...`. Both jobs passed at `f674572` (CI run 37510976188),
+so the race suite also ran on Linux x86_64.
+
+The same gate passes locally. The race suite's package results follow; the
+elapsed times are indicative, with load averages of 4.9–5.7 over 1 minute
+during the run:
+
+```text
+ok  	github.com/alexgorbatchev/go-tui-frame	64.633s
+ok  	github.com/alexgorbatchev/go-tui-frame/cmd/tui-frame	27.497s
+ok  	github.com/alexgorbatchev/go-tui-frame/internal/emulator	1.401s
+ok  	github.com/alexgorbatchev/go-tui-frame/internal/input	2.391s
+ok  	github.com/alexgorbatchev/go-tui-frame/internal/process	18.578s
+```
+
+The CLI's statement coverage is 93.5%, with or without `-race`.
+[CLI maintenance](../../../cmd/tui-frame/AGENTS.md) requires 90%:
+
+```sh
+go test -coverprofile=.tmp/cli-coverage.out ./cmd/tui-frame
+go tool cover -func=.tmp/cli-coverage.out | tail -1
+```
+
+## Behavior verified by retained tests
 
 ### Packed native cell capture
 
-The `perf/ghostty-render` worktree captures copied native cells using the linked
-library's published layout manifest. [Cell layout decoding](../../../internal/emulator/cell_layout.go)
-validates the manifest schema, storage, field types and bit ranges once per
-process. Bit positions come from the manifest rather than fixed offsets. The
-supported contract is documented in Ghostty's pinned
+Capture decodes each damaged row's copied packed cells (`CellsRaw`) with the
+bit layout from the linked library's type manifest.
+[Cell layout decoding](../../../internal/emulator/cell_layout.go) parses the
+manifest once per process and validates its schema, cell storage, field types,
+bit ranges and content-union arms. Bit positions come from the manifest rather
+than fixed offsets. The supported contract is documented in Ghostty's pinned
 [type API](https://github.com/ghostty-org/ghostty/blob/33da6848d63b3bba2b4f31ab1531d618f2795192/include/ghostty/vt/types.h)
 and [screen API](https://github.com/ghostty-org/ghostty/blob/33da6848d63b3bba2b4f31ab1531d618f2795192/include/ghostty/vt/screen.h).
 
-Plain codepoints, width, style IDs and hyperlink flags no longer require
-individual native getters for every cell. Complex graphemes, nondefault styles
-and hyperlink URIs still use native getters. [Style capture](../../../internal/emulator/cell_style.go)
-reuses each style within a captured row and retains its map storage. Style IDs
-are page-local and can be reused after mutations, so cached entries are cleared
-for each row. The dirty-row compositor and incremental outer renderer remain
-in use.
+Codepoints, width, style IDs, hyperlink flags and the backgrounds of erased
+cells come from that decode, without a native getter per cell. Multi-codepoint
+graphemes, nondefault styles and hyperlink URIs use native getters.
+[Style capture](../../../internal/emulator/cell_style.go) reads each style once
+per captured row and keeps its map storage between rows. Style IDs are
+page-local and can be reused after mutations, so cached entries are cleared for
+each row.
 
 [Row tests](../../../internal/emulator/row_test.go) compare captured content,
-packed metadata, full styles and hyperlinks with actual native getters. They
-also reject unsupported manifests. Allocation checks measure 9 additional
-allocations for a plain damaged row and 19 for a row with two styles, at each of
-20, 120 and 240 columns. `.tmp/row-allocation-green.log` records the passing
-measurements. `.tmp/native-disabled.log` records the same allocation tests
-failing when a compiler overlay restores the original capture code; plain-row
-overhead grows from 69 to 729 allocations with width. A separate hyperlink
-mutation fails the native comparison in `.tmp/links-disabled.log`. These
-overlays leave maintained source files enabled.
+packed metadata, full styles, erased-cell backgrounds and hyperlinks with
+libghostty's own getters. They also reject unsupported manifests.
+[Color tests](../../../internal/emulator/colors_test.go) verify that RGB and
+palette backgrounds survive erase-line and erase-display, and that a later erase
+with default attributes restores the default background. In
+[repaint tests](../../../repaint_test.go), an erased background reaches a native
+outer terminal through a real PTY without overwriting the header.
 
-The following medians come from three one-second runs per benchmark on macOS
-arm64, Apple M4 Pro. `.tmp/native-baseline-bench.log` uses the original capture
-code through an overlay; `.tmp/native-final-bench.log` uses packed capture.
-Session benchmarks use a real child PTY and an output file, with outer
-synchronization unsupported:
+### Damage, reuse and repaint
 
-| Operation | Original time/op | Packed time/op | Original allocations/op | Packed allocations/op |
-| :--- | ---: | ---: | ---: | ---: |
-| Internal capture, one row of a 120×40 viewport | 25.869 µs | 12.367 µs | 443 | 83 |
-| Changing-row capture and repaint, 20×6 | 13.047 µs | 10.580 µs | 173 | 113 |
-| Populated changing-row capture and repaint, 120×40 | 42.860 µs | 25.598 µs | 609 | 249 |
-| Unchanged render | 161.5 ns | 158.8 ns | 0 | 0 |
+[Damage tests](../../../internal/emulator/damage_test.go) verify consumed native
+dirty flags, owned snapshots, clean-row retention, scrolling, default-color
+changes and resize. Capture copies only the rows that libghostty reports dirty.
+A change to the default colors or palette marks every row dirty.
 
-The populated fixture contains 119 ASCII characters on each row and alternates
-one character per repaint. The incremental renderer emits 9 bytes per change.
-The [native formatter benchmark](../../../internal/emulator/formatter_benchmark_test.go)
-exports the populated snapshot as 4,838 bytes, taking approximately 7 µs for
-the child update and native export. That measurement excludes placement,
-clearing, composition and terminal delivery. `.tmp/native-bench.log` records the formatter
-results; [session benchmarks](../../../performance_test.go) record actual outer
-output sizes. These component measurements do not establish physical terminal
-latency. Changed captures and repaints still allocate; unchanged rendering
-remains allocation-free.
-
-`just check` passes module hygiene, native/library/CLI builds, vet and the full
-race suite. `.tmp/native-check.log` contains:
-
-```text
-ok github.com/alexgorbatchev/go-tui-frame 19.766s
-ok github.com/alexgorbatchev/go-tui-frame/cmd/tui-frame 17.908s
-ok github.com/alexgorbatchev/go-tui-frame/internal/emulator 1.910s
-ok github.com/alexgorbatchev/go-tui-frame/internal/input 1.324s
-ok github.com/alexgorbatchev/go-tui-frame/internal/process 18.665s
-```
-
-A separate native probe exposes an existing blank-cell background mismatch:
-after `SGR 48;2;10;20;30` followed by erase-line, native cells contain RGB
-`10,20,30`, while composed cells use black. `.tmp/background-native.log` and
-`.tmp/background-baseline.log` show the same mismatch with packed capture
-enabled and disabled. The current style-only conversion does not extract
-background colors stored directly in blank packed cells; this issue is outside
-the capture performance change.
-
-### Repaint performance
-
-The repaint checks use the pinned native archive and the macOS Go toolchain.
-`go test -race ./...`, `go vet ./...`, and `go mod tidy -diff` pass in the
-`fix/repaint-performance` worktree. Logs are retained locally under `.tmp/` as
-`performance-final-race.log`, `performance-final-vet.log`, and
-`performance-final-tidy.log`. The inspected race-test output contains:
-
-```text
-ok github.com/alexgorbatchev/go-tui-frame 15.604s
-ok github.com/alexgorbatchev/go-tui-frame/cmd/tui-frame 9.692s
-ok github.com/alexgorbatchev/go-tui-frame/internal/emulator 1.821s
-ok github.com/alexgorbatchev/go-tui-frame/internal/input (cached)
-ok github.com/alexgorbatchev/go-tui-frame/internal/process 18.386s
-```
-
-[Repaint tests](../../../repaint_test.go) exercise fragmented output through a
-real child PTY, a fixed first repaint deadline, flushing while idle and before
-exit, immediate protocol replies, region metadata invalidation, negotiated
-outer synchronized output, and restoration of an observed entry hold.
-[Damage tests](../../../internal/emulator/damage_test.go)
-exercise consumed native dirty flags, owned snapshots, clean-row retention,
-scrolling, default-color changes, and resize.
-
-[Performance tests](../../../performance_test.go) verify capture deferred until
-repaint, immediate outer input-mode writes, reusable cleared region canvases,
-independent retained drawing snapshots, zero allocations for unchanged rendering
-and warmed input delivery, partial-write compaction, input origins, composition
-limited to damaged rows, selected observation kinds, per-read owned snapshots,
-exit-only snapshot freshness, and synchronized-update checkpoints.
 [Reuse tests](../../../internal/emulator/reuse_test.go) verify stable internal
-viewport storage, damage accumulated across three captures, default-style reuse,
-and selection/full-style agreement with the native getters.
+viewport storage and damage accumulated across three captures. They also verify
+that input-mode reads leave the display clean, that a plain row does not
+allocate a style per cell, and that selection and full styles agree with
+libghostty's getters.
 
-The compiler overlay in `.tmp/repaint-disabled.json` disables chunk batching,
-metadata comparison, synchronized output, and native damage consumption without
-editing the maintained source files. The corresponding regressions fail with
-those changes disabled; the restored source passes. `.tmp/repaint-disabled.log`
-records the behavioral failures.
+[Repaint tests](../../../repaint_test.go) read most child output through a real
+PTY. They verify:
 
-The separate exit-flush overlay in `.tmp/repaint-exit-disabled.json` leaves
-batching enabled and removes the final flush. Its regression fails because the
-pending final text is absent; `.tmp/repaint-exit-disabled.log` records that check.
+- fragmented output coalesced under a fixed first repaint deadline;
+- flushing while idle and before exit;
+- immediate protocol replies;
+- child text and cursor changes that neither redraw regions nor resample
+  processes, and metadata changes that redraw regions;
+- negotiated outer synchronized output;
+- restoration of an observed entry hold;
+- palette colors on 256-color, 16-color and truecolor outer terminals.
 
-`.tmp/performance-disabled.json` separately substitutes temporary copies that
-disable deferred capture, canvas/input reuse, unchanged-render skipping,
-incremental composition, event selection, style reuse, and accumulated damage.
-The behavioral and allocation regressions fail with these optimizations disabled;
-`.tmp/performance-disabled.log` and `.tmp/performance-native-disabled.log` record
-the failures. The maintained source remains enabled during the passing race run.
+[Performance tests](../../../performance_test.go) verify:
 
-`BenchmarkStateCapture` and `BenchmarkBorrowedState` measure a 120×40 native
-viewport with plain ASCII text over one-second benchmark intervals on an Apple M4 Pro. Owned captures
-copy storage for a durable caller; internal captures reuse the viewport and maps:
+- capture deferred until repaint;
+- immediate outer input-mode writes;
+- reusable cleared region canvases;
+- independent retained drawing snapshots;
+- zero allocations for unchanged rendering and warmed input delivery;
+- partial-write compaction and input origins;
+- composition limited to damaged rows;
+- selected observation kinds and per-read owned snapshots;
+- exit-only snapshot freshness;
+- synchronized-update checkpoints.
 
-| Capture | Time/op | Bytes/op | Allocations/op |
-| :--- | ---: | ---: | ---: |
-| Owned, unchanged | 116.2 µs | 1,010,482 | 84 |
-| Internal, unchanged | 3.484 µs | 2,400 | 74 |
-| Owned, one row | 173.3 µs | 1,011,512 | 451 |
-| Internal, one row | 25.50 µs | 3,424 | 443 |
-| Input modes only | 2.247 µs | 320 | 49 |
+Each drawing callback receives its own copy of the snapshot. Capture also
+allocates when the geometry changes, for new graphemes and styles, and in native
+getter calls.
 
-The session benchmarks use a 20×6 viewport with a real child PTY and an outer
-output file. They select an unsupported outer synchronization mode; negotiated
-synchronization is covered separately by the behavioral tests. A changing-row
-benchmark alternates a character to require a visible diff each iteration:
+### Default foreground and background colors
 
-| Session operation | Time/op | Bytes/op | Allocations/op |
-| :--- | ---: | ---: | ---: |
-| Unchanged render | 148.6 ns | 0 | 0 |
-| Changing-row capture and repaint | 12.87 µs | 3,256 | 173 |
-| Warmed input delivery | 1.027 µs | 0 | 0 |
+The native terminal sets both default colors once, at construction, through its
+[preference profile](../../../internal/emulator/profile.go). Reported host
+colors seed the defaults when available. Otherwise the native render state's
+fallbacks, a white foreground and a black background, are set explicitly.
+Ghostty's render state copies the terminal's default colors only when both are
+set, so leaving either unset would keep an OSC 10 or OSC 11 override from
+reaching the rendered cells. The initialization uses the native setters
+described in the
+[pinned terminal color API](https://github.com/ghostty-org/ghostty/blob/33da6848d63b3bba2b4f31ab1531d618f2795192/include/ghostty/vt/terminal.h)
+and adds no work to later captures or repaints.
 
-These component measurements come from `.tmp/performance-final-bench.log`; they
-do not measure end-to-end physical terminal latency. Snapshot ownership still
-requires independent viewport copies when publishing to a callback. Geometry,
-new graphemes/styles, and native getter calls can allocate.
+[Color tests](../../../internal/emulator/colors_test.go) verify independent
+OSC 10/11 overrides and OSC 110/111 resets. They also verify unchanged explicit
+SGR colors, owned snapshots, damage on every row, synchronized render holds,
+reverse colors, and native query replies that match the rendered colors. The
+foreground test in [repaint tests](../../../repaint_test.go) replays the emitted
+outer bytes on a native outer terminal. Existing text changes color and resets
+without new text. Its capture-file renderer selects a truecolor profile
+explicitly.
 
-The final allocation-object profiles are retained as
-`.tmp/borrowed-final-allocations.log` and `.tmp/session-final-allocations.log`.
-They attribute remaining internal-capture allocations to libghostty getters and
-encoding, and changed-frame allocations to those bindings plus UV's renderer and
-cursor encoding. UV's pinned renderer recreates touched-line storage during a
-render; unchanged frames skip that call. The verified native dirty-tracking and
-render-hold contracts are documented in the
-[pinned native render API](https://github.com/ghostty-org/ghostty/blob/33da6848d63b3bba2b4f31ab1531d618f2795192/include/ghostty/vt/render.h).
+### Inherited terminal preferences
 
-### Default foreground/background colors
+[Inheritance tests](../../../inheritance_test.go) run real sessions that inherit
+the outer terminal's default colors, palette, cursor color and style, and modes.
+They also cover palette encoding for the outer color profile, a child that
+measures text with the session's width rule, the PTY line discipline, cursor
+rendering and restoration, and disabled inheritance.
+[Preference tests](../../../terminal_preferences_test.go) verify that reported
+keyboard protocols seed the child's encoder. Capture keeps the default rendition
+for default colors that match the host's (`uvStyle` in
+[state capture](../../../internal/emulator/state.go)).
 
-The native terminal configures both default colors once at construction through
-its preference profile. Reported host colors seed the defaults when available;
-the native render state's white foreground and black background supply the
-fallbacks. Ghostty updates
-the render colors as a pair and expects the embedder to configure both defaults;
-leaving either unset prevents an independent OSC 10/11 override from reaching
-the rendered cells. The initialization uses the native setters described in the
-[pinned terminal color API](https://github.com/ghostty-org/ghostty/blob/33da6848d63b3bba2b4f31ab1531d618f2795192/include/ghostty/vt/terminal.h),
-without adding work to subsequent captures or repaints.
+The [cursor mirror](../../../cursor.go) follows the child's cursor style and
+color only for the attributes the outer terminal reported at entry. It writes
+nothing while the child keeps the reported values, and resets the terminal's
+default when the child returns to them. A cursor-style or color change repaints
+in one synchronized update even when cells and cursor position are unchanged.
+The appearance test in [performance tests](../../../performance_test.go) also
+verifies that an unchanged inherited cursor produces no output and no
+allocations.
 
-[Color regressions](../../../internal/emulator/colors_test.go) verify independent
-OSC 10/11 overrides, OSC 110/111 resets, unchanged explicit SGR colors, owned
-snapshots, damage on every row, synchronized render holds, reverse colors, and
-native query replies matching the rendered colors. The real-PTY foreground
-regression in [repaint tests](../../../repaint_test.go) parses the emitted outer
-terminal bytes to verify existing text changes color and resets without new text.
-Its capture-file renderer explicitly selects a truecolor profile.
+### Drawing, README examples and dependencies
 
-`.tmp/colors-red.log` records the original failures. The compiler overlay in
-`.tmp/colors-disabled.json` removes only default-color initialization; all new
-color regressions fail, as recorded in `.tmp/colors-disabled.log`. The enabled
-source passes the whole-repository race suite, vet, module hygiene and library
-build. The inspected `.tmp/colors-final-race.log` contains:
+The public drawing target is `uv.Screen`. Regions draw into native
+Ultraviolet screen buffers that measure grapheme width. The
+[drawing tests](../../../drawing_test.go) exercise buffer drawing, grapheme
+cells and pushed replacements. CLI drawing tests use native Ultraviolet buffers
+and also accept an optional Lip Gloss canvas.
 
-```text
-ok github.com/alexgorbatchev/go-tui-frame 14.279s
-ok github.com/alexgorbatchev/go-tui-frame/cmd/tui-frame 9.188s
-ok github.com/alexgorbatchev/go-tui-frame/internal/emulator 1.490s
-ok github.com/alexgorbatchev/go-tui-frame/internal/input 1.958s
-ok github.com/alexgorbatchev/go-tui-frame/internal/process 18.551s
-```
+[README tests](../../../readme_test.go) build the README's showcase, Keyboard
+Capture and plain-text programs against the module and native archive. They
+run the Keyboard Capture program on a real PTY whose outer terminal is a
+libghostty emulator. A shell script stands in for nvim on `PATH`, so the
+documented source runs unchanged. Three cases check the exit status and
+standard error: Ctrl+Q exits 0 with empty standard error, a child exit status is
+reported, and a session error after Ctrl+Q is reported. The core dependency test resolves
+the production package graph with `go list -deps` and confirms that Lip Gloss
+is absent; the CLI demo uses it.
 
-The other logs are `.tmp/colors-final-vet.log`, `.tmp/colors-final-tidy.log`, and
-`.tmp/colors-final-build.log`; each command exits 0 without diagnostics.
+### Sessions, routing and the CLI
 
-### Integration with inherited terminal preferences
-
-The repaint implementation preserves inherited colors, palette, keyboard modes,
-PTY line discipline and cursor restoration. Profile initialization seeds native
-colors; cached styles retain default rendition when colors match the host.
-Cursor shape, blinking and color changes trigger synchronized output even when
-cells and cursor position remain unchanged. The appearance-only regression in
-[performance tests](../../../performance_test.go) also verifies unchanged
-inherited cursors produce no output or allocations.
-
-The combined source passes `go test -race -count=1 ./...`, `go vet ./...`,
-`go build ./...`, and `go mod tidy -diff`. Logs are retained under
-`.tmp/repaint-landing/` in the primary checkout. `landing-race.log` contains:
-
-```text
-ok github.com/alexgorbatchev/go-tui-frame 21.480s
-ok github.com/alexgorbatchev/go-tui-frame/cmd/tui-frame 18.388s
-ok github.com/alexgorbatchev/go-tui-frame/internal/emulator 2.062s
-ok github.com/alexgorbatchev/go-tui-frame/internal/input 1.357s
-ok github.com/alexgorbatchev/go-tui-frame/internal/process 17.931s
-```
-
-`landing-cursor-disabled.log` records the appearance regression failing when
-cursor appearance changes do not trigger repaint. `landing-colors-disabled.log`
-records all OSC regressions failing when both native default-color setters are
-removed from profile initialization. Compiler overlays leave maintained sources
-enabled throughout the passing runs.
-
-`landing-bench.log` measures unchanged rendering at 158.0 ns/op with zero bytes
-and allocations, changing-row capture/repaint at 12.83 µs/op with 3,256 bytes and
-173 allocations, and warmed input delivery at 1.026 µs/op with zero bytes and
-allocations. These are local component measurements on the same Apple M4 Pro.
-
-### Packaging and drawing checks
-
-The coordinator's `just check` exits successfully after the live-border,
-control-digit, measured-pixel and drawing-interface changes. It executes module hygiene,
-library/example builds, vet, and all race-test packages. Its inspected output
-contains:
-
-```text
-$ just check
-go mod tidy -diff
-go build ./...
-go build -o bin/tui-frame ./cmd/tui-frame
-go vet ./...
-go test -race ./...
-ok github.com/alexgorbatchev/go-tui-frame 13.097s
-ok github.com/alexgorbatchev/go-tui-frame/cmd/tui-frame 9.379s
-ok github.com/alexgorbatchev/go-tui-frame/internal/emulator (cached)
-ok github.com/alexgorbatchev/go-tui-frame/internal/input (cached)
-ok github.com/alexgorbatchev/go-tui-frame/internal/process (cached)
-```
-
-A component race check for the live-border/capture source passes with these
-inspected results:
-
-```text
-ok github.com/alexgorbatchev/go-tui-frame 7.576s
-ok github.com/alexgorbatchev/go-tui-frame/internal/input 1.604s
-ok github.com/alexgorbatchev/go-tui-frame/internal/emulator 1.858s
-ok github.com/alexgorbatchev/go-tui-frame/internal/process 18.313s
-```
-
-The whole-repository vet check has no diagnostics. Maintained
-[README tests](../../../readme_test.go) compile the actual showcase and its
-capture/plain-text variants against the module and native archive. These tests
-do not execute interactive nvim; actual screen/session behavior has separate
-native and real-PTY tests below.
-
-The current live-border/capture changes pass an independent targeted race run:
-
-```text
-$ CGO_ENABLED=1 PKG_CONFIG_PATH="$PWD/.tmp/native/prefix/share/pkgconfig" go test -race -count=1 -run 'Test(CaptureNegotiates|SetBorder|RunBorder)' .
-ok github.com/alexgorbatchev/go-tui-frame 3.928s
-```
-
-The native reported-MOK2 fallback race check passes (`1.758s`). The CLI author's
-new real-PTY control race check passes (`2.000s`); its full
-race suite passes (`9.850s`, 91.8% statement coverage). The updated embedded
-guide also passes its validator. The measured-pixel correction passes a
-selected native race check (`4.509s`). The whole-repository check and the rebuilt
-binary audits below include that correction.
-
-## Behavior and deliberate negative checks
-
-The public drawing target is `uv.Screen`, backed by a native screen buffer with
-explicit grapheme width. The [drawing tests](../../../drawing_test.go) exercise
-buffer drawing, grapheme cells, and pushed replacements. CLI drawing tests use
-native UV buffers and also verify an optional Lip Gloss canvas. A full CLI race
-coverage run passes (`10.734s`, 91.8%). The core dependency test resolves the
-actual production package graph and confirms that Lip Gloss is absent; the demo
-continues to use it.
-
-Isolated negative checks verify all three contracts: reverting the public view
-to a Lip Gloss canvas fails the dependency test; disabling grapheme width renders
-the tested emoji as four cells instead of two; replacing the README's Header
-call with an undefined method fails its build test. Restored files are compared
-with the originals. Selected drawing race tests pass (`1.446s`), and restored
-README/dependency tests pass (`5.016s`). These retained tests replace manual
-temporary-program checks and execute through ordinary `go test`.
-
-The drawing-interface revision also rebuilds Linux amd64/arm64 binaries and
-passes all three linkage audits: macOS imports only OS-provided libresolv and
-libSystem; both Linux artifacts have no imported libraries or dynamic loader.
-Cross-build/audit results do not execute Linux runtime tests.
-
-| Retained test | Verified behavior and negative check |
+| Retained test | Verified behavior |
 | :--- | :--- |
-| [Real framed session](../../../session_test.go) | Idle push rendering, child/frame isolation, title/query replies, native SID/group/argv/session inventory, real PTY geometry/settings/foreground, observer-copy isolation and terminal restoration. Disabling metadata collection fails native child identity; disabling wake-triggered rendering fails the idle-push display assertion. Both restored checks pass. |
-| [Wake pipe](../../../wake_test.go) | Native pipe wake/coalescing/failure propagation. Disabling failure handling makes Poll remain unready and loses the cleanup error; the restored test passes. |
-| [Native routing](../../../routing_test.go) | Original-byte agreement, native key conversion, paste envelopes, focus, localized cell/pixel mouse and capture gestures. Deliberately disabling key agreement, paste/bounds/text-release guards reproduces behavioral failures. |
-| [Cursor/keypad provenance](../../../routing_test.go) | SS3/C1 cursor input converts for a normal child. SS3 keypad0/Enter converts for a numeric child; matching C1 application input remains exact. Disabling the keypad guard fails all four cases; restored routing race tests pass. |
-| [Native graphics profile](../../../internal/emulator/profile_test.go) | Disabled Kitty graphics does not return a positive capability response before/after reset or alternate-screen operations. The original positive reply was reproduced before native protocol disablement. |
-| [Native process ownership](../../../internal/process/snapshot_test.go), [groups](../../../internal/process/groups_test.go), [Darwin argv](../../../internal/process/args_darwin_test.go) | Current native fields, runtime cwd and owned copies; same-session inventory survives a reaped launch leader. Darwin empty argv0/alignment have dedicated native tests. Linux test binaries compile, without a local Linux execution claim. |
-| [Live border](../../../border_test.go) | Before/during-Run updates and closed-session rejection, applied native grid and actual PTY size, including measured cell pixels when outer winsize has only cells. Requests coalesce to the latest border inset; region reservations remain fixed. Disabling border publication fails the child-layout assertion; disabling pixel preservation yields zero native/PTY pixels. |
-| [Capture negotiation](../../../console_test.go) | A real native outer terminal applies Kitty disambiguation only with explicit capture and restores its keyboard state. Child event-reporting flags are retained; supported modifyOtherKeys is the fallback when Kitty is unavailable. Disabling enhancement fails both native Kitty flag cases and the native MOK2 fallback assertion. |
-| [Example CLI](../../../cmd/tui-frame/session_test.go) | Real PTY Ctrl-1 layout and Ctrl-2 independent backgrounds, Ctrl-3 child border with actual PTY resize, selected-release exclusion, ordinary digits/unmatched keys and termios restoration. Separate tests cover Ctrl-Q, complete argv, exit/signal outcomes and embedded guide/help behavior. Current full CLI race coverage is 91.8%. |
+| [Real framed session](../../../session_test.go) | Idle push rendering, child title, native SID/group/argv/session inventory, real PTY window size, settings and foreground group, observer-copy isolation, termios restoration and closed-controller rejection. Cancellation restores the terminal before observers drain, returns the cause and ends every owned process group. An observer panic or `runtime.Goexit` ends the session through shutdown, also during the shutdown drain. Error and cancellation cleanup finish while a detached process holds the slave, also when flow control has stopped child output. |
+| [Wake pipe](../../../wake_test.go) | Native pipe wake, coalescing on a full pipe, and failure propagation to the event loop and cleanup. |
+| [Native routing](../../../routing_test.go) | Original-byte agreement, native key conversion, Alt and produced-character conversion, paste envelopes, focus, localized cell and pixel mouse reports, buttonless releases and capture gestures. |
+| [Cursor and keypad provenance](../../../routing_test.go) | SS3 and C1 cursor input converts for a normal child. SS3 keypad digits and Enter convert for a numeric child; matching C1 application input stays exact. |
+| [Native graphics profile](../../../internal/emulator/profile_test.go) | Disabled Kitty graphics does not return a positive capability reply before or after reset and alternate-screen switches. |
+| [Native process ownership](../../../internal/process/snapshot_test.go), [groups](../../../internal/process/groups_test.go), [Darwin groups](../../../internal/process/groups_darwin_test.go), [Darwin argv](../../../internal/process/args_darwin_test.go) | Current native fields, runtime cwd and owned copies. Same-session inventory survives a reaped launch leader. Darwin group exit follows member states, and Darwin empty argv0 and environment alignment have dedicated native tests. |
+| [Live border](../../../border_test.go) | Updates before and during Run, closed-session rejection, and the applied native grid and actual PTY size. Measured cell pixels are preserved when the outer winsize has only cells. |
+| [Capture negotiation](../../../console_test.go) | A native outer terminal gets Kitty disambiguation and alternate keys only with explicit capture, for a child that does not disambiguate; a disambiguating child keeps its own flags. The outer keyboard state is restored, and a Kitty reply that arrives after the probe leaves the flags the session found in place. With Kitty unavailable, capture selects the reported modifyOtherKeys mode 2 and restores its entry value. |
+| [Example CLI](../../../cmd/tui-frame/session_test.go) | Real-PTY Ctrl+1 layout, Ctrl+2 independent backgrounds, Ctrl+3 child border with actual PTY resize, excluded release reports, ordinary digits and unmatched keys, and termios restoration. Other CLI tests cover Ctrl+Q, shutdown failures after Ctrl+Q, complete argv, exit and signal outcomes, and the embedded guide and help. |
 
-The coordinator's isolated mutation copy restores the metadata, wake rendering and
-wake changes, then reruns the selected session/wake tests successfully. Mutation
-results establish detection of those behaviors, not exhaustive conformance.
-
-The live-border/capture negative checks also use an isolated source copy.
-Disabling border publication fails `TestSetBorderUpdatesLayoutBeforeAndDuringRun`
-because the child remains inset. Disabling capture enhancement fails the native
-outer's expected flags (`0` vs `1`, `2` vs `3`) and the reported MOK2 fallback.
-The isolated source files are restored and compared with the originals; the
-selected restored check passes (`4.436s`) with verified process exit 0.
-
-The native border test also uses an outer OS winsize without pixel dimensions
-while the terminal query reports 10×20-pixel cells. Removing preservation during
-a border-only update fails with zero native cell pixels and zero PTY pixel
-dimensions. Restoring byte-identical source passes the selected race check
-(`2.898s`) with verified process exit 0.
-
-The CLI author's isolated native mutation checks disable independent palette
-selection and the SetBorder call separately. The first fails the actual native
-cell background assertion; the second fails the real-PTY viewport update.
-Restored byte-identical source passes the selected CLI tests (`3.345s`). A
-separate real-PTY agent-mode test checks plain initial regions/no child border,
-then Ctrl-3 enables the border and resizes the child.
+Other root-package tests cover capture dispositions (`capture_test.go`),
+composition (`composition_test.go`), layout and invalidation
+(`frame_test.go`), outer input queuing (`input_queue_test.go` and
+`input_queue_darwin_test.go`), observation delivery (`observation_test.go`),
+resize (`resize_test.go`), configuration validation (`validation_test.go`),
+snapshot metadata (`metadata_test.go`) and Darwin process-group signalling
+(`signal_darwin_test.go`). The `internal/emulator`, `internal/input` and
+`internal/process` packages have further unit tests.
 
 ## Artifact audits
 
-[Standalone-binary tests](../../../cmd/tui-frame/linkage_test.go) inspect actual
-binary import tables and ELF interpreter segments. All three rebuilt artifacts
-pass after the live-border/control-digit and measured-pixel changes:
+[Standalone-binary tests](../../../cmd/tui-frame/linkage_test.go) inspect the
+executable's import table and, for ELF, its program headers. All three
+artifacts pass at `f674572`:
 
-| Artifact | Actual audit result |
-| :--- | :--- |
-| macOS arm64 Mach-O | Only `/usr/lib/libresolv.9.dylib` and `/usr/lib/libSystem.B.dylib`; no separately installed libghostty dependency. |
-| Linux amd64 ELF | Statically linked; imported libraries `[]`, no `PT_INTERP`. |
-| Linux arm64 ELF | Statically linked; imported libraries `[]`, no `PT_INTERP`. |
+| Artifact | Build and audit | Result |
+| :--- | :--- | :--- |
+| macOS arm64 Mach-O | `just build`, then `just linkage`; locally and on `macos-latest` | Imports only `/usr/lib/libresolv.9.dylib` and `/usr/lib/libSystem.B.dylib`; no separately installed libghostty. |
+| Linux amd64 ELF | `just build-linux amd64`, then `just linkage bin/tui-frame-linux-amd64`, cross-built on macOS; `just build` and `just linkage` on `ubuntu-latest` | Statically linked; imported libraries `[]`, no `PT_INTERP`. |
+| Linux arm64 ELF | `just build-linux arm64`, then `just linkage bin/tui-frame-linux-arm64`, cross-built on macOS | Statically linked; imported libraries `[]`, no `PT_INTERP`. |
 
-The inspected `just linkage` runs for `bin/tui-frame`,
-`bin/tui-frame-linux-amd64` and `bin/tui-frame-linux-arm64` exit 0 (`0.755s`,
-`0.934s` and `0.663s`, respectively). The macOS binary contains the byte-identical
-current embedded usage guide. Each Linux build also exits 0.
+The CLI tests also build the host executable and verify that its `skill`
+command prints the embedded guide unchanged, from a directory without
+repository files.
+
+Go's build cache key for a cgo package includes the cgo flags from the
+environment and `#cgo` directives, but not `pkg-config` output (`buildActionID`
+in Go 1.27.1's `cmd/go/internal/work/exec.go`). A cached libghostty package
+therefore links the archive path that `pkg-config` returned when the package was
+first built, possibly in another checkout. Both audited cross-builds used an
+empty `GOCACHE`, so each linked this checkout's archive.
 
 These audits follow the [pinned native build](native-build.md). Source changes
-require rebuilding and reauditing the resulting binaries. Linux executables
-were cross-built and inspected on macOS; they were not run locally. No remote
-CI execution, published release or consumer `go get` result is established.
+require rebuilding and reauditing the resulting binaries. Linux x86_64 tests
+run in CI; Linux arm64 executables are only cross-built and inspected, and no
+Linux arm64 runtime test runs. This record does not establish a consumer
+`go get` of the published module.
 
 ## Fidelity boundaries
 
 Passing tests do not establish arbitrary-TUI transparency. The current profile
-does not render graphics/overline, expose complete screen/history/margin/damage
-state, retain all hyperlink parameters, or guarantee outside-release gesture
-closure. Unsupported input identities, native mouse limits and unavailable
-pixel precision remain explicit. OS observations are sampled and
-permission-limited; detached sessions and wrapper suspend/resume remain
-teardown boundaries. See the [consumer profile](../../../README.md) and
+does not render graphics or overline, expose complete screen, scrollback,
+margin or damage state, retain all hyperlink parameters, or guarantee that a
+gesture closes after an outside release. Unsupported input identities, native
+mouse limits and unavailable pixel precision are explicit. OS observations are
+sampled and permission-limited; descendants in detached sessions and wrapper
+suspend/resume are teardown boundaries. See the
+[consumer profile](../../../README.md) and
 [architecture research](../../../reports/TUI%20frame%20architecture%20research.md).
