@@ -51,9 +51,7 @@ func (f *Frame[T]) Run(ctx context.Context) (result Result, err error) {
 		events.close()
 		// A callback can fail while close drains admitted observations, after
 		// the session loop stopped reading its context.
-		if failure := events.failure(); failure != nil && !errors.Is(err, failure) {
-			err = errors.Join(err, failure)
-		}
+		err = joinOnce(err, events.failure())
 	}()
 	fd, device, w, err := inspectConsole(f.input, f.output)
 	if err != nil {
@@ -119,10 +117,8 @@ func (f *Frame[T]) Run(ctx context.Context) (result Result, err error) {
 		result.ProcessState = f.cmd.ProcessState
 		result.DrainError = s.drainErr
 		// An observer that overflowed the queue and ended the session is
-		// usually still behind when cleanup emits Exited; report it once.
-		if exitedErr != nil && !errors.Is(err, exitedErr) {
-			err = errors.Join(err, exitedErr)
-		}
+		// usually still behind when cleanup emits Exited.
+		err = joinOnce(err, exitedErr)
 	}()
 	defer f.close()
 	if err = unix.SetNonblock(s.fd, true); err != nil {
@@ -146,6 +142,15 @@ func (f *Frame[T]) Run(ctx context.Context) (result Result, err error) {
 		s.escapeDeadline = time.Now().Add(escapeTimeout)
 	}
 	return result, s.loop(ctx)
+}
+
+// joinOnce joins err to joined unless joined already holds it, so a failure
+// that several steps meet, such as a full observation queue, is reported once.
+func joinOnce(joined, err error) error {
+	if err == nil || errors.Is(joined, err) {
+		return joined
+	}
+	return errors.Join(joined, err)
 }
 
 type pendingInput struct {
@@ -817,8 +822,8 @@ func (s *session[T]) reapOverdue() bool {
 // whether or not Exited is observed.
 func (s *session[T]) reap() error {
 	select {
-	case err := <-s.wait:
-		waitErr := s.recordReap(err)
+	case wait := <-s.wait:
+		err := s.recordReap(wait)
 		s.queue = nil
 		s.queuedBytes = 0
 		s.collectMetadata()
@@ -826,11 +831,12 @@ func (s *session[T]) reap() error {
 		s.drainDeadline = time.Now().Add(drainTimeout)
 		// Held input can no longer reach the child. Route it for capture and
 		// observers as its read would have; enqueue now discards its bytes.
-		errs := []error{waitErr, s.routeHeld()}
+		err = errors.Join(err, s.routeHeld())
 		if s.statePending && s.events.wants(Exited) {
-			errs = append(errs, s.refreshState())
+			err = errors.Join(err, s.refreshState())
 		}
-		return errors.Join(append(errs, s.emitExited())...)
+		// Routing that overflowed the queue leaves it full for Exited too.
+		return joinOnce(err, s.emitExited())
 	default:
 		return nil
 	}

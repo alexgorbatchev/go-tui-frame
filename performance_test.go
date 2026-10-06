@@ -458,6 +458,44 @@ func TestExitSubscriptionCapturesPendingOutput(t *testing.T) {
 	}
 }
 
+// When the loop reaps the launch leader behind an observer that has fallen
+// behind, routing held input and emitting Exited both meet the full queue.
+// reap reports that one overflow once.
+func TestReapReportsAFullObservationQueueOnce(t *testing.T) {
+	s, _, _ := newRepaintSession(t, ansi.ModeReset, nil)
+	s.started = true
+	router, err := newInputRouter(s.terminal, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(router.close)
+	s.router = router
+	d, entered, _ := pausedSelectedDispatcher(t, eventBit(Routed)|eventBit(Exited), sessionCancel(t), func(Event) {})
+	s.events = d
+	// The first record's callback holds while records fill the queue behind it.
+	if err := d.emit(Event{Kind: Routed}); err != nil {
+		t.Fatal(err)
+	}
+	<-entered
+	for range observationQueueLimit {
+		if err := d.emit(Event{Kind: Routed}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The child has not requested focus reports, so routing drops this one and
+	// emits Routed.
+	s.held = []input.Packet{{Raw: []byte("\x1b[I"), Event: uv.FocusEvent{}}}
+	s.wait = make(chan error, 1)
+	s.wait <- nil
+	err = s.reap()
+	if !errors.Is(err, ErrObservationOverflow) {
+		t.Fatalf("reap = %v, want %v", err, ErrObservationOverflow)
+	}
+	if n := strings.Count(err.Error(), ErrObservationOverflow.Error()); n != 1 {
+		t.Fatalf("reap reported the overflow %d times, want once: %v", n, err)
+	}
+}
+
 func TestDeferredCapturePreservesSynchronizedCheckpoint(t *testing.T) {
 	for _, release := range []string{"child", "deadline"} {
 		t.Run(release, func(t *testing.T) {
