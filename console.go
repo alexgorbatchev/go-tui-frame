@@ -33,6 +33,10 @@ var consoleOwners = struct {
 // required because its prior contents cannot be reconstructed from a TTY.
 var consoleModes = []ansi.DECMode{1, 5, 7, 9, 12, 25, 66, 67, 1000, 1001, 1002, 1003, 1004, 1005, 1006, alternateScrollMode, 1015, 1016, 1035, 1036, 1039, 1049, 2004, synchronizedOutputMode, 2027, 2031}
 
+// errAlternateScreen fails startup on a terminal whose screen the session
+// could not leave as it found it.
+var errAlternateScreen = errors.New("terminal must report an inactive alternate screen (DEC mode 1049)")
+
 type console struct {
 	inherit                                              bool
 	preferences                                          terminalPreferences
@@ -205,8 +209,12 @@ func (c *console) probe(ctx context.Context, events *eventDispatcher, timeout ti
 		return nil, errors.New("terminal probe write timed out")
 	}
 	c.preferences.closed = true
-	if v, ok := c.entry[1049]; !ok || !v.IsReset() {
-		return nil, errors.New("terminal must report an inactive alternate screen (DEC mode 1049)")
+	// Only a reset report (DECRPM Ps 2) shows an inactive alternate screen the
+	// terminal can switch to. A terminal that cannot switch ignores the switch
+	// enter writes, so the first redraw would erase the screen it shows. A
+	// missing report reads as not recognized.
+	if c.entry[1049] != ansi.ModeReset {
+		return nil, errAlternateScreen
 	}
 	return saved, nil
 }

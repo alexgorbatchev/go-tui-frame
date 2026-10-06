@@ -254,7 +254,7 @@ Observer callbacks must return promptly and honor your cancellation context. The
 
 # Compatibility
 
-The child receives `TERM=xterm-256color` and `COLORTERM=truecolor`, with physical-terminal vendor and graphics hints removed. Startup requires DEC mode-query replies and an inactive outer alternate screen (mode 1049). An existing alternate screen is rejected because its contents cannot be recovered from the TTY.
+The child receives `TERM=xterm-256color` and `COLORTERM=truecolor`, with physical-terminal vendor and graphics hints removed. Startup requires DEC mode-query replies and an outer alternate screen (mode 1049) that the terminal reports as reset, meaning inactive and switchable. An existing alternate screen is rejected because its contents cannot be recovered from the TTY. A terminal that reports mode 1049 as permanently set, permanently reset, or not recognized is rejected because the frame cannot switch its screen with that mode: the session would draw over the screen the terminal shows and could not restore it.
 
 | Capability | Behavior and limits |
 | :--- | :--- |

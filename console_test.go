@@ -2,6 +2,7 @@ package frame
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -543,6 +544,77 @@ func TestProbeConsumesZeroCellSizeReply(t *testing.T) {
 	}
 	if c.cellWidth != 0 || c.cellHeight != 0 {
 		t.Fatalf("zero reply measured cells %dx%d", c.cellWidth, c.cellHeight)
+	}
+}
+
+// The session draws on the outer alternate screen and leaves it for the main
+// screen the user was working in. A terminal that cannot switch ignores
+// CSI ? 1049 h, so the session's first redraw would erase the main screen and
+// leaving could not bring it back. Only a report of mode 1049 as reset (DECRPM
+// Ps 2) shows an inactive alternate screen the terminal can switch to. Any
+// other report, or none, fails startup before the frame writes the switch or
+// starts the child.
+func TestStartupRequiresSwitchableInactiveAlternateScreen(t *testing.T) {
+	const mode, marker = ansi.ModeAltScreenSaveCursor, "startup-finished"
+	for _, tt := range []struct {
+		name, reply string
+		accepted    bool
+	}{
+		{"not recognized", ansi.ReportMode(mode, ansi.ModeNotRecognized), false},
+		{"set", ansi.ReportMode(mode, ansi.ModeSet), false},
+		{"reset", ansi.ReportMode(mode, ansi.ModeReset), true},
+		{"permanently set", ansi.ReportMode(mode, ansi.ModePermanentlySet), false},
+		{"permanently reset", ansi.ReportMode(mode, ansi.ModePermanentlyReset), false},
+		{"not reported", "", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var want error
+			if !tt.accepted {
+				want = errAlternateScreen
+			}
+			h := newHarness(t)
+			h.report(mode, tt.reply)
+			h.transcribe()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			fd, device, _, err := inspectConsole(h.slave, h.slave)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c, err := acquireConsole(h.slave, h.slave, fd, device)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, probeErr := c.probe(ctx, nil, capabilityTimeout)
+			if err := c.restore(); err != nil {
+				t.Fatal(err)
+			}
+			if !errors.Is(probeErr, want) {
+				t.Errorf("probe with mode 1049 reply %q returned %v, want %v", tt.reply, probeErr, want)
+			}
+			child := exec.Command("true")
+			result, err := New(child, struct{}{}).Terminal(h.slave, h.slave).Run(ctx)
+			if !errors.Is(err, want) {
+				t.Errorf("Run with mode 1049 reply %q returned %v, want %v", tt.reply, err, want)
+			}
+			if started := child.Process != nil; started != tt.accepted {
+				t.Errorf("Run with mode 1049 reply %q started the child = %v, want %v", tt.reply, started, tt.accepted)
+			}
+			if tt.accepted && (result.ProcessState == nil || !result.ProcessState.Success()) {
+				t.Errorf("Run with mode 1049 reply %q returned child state %v, want success", tt.reply, result.ProcessState)
+			}
+			// The marker follows everything Run wrote, so the transcript is
+			// complete once the outer terminal shows it.
+			if _, err := h.slave.WriteString(ansi.SetWindowTitle(marker)); err != nil {
+				t.Fatal(err)
+			}
+			awaitOuter(t, h, "the marker written after Run", func(s emulator.State) bool {
+				return s.Title == marker
+			})
+			if entered := strings.Contains(h.transcribed(), ansi.SetModeAltScreenSaveCursor); entered != tt.accepted {
+				t.Errorf("frame wrote %q with mode 1049 reply %q = %v, want %v", ansi.SetModeAltScreenSaveCursor, tt.reply, entered, tt.accepted)
+			}
+		})
 	}
 }
 

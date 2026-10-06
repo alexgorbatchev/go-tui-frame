@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/alexgorbatchev/go-tui-frame/internal/emulator"
 	uv "github.com/charmbracelet/ultraviolet"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/term"
 	"github.com/creack/pty"
 	ghostty "go.mitchellh.com/libghostty"
@@ -142,6 +144,17 @@ type terminalHarness struct {
 	// keeps the output tail where a query may continue in the next read.
 	answers map[string]string
 	carry   []byte
+	// reports replace the native emulator's DECRPM replies for some modes.
+	reports []modeReport
+	// transcript records what the terminal receives once transcribe is called.
+	transcript *bytes.Buffer
+}
+
+// modeReport is the reply a harness terminal sends in place of each native
+// DECRPM report that native matches.
+type modeReport struct {
+	native *regexp.Regexp
+	reply  []byte
 }
 
 const harnessCellWidth, harnessCellHeight = 10, 20
@@ -242,12 +255,18 @@ func (h *terminalHarness) read() {
 			return
 		}
 		h.mu.Lock()
+		if h.transcript != nil {
+			h.transcript.Write(buf[:n])
+		}
 		_, err = h.em.Write(buf[:n])
 		var replies []byte
 		for _, e := range h.em.Effects() {
 			if e.Kind == emulator.Reply {
 				replies = append(replies, e.Bytes...)
 			}
+		}
+		for _, r := range h.reports {
+			replies = r.native.ReplaceAllLiteral(replies, r.reply)
 		}
 		replies = append(replies, h.answerQueries(buf[:n])...)
 		switch {
@@ -332,6 +351,31 @@ func (h *terminalHarness) answerQueries(output []byte) []byte {
 	}
 	h.carry = slices.Clone(window[max(0, len(window)-longest+1):])
 	return replies
+}
+
+// report makes the terminal answer every DECRQM query for m with reply
+// instead of its native report, as a terminal that reports m differently
+// does. An empty reply models a terminal that does not answer.
+func (h *terminalHarness) report(m ansi.DECMode, reply string) {
+	native := regexp.MustCompile(regexp.QuoteMeta(fmt.Sprintf("\x1b[?%d;", m)) + `\d+` + regexp.QuoteMeta("$y"))
+	h.mu.Lock()
+	h.reports = append(h.reports, modeReport{native: native, reply: []byte(reply)})
+	h.mu.Unlock()
+}
+
+// transcribe makes the terminal record everything it receives from its next
+// read on.
+func (h *terminalHarness) transcribe() {
+	h.mu.Lock()
+	h.transcript = new(bytes.Buffer)
+	h.mu.Unlock()
+}
+
+// transcribed returns what the terminal has received since transcribe.
+func (h *terminalHarness) transcribed() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.transcript.String()
 }
 
 func (h *terminalHarness) writeReplies(replies []byte) error {
