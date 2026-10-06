@@ -182,7 +182,7 @@ type session[T any] struct {
 	queuedBytes                                               int
 	framer                                                    *input.Framer
 	escapeDeadline, holdDeadline, killDeadline, drainDeadline time.Time
-	renderDeadline                                            time.Time
+	renderDeadline, reapDeadline                              time.Time
 }
 
 func childEnvironment(env []string) []string {
@@ -773,6 +773,26 @@ func (s *session[T]) signalGroups(sig syscall.Signal) error {
 	return errors.Join(errs...)
 }
 
+// kill sends SIGKILL to the owned session's process groups. The first kill
+// before Wait reports the launch leader starts the reap deadline, which the
+// loop and cleanupChild share. On Darwin an exiting session leader waits for
+// its unread output to drain, and SIGKILL cannot end that wait. Output that
+// flow control has stopped cannot be read, and while a process in another
+// session holds the slave the wait has no deadline of its own. Closing the
+// master ends it.
+func (s *session[T]) kill() error {
+	if !s.waited && s.reapDeadline.IsZero() {
+		s.reapDeadline = time.Now().Add(drainTimeout)
+	}
+	return s.signalGroups(syscall.SIGKILL)
+}
+
+// reapOverdue reports whether the reap deadline passed before Wait reported
+// the launch leader.
+func (s *session[T]) reapOverdue() bool {
+	return !s.waited && !s.reapDeadline.IsZero() && !time.Now().Before(s.reapDeadline)
+}
+
 func (s *session[T]) reap() error {
 	select {
 	case err := <-s.wait:
@@ -782,6 +802,7 @@ func (s *session[T]) reap() error {
 		s.queuedBytes = 0
 		s.snapshot.Child.ProcessState = s.frame.cmd.ProcessState
 		s.collectMetadata()
+		s.reapDeadline = time.Time{}
 		s.drainDeadline = time.Now().Add(drainTimeout)
 		var exit *exec.ExitError
 		if err != nil && !errors.As(err, &exit) {
@@ -807,13 +828,14 @@ func (s *session[T]) cleanupChild() error {
 	var errs []error
 	// The leader can exit before its foreground or background jobs. Inventory
 	// the owned native session even after Wait; detached sessions are excluded.
-	errs = append(errs, s.signalGroups(syscall.SIGKILL))
+	errs = append(errs, s.kill())
 	if !s.waited {
 		errs = append(errs, s.discardUntilReaped())
 	}
 	// Closing the master hangs up the slave. Once the leader has been reaped its
 	// exit has detached its session from the terminal, so the hangup signals no
-	// one. A leader the drain could not release is released by the hangup.
+	// one. A leader the drain could not release has been exiting since its
+	// SIGKILL; the hangup releases it, and it discards the hangup's SIGHUP.
 	if s.master != nil {
 		errs = append(errs, s.master.Close())
 		s.master = nil
@@ -826,17 +848,14 @@ func (s *session[T]) cleanupChild() error {
 }
 
 // discardUntilReaped reads and discards child output until Wait reports the
-// killed launch leader, for at most drainTimeout. Nothing else reads the master
-// once the loop has returned, and on Darwin an exiting leader waits for its
-// unread output to drain; SIGKILL cannot end that wait. It lasts 600 ms when
-// the leader's close is the slave's last, and has no deadline while a process
-// in another session holds the slave. Reading empties the queue and wakes the
-// leader. Closing the master first would also end the wait, but its hangup
-// sends the leader SIGHUP, which on Darwin can end a multi-threaded leader
-// before its SIGKILL does and so change the exit status Run reports. Output
-// that flow control has stopped cannot be read; the deadline bounds that wait.
+// killed launch leader or the reap deadline passes. Nothing else reads the
+// master once the loop has returned, and on Darwin the exiting leader waits
+// for its unread output to drain. That wait lasts 600 ms when the leader's
+// close is the slave's last. Reading empties the queue and wakes the leader.
+// Closing the master first would also end the wait, but its hangup sends the
+// leader SIGHUP, which on Darwin can end a multi-threaded leader before its
+// SIGKILL does and so change the exit status Run reports.
 func (s *session[T]) discardUntilReaped() error {
-	deadline := time.Now().Add(drainTimeout)
 	buf := make([]byte, readBufferSize)
 	for {
 		select {
@@ -844,7 +863,7 @@ func (s *session[T]) discardUntilReaped() error {
 			return s.finishWait(err)
 		default:
 		}
-		timeout := int(time.Until(deadline).Milliseconds())
+		timeout := int(time.Until(s.reapDeadline).Milliseconds())
 		if timeout <= 0 {
 			return nil
 		}
@@ -916,6 +935,11 @@ func (s *session[T]) loop(ctx context.Context) error {
 		}
 		if err := s.deadlines(); err != nil {
 			return errors.Join(failure, err)
+		}
+		if s.reapOverdue() {
+			// The killed leader's exit waits for output the loop cannot read.
+			// cleanupChild closes the master, which releases it.
+			return failure
 		}
 		disconnected, err := s.await(buf, resizes, failure)
 		if err != nil {
@@ -1087,7 +1111,7 @@ func (s *session[T]) deadlines() error {
 	}
 	if !s.killDeadline.IsZero() && !now.Before(s.killDeadline) {
 		s.killDeadline = time.Time{}
-		if err := s.signalGroups(syscall.SIGKILL); err != nil {
+		if err := s.kill(); err != nil {
 			return err
 		}
 	}
@@ -1104,7 +1128,7 @@ func (s *session[T]) pollTimeout() int {
 		escape = time.Time{} // deadlines defers the Escape until reads resume.
 	}
 	timeout := -1
-	for _, d := range []time.Time{escape, s.holdDeadline, s.killDeadline, s.drainDeadline, s.renderDeadline} {
+	for _, d := range []time.Time{escape, s.holdDeadline, s.killDeadline, s.reapDeadline, s.drainDeadline, s.renderDeadline} {
 		if !d.IsZero() {
 			ms := max(0, int(time.Until(d).Milliseconds()+1))
 			if timeout < 0 || ms < timeout {

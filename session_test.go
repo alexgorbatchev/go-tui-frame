@@ -703,42 +703,27 @@ func TestSessionErrorCleanupIgnoresDetachedSlaveHolder(t *testing.T) {
 	d := startDetached(t, nil, []EventKind{ChildOutput}, func(_ Event, hold <-chan struct{}) { <-hold })
 	// Reading the unread output releases the leader at once. Finishing within
 	// half the drain deadline rules out a release by the deadline's hangup.
-	d.finish(t, awaitTermios(d.h, d.before, drainTimeout/2))
+	d.finish(t, awaitTermios(d.h, d.before, drainTimeout/2), ErrObservationOverflow)
 }
 
 // Output stopped by flow control cannot be read, so reading the child PTY
 // cannot release a killed leader whose exit waits for that output; the drain
 // deadline must.
 func TestSessionErrorCleanupReleasesStoppedChildOutput(t *testing.T) {
-	stop := []byte{0x13} // VSTOP (^S), which the default line discipline applies with IXON.
 	stopped := make(chan struct{})
-	// Only ^S reaches the child. Any later input would restart its output
-	// under IXANY, so the frame consumes it; its observations, held until
+	// The frame consumes all input but ^S; its observations, held until
 	// cleanup has finished, overflow the queue.
-	capture := func(in Input) Disposition {
-		if bytes.Equal(in.Raw, stop) {
-			return Pass
-		}
-		return Consume
-	}
 	holding := false // Startup probe replies are outer input too; let them pass.
-	d := startDetached(t, capture, []EventKind{ChildInput, OuterInput}, func(e Event, hold <-chan struct{}) {
+	d := startDetached(t, passOnlyStop, []EventKind{ChildInput, OuterInput}, func(e Event, hold <-chan struct{}) {
 		switch {
-		case e.Kind == ChildInput && bytes.Equal(e.Bytes, stop):
+		case e.Kind == ChildInput && bytes.Equal(e.Bytes, stopInput):
 			holding = true
 			close(stopped)
 		case e.Kind == OuterInput && holding:
 			<-hold
 		}
 	})
-	if _, err := unix.Write(d.h.fd, stop); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-stopped:
-	case <-time.After(5 * time.Second):
-		t.Fatal("^S did not reach the child")
-	}
+	d.stopOutput(t, stopped)
 	// Separate reads each emit an observation; keep typing until the queue has
 	// overflowed and cleanup has restored the terminal.
 	cleaned := false
@@ -748,7 +733,43 @@ func TestSessionErrorCleanupReleasesStoppedChildOutput(t *testing.T) {
 		}
 		cleaned = awaitTermios(d.h, d.before, 5*time.Millisecond)
 	}
-	d.finish(t, cleaned)
+	d.finish(t, cleaned, ErrObservationOverflow)
+}
+
+// Cancellation leaves the loop polling for the killed launch leader, whose exit
+// on Darwin waits for output that flow control has stopped while a process in
+// another session holds the slave. The wait for its reap must be bounded, and
+// cleanup must share that bound rather than start its own.
+func TestCancellationReleasesStoppedChildOutput(t *testing.T) {
+	stopped := make(chan struct{})
+	d := startDetached(t, passOnlyStop, []EventKind{ChildInput}, func(e Event, _ <-chan struct{}) {
+		if bytes.Equal(e.Bytes, stopInput) {
+			close(stopped)
+		}
+	})
+	d.stopOutput(t, stopped)
+	d.cancel()
+	// SIGKILL follows SIGTERM after terminationTimeout and the reap bound
+	// drainTimeout after that. Half a drain deadline of margin fails a second
+	// drainTimeout in cleanup.
+	got := d.finish(t, awaitTermios(d.h, d.before, terminationTimeout+drainTimeout+drainTimeout/2), context.Canceled)
+	// SIGTERM ends the child at once. The reap bound must not replace its exit
+	// status with the hangup of the child PTY's close.
+	if status, ok := got.result.ProcessState.Sys().(syscall.WaitStatus); !ok || !status.Signaled() || status.Signal() != syscall.SIGTERM {
+		t.Fatalf("launch leader exit = %v, want the frame's SIGTERM", got.result.ProcessState)
+	}
+}
+
+// stopInput is VSTOP (^S), which the default line discipline applies with IXON.
+var stopInput = []byte{0x13}
+
+// passOnlyStop passes only ^S to the child. Any other input would restart the
+// child's output under IXANY, so the frame consumes it.
+func passOnlyStop(in Input) Disposition {
+	if bytes.Equal(in.Raw, stopInput) {
+		return Pass
+	}
+	return Consume
 }
 
 // detachedRun is a session whose "detached" child writes output continuously
@@ -758,6 +779,7 @@ type detachedRun struct {
 	before  string
 	holder  int
 	done    <-chan runOutcome
+	cancel  context.CancelFunc
 	release func()
 }
 
@@ -798,13 +820,28 @@ func startDetached(t *testing.T, capture func(Input) Disposition, kinds []EventK
 	if sid, err := unix.Getsid(holder); err != nil || sid != holder {
 		t.Fatalf("holder session = %d, %v; want its own session %d", sid, err, holder)
 	}
-	return &detachedRun{h: h, before: before, holder: holder, done: done, release: release}
+	return &detachedRun{h: h, before: before, holder: holder, done: done, cancel: cancel, release: release}
+}
+
+// stopOutput types ^S on the outer terminal and waits until stopped reports
+// that the frame wrote it to the child, which stops the child's output. The
+// session's capture must be passOnlyStop.
+func (d *detachedRun) stopOutput(t *testing.T, stopped <-chan struct{}) {
+	t.Helper()
+	if _, err := unix.Write(d.h.fd, stopInput); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("^S did not reach the child")
+	}
 }
 
 // finish requires that child cleanup restored the terminal, which Run does
-// only after cleanup has returned, and that Run then reported the observation
-// overflow with the leader's exit state while the holder survived.
-func (d *detachedRun) finish(t *testing.T, cleaned bool) {
+// only after cleanup has returned, and that Run then reported want with the
+// leader's exit state while the holder survived. It returns Run's outcome.
+func (d *detachedRun) finish(t *testing.T, cleaned bool, want error) runOutcome {
 	t.Helper()
 	if !cleaned {
 		// Ending the holder bounds the leader's drain, so Run can return before
@@ -823,12 +860,13 @@ func (d *detachedRun) finish(t *testing.T, cleaned bool) {
 	if !cleaned {
 		t.Fatal("child cleanup did not finish in time while a process in another session held the child PTY")
 	}
-	if !errors.Is(got.err, ErrObservationOverflow) || got.result.ProcessState == nil || got.result.CleanupError != nil {
-		t.Fatalf("Run = %#v, %v; want ErrObservationOverflow, the launch leader's exit state and no cleanup error", got.result, got.err)
+	if !errors.Is(got.err, want) || got.result.ProcessState == nil || got.result.CleanupError != nil {
+		t.Fatalf("Run = %#v, %v; want %v, the launch leader's exit state and no cleanup error", got.result, got.err, want)
 	}
 	if err := unix.Kill(d.holder, 0); err != nil {
 		t.Fatalf("detached holder did not outlive Run: %v", err)
 	}
+	return got
 }
 
 // descendantCommand returns a child in mode, "groups" or "detached", whose
