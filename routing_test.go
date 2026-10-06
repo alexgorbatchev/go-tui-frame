@@ -153,24 +153,46 @@ func TestRoutingConvertsAltModifiedKeysToChildAltEncoding(t *testing.T) {
 // still carries the character the user produced: the shifted key the outer
 // terminal reported, or else the upper case Shift or Caps Lock alone selects.
 // Ctrl keeps the unshifted key, so a legacy child still receives its C0 byte.
+// Host profiles mirror console.syncInput: Capture adds disambiguation and
+// alternate keys for a child without disambiguation, or modifyOtherKeys mode 2
+// when Kitty is unavailable.
+//
+// On a layout other than US, alternate keys also report the base layout key:
+// the key in the same position on a US layout. It never replaces the character
+// the user produced. Under Ctrl alone it selects the native C0 byte, as
+// Ghostty's own Russian Ctrl+с does; Ctrl with Shift falls through to CSI u.
 func TestRoutingConvertedKeysKeepProducedCharacter(t *testing.T) {
-	const disambiguate = ghostty.KittyKeyDisambiguate
+	const capture = ghostty.KittyKeyDisambiguate | ghostty.KittyKeyReportAlternates
+	// Pinned Ghostty's legacy Alt prefix writes a multi-byte character's
+	// unshifted code point on macOS and the character itself elsewhere.
+	nonASCIIAltShift := "\x1bИ"
+	if runtime.GOOS == "darwin" {
+		nonASCIIAltShift = "\x1bи"
+	}
 	for _, tt := range []struct {
 		name, modes, input, want string
 		hostKitty                ghostty.KittyKeyFlags
 		hostModifyOtherKeys2     bool
 	}{
-		{name: "Shift+Alt+b", input: "\x1b[98;4u", want: "\x1bB", hostKitty: disambiguate},
-		{name: "Shift+Alt+b with shifted key", input: "\x1b[98:66;4u", want: "\x1bB", hostKitty: disambiguate},
-		{name: "Shift+Alt+comma with shifted key", input: "\x1b[44:60;4u", want: "\x1b<", hostKitty: disambiguate},
-		{name: "Caps Lock+Alt+b", input: "\x1b[98;67u", want: "\x1bB", hostKitty: disambiguate},
-		{name: "Shift+Caps Lock+Alt+b", input: "\x1b[98;68u", want: "\x1bb", hostKitty: disambiguate},
-		{name: "Shift+Caps Lock+Alt+b with shifted key", input: "\x1b[98:66;68u", want: "\x1bB", hostKitty: disambiguate},
-		{name: "Ctrl+Shift+b", input: "\x1b[98;6u", want: "\x02", hostKitty: disambiguate},
-		{name: "Ctrl+Shift+b with shifted key", input: "\x1b[98:66;6u", want: "\x02", hostKitty: disambiguate},
+		{name: "Shift+Alt+b", input: "\x1b[98;4u", want: "\x1bB", hostKitty: capture},
+		{name: "Shift+Alt+b with shifted key", input: "\x1b[98:66;4u", want: "\x1bB", hostKitty: capture},
+		{name: "Shift+Alt+comma with shifted key", input: "\x1b[44:60;4u", want: "\x1b<", hostKitty: capture},
+		{name: "Caps Lock+Alt+b", input: "\x1b[98;67u", want: "\x1bB", hostKitty: capture},
+		{name: "Shift+Caps Lock+Alt+b", input: "\x1b[98;68u", want: "\x1bb", hostKitty: capture},
+		{name: "Shift+Caps Lock+Alt+b with shifted key", input: "\x1b[98:66;68u", want: "\x1bB", hostKitty: capture},
+		{name: "Ctrl+Shift+b", input: "\x1b[98;6u", want: "\x02", hostKitty: capture},
+		{name: "Ctrl+Shift+b with shifted key", input: "\x1b[98:66;6u", want: "\x02", hostKitty: capture},
+		{name: "Dvorak Alt+x", input: "\x1b[120::98;3u", want: "\x1bx", hostKitty: capture},
+		{name: "Dvorak Alt+Shift+X", input: "\x1b[120:88:98;4u", want: "\x1bX", hostKitty: capture},
+		{name: "Russian Alt+и", input: "\x1b[1080::98;3u", want: "\x1bи", hostKitty: capture},
+		{name: "Russian Alt+Shift+И", input: "\x1b[1080:1048:98;4u", want: nonASCIIAltShift, hostKitty: capture},
+		{name: "Dvorak Ctrl+x", input: "\x1b[120::98;5u", want: "\x18", hostKitty: capture},
+		{name: "Russian Ctrl+и", input: "\x1b[1080::98;5u", want: "\x02", hostKitty: capture},
+		{name: "Russian Ctrl+и without base layout key", input: "\x1b[1080;5u", want: "\x1b[1080;5u", hostKitty: capture},
+		{name: "Russian Ctrl+Shift+И", input: "\x1b[1080:1048:98;6u", want: "\x1b[1080;6u", hostKitty: capture},
 		{
 			name: "Shift+Alt+b to modifyOtherKeys child", modes: "\x1b[>4;2m", input: "\x1b[98;4u", want: "\x1b[27;4;66~",
-			hostKitty: disambiguate, hostModifyOtherKeys2: true,
+			hostKitty: capture, hostModifyOtherKeys2: true,
 		},
 		{name: "legacy Alt+B to alternate-key child", modes: "\x1b[>5u", input: "\x1bB", want: "\x1b[98:66;4u"},
 	} {

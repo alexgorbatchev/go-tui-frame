@@ -156,7 +156,7 @@ movement, cursor visibility, and synchronized-update holds update the child
 display without invalidating region canvases. Use region invalidation when your
 application needs to redraw a region from those display details.
 
-The drawing contract requires synchronous drawing into `View`; filling the region and using Lip Gloss styles are optional. You can call `SetCell` directly or draw any `uv.Drawable`. Lip Gloss layers implement that interface: `lipgloss.NewLayer(text).Draw(ctx.View, ctx.View.Bounds())`. For positioned or overlapping layers, use `lipgloss.NewCompositor(layers...).Draw(ctx.View, ctx.View.Bounds())`. The library clips the completed region with wide-cell boundaries preserved. [Screen and drawable interfaces](https://github.com/charmbracelet/ultraviolet/blob/006e29f97886/uv.go), [Lip Gloss layers](https://github.com/charmbracelet/lipgloss/blob/v2.0.6/layer.go).
+The drawing contract requires synchronous drawing into `View`; filling the region and using Lip Gloss styles are optional. You can call `SetCell` directly or draw any `uv.Drawable`. Lip Gloss layers implement that interface: `lipgloss.NewLayer(text).Draw(ctx.View, ctx.View.Bounds())`. For positioned or overlapping layers, use `lipgloss.NewCompositor(layers...).Draw(ctx.View, ctx.View.Bounds())`. The library clips the completed region with wide-cell boundaries preserved. [Screen and drawable interfaces](https://github.com/charmbracelet/ultraviolet/blob/878653296cfd/uv.go), [Lip Gloss layers](https://github.com/charmbracelet/lipgloss/blob/v2.0.6/layer.go).
 
 For plain text without Lip Gloss, use the existing Ultraviolet drawing primitive:
 
@@ -209,7 +209,15 @@ Use `uv "github.com/charmbracelet/ultraviolet"`. `Input.Key` carries the recogni
 
 When releases are reported, the press determines ownership of its repeats and final release. Recognized paste payloads bypass key capture; unmarked paste cannot be distinguished from typing. Observation does not consume input.
 
-Explicit capture requests distinct key reports through verified Kitty disambiguation, or verified modifyOtherKeys mode 2 when Kitty is unavailable. Unmatched input is converted to the child's requested protocol and keeps the character the user typed: Alt+Shift+b reaches a legacy child as `ESC B`, while Ctrl combinations such as Ctrl+Shift+b keep their control byte. For a child that does not request Kitty disambiguation itself, capture also requests Kitty alternate keys, which carry the shifted character of punctuation such as Alt+Shift+comma (M-<). Terminals without those capabilities cannot reliably distinguish Ctrl+number keys from ordinary digit, NUL, or Escape input; those ambiguous bytes retain their child meanings. The default path without capture does not request these extra reports. [Keyboard disambiguation](https://sw.kovidgoyal.net/kitty/keyboard-protocol/#disambiguate-escape-codes), [alternate keys](https://sw.kovidgoyal.net/kitty/keyboard-protocol/#report-alternate-keys).
+Explicit capture requests distinct key reports through verified Kitty disambiguation, or verified modifyOtherKeys mode 2 when Kitty is unavailable. For a child that does not request Kitty disambiguation itself, capture also requests Kitty alternate keys, which report a key's shifted character and the key in the same position on a US layout. Terminals without those capabilities cannot reliably distinguish Ctrl+number keys from ordinary digit, NUL, or Escape input; those ambiguous bytes retain their child meanings. The default path without capture does not request these extra reports. [Keyboard disambiguation](https://sw.kovidgoyal.net/kitty/keyboard-protocol/#disambiguate-escape-codes), [alternate keys](https://sw.kovidgoyal.net/kitty/keyboard-protocol/#report-alternate-keys).
+
+Unmatched input is converted to the child's requested protocol. A converted Alt key carries the character the outer terminal reports: Alt+Shift+comma reaches a legacy child as `ESC <` (M-<), and Alt+Shift+X on a Dvorak layout as `ESC X`. On macOS, the native encoder prefixes a non-ASCII character with its unshifted form, so Alt+Shift+И on a Russian layout arrives as `ESC и`. Ctrl combinations use the unshifted key and keep its control byte: Ctrl+Shift+b reaches a legacy child as `0x02`. When the outer terminal reports the key in the same US position, Ctrl alone with a non-ASCII key uses it, so Russian Ctrl+и also arrives as `0x02`.
+
+Upstream Ultraviolet decodes an alternate-key report's US-layout key as its shifted character, so on a layout other than US a converted Alt key could reach the child as the US letter in the same position. This module's `go.mod` replaces Ultraviolet with a fork that keeps the two apart. Go applies `replace` directives only in the main module, so add the same directive to your application's `go.mod` until upstream Ultraviolet fixes its alternate-key decoder:
+
+```
+replace github.com/charmbracelet/ultraviolet => github.com/alexgorbatchev/ultraviolet v0.0.0-20261006050112-466706a11cd3
+```
 
 # Child Information
 

@@ -136,7 +136,10 @@ func TestCaptureNegotiatesDistinctKeysAndRestoresOuterMode(t *testing.T) {
 // Under Capture, the native outer terminal encodes each key with the flags the
 // frame requested, and the frame converts it for the legacy child. Without
 // alternate keys, Alt+Shift+comma arrives as Alt+Shift+"," and loses its "<".
-// The child must receive what a legacy terminal sends: M-< and M-B.
+// The child must receive what a legacy terminal sends: M-< and M-B, and on a
+// Dvorak layout M-X from the key in the US B position, not that position's b.
+// Russian Ctrl+и in the same position sends Ctrl+B, as Ghostty's own Ctrl+с
+// sends Ctrl+C.
 func TestCaptureDeliversShiftedAltKeysToLegacyChild(t *testing.T) {
 	h := newHarness(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -159,16 +162,20 @@ func TestCaptureDeliversShiftedAltKeysToLegacyChild(t *testing.T) {
 	}
 	defer event.Close()
 	event.SetAction(ghostty.KeyActionPress)
-	event.SetMods(ghostty.ModAlt | ghostty.ModShift)
+	const altShift = ghostty.ModAlt | ghostty.ModShift
 	for _, tt := range []struct {
 		name, text, want string
 		key              ghostty.Key
+		mods             ghostty.Mods
 		unshifted        rune
 	}{
-		{"Alt+Shift+comma", "<", "\x1b<", ghostty.KeyComma, ','},
-		{"Alt+Shift+b", "B", "\x1bB", ghostty.KeyB, 'b'},
+		{"Alt+Shift+comma", "<", "\x1b<", ghostty.KeyComma, altShift, ','},
+		{"Alt+Shift+b", "B", "\x1bB", ghostty.KeyB, altShift, 'b'},
+		{"Dvorak Alt+Shift+X", "X", "\x1bX", ghostty.KeyB, altShift, 'x'},
+		{"Russian Ctrl+и", "и", "\x02", ghostty.KeyB, ghostty.ModCtrl, 'и'},
 	} {
 		event.SetKey(tt.key)
+		event.SetMods(tt.mods)
 		event.SetUTF8(tt.text)
 		event.SetUnshiftedCodepoint(tt.unshifted)
 		h.mu.Lock()
@@ -183,7 +190,7 @@ func TestCaptureDeliversShiftedAltKeysToLegacyChild(t *testing.T) {
 		select {
 		case got := <-converted:
 			if string(got) != tt.want {
-				t.Fatalf("%s reported as %q reached the child as %q, want %q", tt.name, report, got, tt.want)
+				t.Errorf("%s reported as %q reached the child as %q, want %q", tt.name, report, got, tt.want)
 			}
 		case <-ctx.Done():
 			t.Fatalf("%s reported as %q was not converted: %v", tt.name, report, ctx.Err())
