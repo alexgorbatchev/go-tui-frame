@@ -9,7 +9,7 @@ description: >-
 author: alexgorbatchev
 metadata:
   created_on: 2026-10-01 13:23
-  last_modified: 2026-10-06 06:40
+  last_modified: 2026-10-06 12:25
   status: current
 ---
 
@@ -40,7 +40,10 @@ remains plain when cycling the background. Regions report
 the child PID, executable name, terminal title, and child viewport size. Region
 header/footer geometry stays fixed for the session. A child-border toggle adds
 or removes a one-cell inset, resizes the child PTY, and repaints the frame. The
-footer shows the current border state and child viewport dimensions.
+footer's first row shows the executable name, child viewport dimensions, current
+border state, and terminal title, ending in an ellipsis when it is wider than
+the footer. Its second row always shows the Ctrl+1/2/3 and Ctrl+Q key hints, cut
+the same way in a terminal narrower than the hints.
 
 | Key | Wrapper action |
 | --- | --- |

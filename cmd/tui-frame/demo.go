@@ -88,27 +88,38 @@ func drawFooter(ctx frame.DrawContext[UIData]) {
 	}
 	metadata := fmt.Sprintf("%s | %d×%d | border %s | %s",
 		name, ctx.Term.Viewport.Cols, ctx.Term.Viewport.Rows, border, metadataText(ctx.Term.Terminal.Title))
-	text := metadata + "\n" + keyHints
 	if ctx.Data.Agent {
-		paint(ctx.View, lipgloss.NewStyle(), text)
+		paintFooter(ctx.View, lipgloss.NewStyle(), lipgloss.NewStyle(), metadata)
 		return
 	}
 	bg := lipgloss.Color([...]string{slate, navy, teal}[ctx.Data.Demo])
 	style := lipgloss.NewStyle().Background(bg).Foreground(lipgloss.Color(white))
+	hintStyle := style
 	switch ctx.Data.Demo {
-	case 0:
-		paint(ctx.View, style, text)
 	case 1:
-		paint(ctx.View, style, "")
-		lineStyle := style.Width(ctx.View.Bounds().Dx()).MaxWidth(ctx.View.Bounds().Dx()).MaxHeight(1)
-		metadataLayer := lipgloss.NewLayer(lineStyle.Render(metadata))
-		controlsLayer := lipgloss.NewLayer(lineStyle.Bold(true).Render(keyHints)).Y(1)
-		lipgloss.NewCompositor(metadataLayer, controlsLayer).Draw(ctx.View, ctx.View.Bounds())
+		hintStyle = style.Bold(true)
 	case 2:
 		style = style.Border(lipgloss.NormalBorder(), false, false, false, true).
 			BorderForeground(lipgloss.Color(white)).BorderBackground(bg)
-		paint(ctx.View, style, text)
+		hintStyle = style
 	}
+	paintFooter(ctx.View, style, hintStyle, metadata)
+}
+
+// paintFooter paints the metadata row above the key-hint row. Lip Gloss wraps
+// a block at its width before it applies a height limit, so each row is cut to
+// the cells inside its style's frame and rendered on its own: a long child
+// title ends in an ellipsis instead of wrapping over the key hints.
+func paintFooter(view uv.Screen, style, hintStyle lipgloss.Style, metadata string) {
+	paint(view, style, "")
+	width := view.Bounds().Dx()
+	row := func(rowStyle lipgloss.Style, text string) *lipgloss.Layer {
+		text = ansi.Truncate(text, width-rowStyle.GetHorizontalFrameSize(), "…")
+		return lipgloss.NewLayer(rowStyle.Width(width).Render(text))
+	}
+	metadataRow := row(style, metadata)
+	hintRow := row(hintStyle, keyHints).Y(1)
+	lipgloss.NewCompositor(metadataRow, hintRow).Draw(view, view.Bounds())
 }
 
 func paint(view uv.Screen, style lipgloss.Style, text string) {

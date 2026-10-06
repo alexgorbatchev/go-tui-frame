@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"image/color"
 	"strings"
 	"testing"
@@ -59,30 +60,109 @@ func TestHeaderBackgroundIsIndependentOfLayout(t *testing.T) {
 }
 
 func TestFooterUsesChildMetadataAndChangesWithTheDemo(t *testing.T) {
-	for demo, bg := range []string{"#0F172A", "#172554", "#115E59"} {
-		t.Run(demoName(demo), func(t *testing.T) {
-			view := newDemoTestScreen(100, footerRows)
-			ctx := frame.DrawContext[UIData]{
-				View: view,
-				Term: frame.Snapshot{
-					Child:    frame.ChildSnapshot{Executable: "/usr/bin/nvim"},
-					Terminal: frame.TerminalSnapshot{Title: "grapheme 文 workspace"},
-					Viewport: frame.Size{Cols: 80, Rows: 24},
-				},
-				Data: UIData{Demo: demo},
-			}
-			drawFooter(ctx)
-			for _, text := range []string{"nvim", "80×24", "文", "Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+Q", "border off"} {
-				if !strings.Contains(view.Render(), text) {
-					t.Errorf("footer omitted %q: %q", text, view.Render())
-				}
-			}
-			cell := view.CellAt(0, 0)
-			if cell == nil || cell.Style.Bg == nil || !sameColor(cell.Style.Bg, lipgloss.Color(bg)) {
-				t.Fatalf("footer did not adopt demo %d background: %#v", demo, cell)
-			}
-		})
+	const hints = "Ctrl+1 layout | Ctrl+2 colour | Ctrl+3 border | Ctrl+Q quit"
+	sizes := []struct {
+		name         string
+		width        int
+		title        string
+		cutsMetadata bool
+		cutsKeyHints bool
+	}{
+		{name: "short title", width: 100, title: "grapheme 文 workspace"},
+		{name: "long path title", width: 100, cutsMetadata: true,
+			title: "nvim /home/user/projects/go-tui-frame/internal/emulator/state.go (~/projects/go-tui-frame)"},
+		{name: "long CJK and emoji title", width: 100, cutsMetadata: true, title: strings.Repeat("文👩‍💻", 30)},
+		{name: "narrow footer", width: 40, cutsMetadata: true, cutsKeyHints: true, title: "grapheme 文 workspace"},
 	}
+	layouts := []struct {
+		name          string
+		data          UIData
+		bg            string
+		borderColumns int
+	}{
+		{name: demoName(0), data: UIData{Demo: 0}, bg: "#0F172A"},
+		{name: demoName(1), data: UIData{Demo: 1}, bg: "#172554"},
+		{name: demoName(2), data: UIData{Demo: 2}, bg: "#115E59", borderColumns: 1},
+		{name: "agent", data: UIData{Agent: true}},
+	}
+	for _, size := range sizes {
+		for _, layout := range layouts {
+			for _, border := range []string{"off", "on"} {
+				t.Run(size.name+"/"+layout.name+"/border "+border, func(t *testing.T) {
+					data := layout.data
+					data.Border = border == "on"
+					view := newDemoTestScreen(size.width, footerRows)
+					drawFooter(frame.DrawContext[UIData]{
+						View: view,
+						Term: frame.Snapshot{
+							Child:    frame.ChildSnapshot{Executable: "/usr/bin/nvim"},
+							Terminal: frame.TerminalSnapshot{Title: size.title},
+							Viewport: frame.Size{Cols: 80, Rows: 24},
+						},
+						Data: data,
+					})
+					width := size.width - layout.borderColumns
+					metadata := fmt.Sprintf("nvim | 80×24 | border %s | %s", border, size.title)
+					assertFooterRow(t, footerRowText(t, view, 0, layout.borderColumns), metadata, width, size.cutsMetadata)
+					assertFooterRow(t, footerRowText(t, view, 1, layout.borderColumns), hints, width, size.cutsKeyHints)
+					if data.Agent {
+						if strings.Contains(view.Render(), "\x1b[") {
+							t.Fatalf("agent footer added styling: %q", view.Render())
+						}
+						return
+					}
+					cell := view.CellAt(0, 0)
+					if cell == nil || cell.Style.Bg == nil || !sameColor(cell.Style.Bg, lipgloss.Color(layout.bg)) {
+						t.Fatalf("footer did not adopt %s background: %#v", layout.name, cell)
+					}
+				})
+			}
+		}
+	}
+}
+
+// footerRowText returns the plain text of footer row y after the layout's
+// left border columns, without trailing padding.
+func footerRowText(t *testing.T, view uv.ScreenBuffer, y, borderColumns int) string {
+	t.Helper()
+	row := strings.TrimRight(view.Line(y).String(), " ")
+	if borderColumns == 0 {
+		return row
+	}
+	text, ok := strings.CutPrefix(row, strings.Repeat("│", borderColumns))
+	if !ok {
+		t.Fatalf("footer row %d lost its left border: %q", y, row)
+	}
+	return text
+}
+
+// assertFooterRow checks that a footer row shows text whole when it fits in
+// width cells, and otherwise shows the graphemes that fit before an ellipsis.
+func assertFooterRow(t *testing.T, row, text string, width int, cut bool) {
+	t.Helper()
+	if !cut {
+		if row != text {
+			t.Errorf("footer row = %q, want %q", row, text)
+		}
+		return
+	}
+	shown, ok := strings.CutSuffix(row, "…")
+	// The widest grapheme takes two cells, so a cut row fills its width or
+	// stops one cell short of it.
+	if !ok || !strings.HasPrefix(text, shown) || !isGraphemeBoundary(text, len(shown)) || ansi.StringWidth(row) < width-1 {
+		t.Errorf("footer row = %q (%d cells), want %q cut to %d cells with an ellipsis", row, ansi.StringWidth(row), text, width)
+	}
+}
+
+func isGraphemeBoundary(text string, offset int) bool {
+	for at := 0; at < offset; {
+		cluster, _ := ansi.FirstGraphemeCluster(text[at:], ansi.GraphemeWidth)
+		at += len(cluster)
+		if at == offset {
+			return true
+		}
+	}
+	return offset == 0
 }
 
 func TestPaintingTinyAndAgentCanvases(t *testing.T) {
