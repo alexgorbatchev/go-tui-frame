@@ -48,7 +48,7 @@ type terminalPreferences struct {
 	// resizing a pooled parser shrinks the buffer that later pool users, such
 	// as Ultraviolet's styled-string drawing, collect OSC 8 hyperlinks into.
 	parser *ansi.Parser
-	// consumed records whether the packet being parsed was a solicited reply,
+	// consumed records whether the packet being parsed held a solicited reply,
 	// so the handlers installed once on parser need no per-packet closures.
 	consumed bool
 }
@@ -150,7 +150,11 @@ func (c *console) consumePreferenceString(packet input.Packet) bool {
 }
 
 func (p *terminalPreferences) handleOsc(cmd int, data []byte) {
-	p.consumed = !truncatedReply(data) && p.consumeColor(cmd, data)
+	// consumeColor settles the query whose report it accepts, so a later OSC
+	// string in the same packet must not clear the result.
+	if !truncatedReply(data) && p.consumeColor(cmd, data) {
+		p.consumed = true
+	}
 }
 
 func (p *terminalPreferences) handleDcs(cmd ansi.Cmd, params ansi.Params, data []byte) {

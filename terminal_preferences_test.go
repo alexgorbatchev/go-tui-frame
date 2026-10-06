@@ -301,6 +301,22 @@ func TestRoutedPasteKeepsPendingReplyText(t *testing.T) {
 	}
 }
 
+// consumeColor settles a query as it accepts the report, so a packet holding
+// several OSC strings stays consumed once one of them was a solicited reply,
+// whatever follows it.
+func TestPreferenceStringStaysConsumedAfterLaterOSC(t *testing.T) {
+	c := &console{inherit: true, pending: make(map[ansi.DECMode]bool)}
+	c.preferenceQueries()
+	packet := input.Packet{Raw: []byte("\x1b]10;rgb:aaaa/bbbb/cccc\x07\x1b]13;#123456\x07")}
+	consumed := c.consumePreferenceString(packet)
+	if c.preferences.colors[10] {
+		t.Fatal("OSC 10 reply did not settle the foreground query")
+	}
+	if !consumed {
+		t.Fatal("packet whose OSC 10 reply settled the foreground query was reported unconsumed")
+	}
+}
+
 // Only packets the input decoder recognizes as reply-shaped reach the reply
 // parser. A query the terminal never answers stays pending for the whole
 // session, so keys, mouse and focus reports and paste must not each pay for a
