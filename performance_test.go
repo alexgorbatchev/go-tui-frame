@@ -396,7 +396,10 @@ func TestExitSubscriptionCapturesPendingOutput(t *testing.T) {
 		s.wait <- waitErr
 		return s.reap()
 	}
-	cleanupReap := (*session[string]).finishWait
+	// cleanupChild emits Exited once finishWait has recorded a leader it reaped.
+	cleanupReap := func(s *session[string], waitErr error) error {
+		return errors.Join(s.finishWait(waitErr), s.emitExited())
+	}
 	waitFailure := errors.New("wait failed")
 	for _, tt := range []struct {
 		name    string

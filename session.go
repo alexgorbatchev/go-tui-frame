@@ -114,9 +114,15 @@ func (f *Frame[T]) Run(ctx context.Context) (result Result, err error) {
 	s.waitDone = make(chan struct{})
 	go func() { defer close(s.waitDone); s.wait <- f.cmd.Wait(); s.wakeLoop() }()
 	defer func() {
-		result.CleanupError = errors.Join(result.CleanupError, s.cleanupChild())
+		cleanupErr, exitedErr := s.cleanupChild()
+		result.CleanupError = errors.Join(result.CleanupError, cleanupErr)
 		result.ProcessState = f.cmd.ProcessState
 		result.DrainError = s.drainErr
+		// An observer that overflowed the queue and ended the session is
+		// usually still behind when cleanup emits Exited; report it once.
+		if exitedErr != nil && !errors.Is(err, exitedErr) {
+			err = errors.Join(err, exitedErr)
+		}
 	}()
 	defer f.close()
 	if err = unix.SetNonblock(s.fd, true); err != nil {
@@ -824,16 +830,16 @@ func (s *session[T]) reap() error {
 		if s.statePending && s.events.wants(Exited) {
 			errs = append(errs, s.refreshState())
 		}
-		return errors.Join(append(errs, s.events.emit(Event{Kind: Exited, Snapshot: &s.snapshot}))...)
+		return errors.Join(append(errs, s.emitExited())...)
 	default:
 		return nil
 	}
 }
 
-// finishWait handles Wait's report of the launch leader after the session
-// loop has returned. Nothing draws any more, so the snapshot is sampled only
-// for Exited, and outer input modes stay as the loop left them for
-// restoration.
+// finishWait records Wait's report of the launch leader after the session loop
+// has returned. Nothing draws any more, so the snapshot is sampled only for the
+// Exited cleanupChild emits, and outer input modes stay as the loop left them
+// for restoration.
 func (s *session[T]) finishWait(err error) error {
 	errs := []error{s.recordReap(err)}
 	if s.reportsExit() {
@@ -841,9 +847,17 @@ func (s *session[T]) finishWait(err error) error {
 		if s.statePending {
 			errs = append(errs, s.captureState())
 		}
-		errs = append(errs, s.events.emit(Event{Kind: Exited, Snapshot: &s.snapshot}))
 	}
 	return errors.Join(errs...)
+}
+
+// emitExited emits Exited for the reaped launch leader once Run has emitted
+// Started. A session that failed before Started emits neither.
+func (s *session[T]) emitExited() error {
+	if !s.started {
+		return nil
+	}
+	return s.events.emit(Event{Kind: Exited, Snapshot: &s.snapshot})
 }
 
 // recordReap records Wait's report of the launch leader: the leader is reaped,
@@ -859,15 +873,18 @@ func (s *session[T]) recordReap(err error) error {
 	return nil
 }
 
-// reportsExit reports whether cleanup's reap of the launch leader emits
-// Exited: Run emitted Started, which a session that fails earlier never
-// does, and Exited is observed. The session loop runs only after Started, so
-// its reap emits Exited whenever it is observed.
+// reportsExit reports whether the launch leader's reap emits an observed
+// Exited.
 func (s *session[T]) reportsExit() bool {
 	return s.started && s.events.wants(Exited)
 }
 
-func (s *session[T]) cleanupChild() error {
+// cleanupChild terminates the owned session and reaps the launch leader unless
+// the loop has. For a leader it reaps, it emits Exited and returns the emit
+// error apart from cleanup's own: a full queue is an observation failure, not
+// a cleanup outcome.
+func (s *session[T]) cleanupChild() (cleanupErr, exitedErr error) {
+	reaps := !s.waited
 	var errs []error
 	// The leader can exit before its foreground or background jobs. Inventory
 	// the owned native session even after Wait; detached sessions are excluded.
@@ -893,7 +910,10 @@ func (s *session[T]) cleanupChild() error {
 		errs = append(errs, s.finishWait(<-s.wait))
 	}
 	<-s.waitDone
-	return errors.Join(errs...)
+	if reaps {
+		exitedErr = s.emitExited()
+	}
+	return errors.Join(errs...), exitedErr
 }
 
 // discardUntilReaped reads and discards child output until Wait reports the

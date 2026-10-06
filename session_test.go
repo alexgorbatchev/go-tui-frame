@@ -739,6 +739,27 @@ func TestSessionErrorCleanupIgnoresDetachedSlaveHolder(t *testing.T) {
 	d.finish(t, awaitTermios(d.h, d.before, drainTimeout/2), ErrObservationOverflow)
 }
 
+// An observer still behind when cleanup reaps the launch leader overflows the
+// queue again with Exited. That overflow is an observation failure like the
+// one that ended the session, not a cleanup outcome: Run reports the overflow
+// once, Result.CleanupError stays nil, and the observer never receives Exited.
+func TestExitedOverflowDuringCleanupIsReportedOnce(t *testing.T) {
+	var observed eventLog
+	// Holding the first child output until cleanup has finished overflows the
+	// queue while the child still writes, so cleanup reaps the leader.
+	d := startDetached(t, nil, []EventKind{ChildOutput, Exited}, func(e Event, hold <-chan struct{}) {
+		observed.record(e)
+		<-hold
+	})
+	got := d.finish(t, awaitTermios(d.h, d.before, drainTimeout/2), ErrObservationOverflow)
+	if n := strings.Count(got.err.Error(), ErrObservationOverflow.Error()); n != 1 {
+		t.Fatalf("Run reported the overflow %d times, want once: %v", n, got.err)
+	}
+	if kinds := eventKinds(observed.events()); slices.Contains(kinds, Exited) {
+		t.Fatalf("observer received %v, want no Exited after the overflow", kinds)
+	}
+}
+
 // Output stopped by flow control cannot be read, so reading the child PTY
 // cannot release a killed leader whose exit waits for that output; the drain
 // deadline must.
