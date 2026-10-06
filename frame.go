@@ -154,7 +154,10 @@ func (f *Frame[T]) InheritTerminal(enabled bool) *Frame[T] {
 // protocol distinguishes. With a legacy child, Ctrl+digit arrives as the
 // digit or control character a legacy terminal sends for it, Ctrl+I as Tab,
 // Ctrl+M as Enter, and Ctrl+[ as Escape. A child that enables Kitty
-// disambiguation or modifyOtherKeys mode 2 makes those keys distinct.
+// disambiguation or modifyOtherKeys mode 2 makes those keys distinct. While
+// the outer terminal reports key releases, the press determines how its
+// repeats and final release are routed: the handler still runs for them, but
+// its return value is ignored.
 func (f *Frame[T]) Capture(handler func(Input) Disposition) *Frame[T] {
 	f.configure(func() { f.capture = handler })
 	return f
