@@ -14,7 +14,7 @@ import (
 func TestPausedOuterInputReportsRevokedTerminal(t *testing.T) {
 	s, outer, _ := newQueueSession(t, gestureModes, io.Discard)
 	fillChild(t, s, inputQueueLimit-10)
-	gestures, _ := lateRoomGestures()
+	gestures, _ := heldGestures()
 	if _, err := outer.Write(gestures); err != nil {
 		t.Fatal(err)
 	}

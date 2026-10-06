@@ -79,7 +79,7 @@ func TestCaptureMirrorsChildKeyboardModes(t *testing.T) {
 // terminal has not reported Kitty support: the child would enable a protocol
 // the terminal never sends. Replies to the child's other queries in the same
 // output still arrive, and a Kitty reply the terminal sends after the startup
-// probe makes later queries answered.
+// probe makes later queries answered. A dropped reply emits no Protocol event.
 func TestKittyKeyboardQueryAnsweredOnlyWithOuterSupport(t *testing.T) {
 	const da1, decrpm, kittyReply = "\x1b[?62;22c", "\x1b[?7;1$y", "\x1b[?0u"
 	for _, tt := range []struct {
@@ -96,13 +96,18 @@ func TestKittyKeyboardQueryAnsweredOnlyWithOuterSupport(t *testing.T) {
 			var (
 				mu      sync.Mutex
 				replies []byte
+				// kittyEffects counts Protocol events for a Kitty reply.
+				kittyEffects int
 			)
 			child := exec.Command("sh", "-c", "printf '\\033[?u\\033[c\\033[?7$p'; read line; printf '\\033[?u\\033[c'; exec sleep 30")
-			app := New(child, struct{}{}).Terminal(h.slave, h.slave).ObserveEvents([]EventKind{ChildInput}, func(e Event) {
-				if e.Origin == "terminal-reply" {
-					mu.Lock()
+			app := New(child, struct{}{}).Terminal(h.slave, h.slave).ObserveEvents([]EventKind{ChildInput, Protocol}, func(e Event) {
+				mu.Lock()
+				defer mu.Unlock()
+				switch {
+				case e.Kind == ChildInput && e.Origin == "terminal-reply":
 					replies = append(replies, e.Bytes...)
-					mu.Unlock()
+				case e.Kind == Protocol && e.Effect.Kind == emulator.Reply && string(e.Effect.Bytes) == kittyReply:
+					kittyEffects++
 				}
 			})
 			done := startRun(ctx, app)
@@ -128,6 +133,13 @@ func TestKittyKeyboardQueryAnsweredOnlyWithOuterSupport(t *testing.T) {
 			if answered := strings.Contains(first, kittyReply); answered != tt.kitty {
 				t.Errorf("first replies %q answer the Kitty query = %v, want %v", first, answered, tt.kitty)
 			}
+			// Observers receive each Protocol event before the write it schedules.
+			mu.Lock()
+			firstEffects := kittyEffects
+			mu.Unlock()
+			if want := map[bool]int{false: 0, true: 1}[tt.kitty]; firstEffects != want {
+				t.Errorf("first queries emitted %d Protocol events for a Kitty reply, want %d", firstEffects, want)
+			}
 			next := []byte("x\n")
 			if !tt.kitty {
 				// The terminal answers the frame's startup query after the probe.
@@ -139,6 +151,12 @@ func TestKittyKeyboardQueryAnsweredOnlyWithOuterSupport(t *testing.T) {
 			all := awaitReplies("its second replies", func(got string) bool { return strings.Count(got, da1) == 2 })
 			if second := all[len(first):]; !strings.Contains(second, kittyReply) {
 				t.Errorf("second replies %q do not answer the Kitty query", second)
+			}
+			mu.Lock()
+			secondEffects := kittyEffects - firstEffects
+			mu.Unlock()
+			if secondEffects != 1 {
+				t.Errorf("second query emitted %d Protocol events for a Kitty reply, want 1", secondEffects)
 			}
 			cancel()
 			select {

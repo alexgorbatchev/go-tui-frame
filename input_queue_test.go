@@ -36,7 +36,7 @@ func TestOuterInputWaitsForBusyChild(t *testing.T) {
 		input, want      []byte
 	}{
 		{name: "bracketed paste", childModes: "\x1b[?2004h", input: paste, want: paste},
-		// Each 36-byte gesture turns into 154 child-input bytes.
+		// Each 36-byte gesture turns into 144 child-input bytes.
 		{name: "mouse gestures", childModes: gestureModes, input: bytes.Repeat([]byte(x10Gesture), gestures), want: bytes.Repeat([]byte(sgrGesture), gestures)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -121,15 +121,15 @@ func TestPausedOuterInputReportsHangup(t *testing.T) {
 // bare Escape while the bytes completing its sequence wait unread.
 func TestPausedOuterInputKeepsEscapeSequences(t *testing.T) {
 	// A timed-out Escape would reach capture as Escape, "[" and "A" instead of
-	// the Up arrow "\x1b[A" whose first byte it is. Mouse gestures widen the
-	// held input ahead of it.
+	// the Up arrow "\x1b[A" whose first byte it is. Mouse gestures, which
+	// need more room than the full queue has, hold it behind them.
 	s, outer, child := newQueueSession(t, gestureModes, io.Discard)
 	var keys []string
 	s.router.filter.handler = func(in Input) Disposition {
 		keys = append(keys, in.Key.Key().Keystroke())
 		return Pass
 	}
-	gestures, routed := lateRoomGestures()
+	gestures, routed := heldGestures()
 	want := append(fillChild(t, s, inputQueueLimit-10), routed...)
 	want = append(want, "ab\x1b[A"...)
 	// One small write reaches the session in one read, on Linux as one
@@ -182,10 +182,11 @@ func TestReleasedReplyReachesTerminalWithoutRepaint(t *testing.T) {
 	var out bytes.Buffer
 	// The child reports focus. The terminal's DECRPM reply makes its mode 1004
 	// switchable, so routing the reply mirrors the child's mode there. Mouse
-	// gestures widen the held input ahead of the reply.
+	// gestures, which need more room than the full queue has, hold the reply
+	// behind them.
 	s, outer, child := newQueueSession(t, "\x1b[?1004h"+gestureModes, &out)
 	s.console.pending = map[ansi.DECMode]bool{1004: true}
-	gestures, routed := lateRoomGestures()
+	gestures, routed := heldGestures()
 	want := append(fillChild(t, s, inputQueueLimit-10), routed...)
 	if _, err := outer.Write(append(gestures, "\x1b[?1004;2$y"...)); err != nil {
 		t.Fatal(err)
@@ -529,7 +530,7 @@ const gestureModes = "\x1b[?1000;1006h"
 // x10Gesture is a 36-byte mouse gesture from an outer terminal without SGR
 // reports: presses of the left, middle, right, back and forward buttons with
 // Shift, Alt and Ctrl at column 200, row 100, then the X10 release that names
-// no button. sgrGesture is the 154 bytes it routes to for a gestureModes
+// no button. sgrGesture is the 144 bytes it routes to for a gestureModes
 // child: each press, then a release of each pressed button in button order.
 const (
 	x10Gesture = "\x1b[M\x3c\xe8\x84\x1b[M\x3d\xe8\x84\x1b[M\x3e\xe8\x84\x1b[M\xbc\xe8\x84\x1b[M\xbd\xe8\x84\x1b[M\x3f\xe8\x84"
@@ -537,38 +538,56 @@ const (
 		"\x1b[<28;200;100m\x1b[<29;200;100m\x1b[<30;200;100m\x1b[<156;200;100m\x1b[<157;200;100m"
 )
 
-// lateRoomGestures returns outer mouse gestures whose routing needs more queue
-// room than a child PTY can free after fillChild returns, and the bytes they
-// route to. Linux only queues a PTY write; the kernel later moves it into the
-// slave's 4096-byte line-discipline buffer (N_TTY_BUF_SIZE in
-// drivers/tty/n_tty.c), so up to that much room appears late: 27 gestures
-// route to 4158 bytes. Their 972 bytes fit, with a short tail, in the 1022
-// bytes Darwin's PTY accepts in one write before a reader drains it, so the
-// tail reaches the session in the same read. The child must request
-// gestureModes.
-func lateRoomGestures() (gestures, routed []byte) {
-	const n = 27
+// heldGestures returns outer mouse gestures and the bytes they route to. Each
+// mouse report needs maxRoutedExpansion times its length of queue room, more
+// than the 10 bytes fillChild(t, s, inputQueueLimit-10) leaves, so a session
+// holds every gesture and the input behind them while the child reads
+// nothing. Their 144 input bytes, with a short tail, fit in the 1022 bytes
+// Darwin's PTY accepts in one write before a reader drains it, so the tail
+// reaches the session in the same read. The child must request gestureModes.
+func heldGestures() (gestures, routed []byte) {
+	const n = 4
 	return bytes.Repeat([]byte(x10Gesture), n), bytes.Repeat([]byte(sgrGesture), n)
 }
 
+// childSettleTime is how long fillChild waits for a full child PTY to free
+// room before treating it as full.
+const childSettleTime = 250 * time.Millisecond
+
 // fillChild queues n filler bytes and writes them until the child's PTY takes
 // no more, then tops the queue up to n bytes again. It returns every filler
-// byte the child will read. The PTY may still free room afterwards; see
-// lateRoomKeys.
+// byte the child will read. Linux only queues a PTY write; the kernel later
+// moves it into the slave's line-discipline buffer, which frees room after a
+// write has failed with EAGAIN. fillChild therefore waits for the PTY to
+// become writable again and keeps writing until it stays full for
+// childSettleTime or reports room twice without taking a byte.
 func fillChild(t *testing.T, s *session[struct{}], n int) []byte {
 	t.Helper()
 	fill := bytes.Repeat([]byte("x"), n)
 	if err := s.enqueue(fill, "user-input"); err != nil {
 		t.Fatal(err)
 	}
-	for {
+	for stalled := 0; stalled < 2; {
 		queued := s.queuedBytes
 		if err := s.writeInput(); err != nil {
 			t.Fatal(err)
 		}
-		if s.queuedBytes == queued {
+		if s.queuedBytes < queued {
+			stalled = 0
+			continue
+		}
+		fds := []unix.PollFd{{Fd: int32(s.fd), Events: unix.POLLOUT}}
+		ready, err := unix.Poll(fds, int(childSettleTime.Milliseconds()))
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ready == 0 {
 			break
 		}
+		stalled++
 	}
 	top := bytes.Repeat([]byte("x"), n-s.queuedBytes)
 	if err := s.enqueue(top, "user-input"); err != nil {
