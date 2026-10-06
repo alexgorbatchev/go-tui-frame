@@ -153,10 +153,15 @@ const (
 )
 
 // keyPrefix reads the demo's keys with a tmux-style prefix. Ctrl+B starts the
-// prefix; then 1, 2 or 3 selects an action, a second Ctrl+B passes to the
-// child, and any other key ends the prefix and is discarded. Ctrl+Q quits
-// without the prefix. Only the session's capture handler uses it.
+// prefix; then 1, 2 or 3 selects an action and a second Ctrl+B passes to the
+// child. Ctrl+Q quits with or without the prefix: as in tmux, a key with no
+// binding after the prefix falls through to the bindings without it. Any
+// other key ends the prefix and is discarded. Only the session's capture
+// handler uses it.
 type keyPrefix struct{ active bool }
+
+// prefixKey starts the demo's prefix and quitKey quits the demo.
+const prefixKey, quitKey = "ctrl+b", "ctrl+q"
 
 // route returns the action input selects and what the frame does with it.
 // Releases, repeats and lone modifier or lock keys, which Kitty terminals
@@ -167,28 +172,30 @@ func (p *keyPrefix) route(input frame.Input) (demoAction, frame.Disposition) {
 	if !ok || isModifierKey(key.Code) {
 		return demoNone, frame.Pass
 	}
-	if !p.active {
+	if p.active {
+		p.active = false
 		switch {
-		case key.MatchString("ctrl+b"):
-			p.active = true
-			return demoNone, frame.Consume
-		case key.MatchString("ctrl+q"):
+		case key.MatchString("1"):
+			return demoNext, frame.Consume
+		case key.MatchString("2"):
+			return demoBackground, frame.Consume
+		case key.MatchString("3"):
+			return demoBorder, frame.Consume
+		case key.MatchString(prefixKey):
+			return demoNone, frame.Pass
+		case key.MatchString(quitKey):
 			return demoQuit, frame.Consume
 		}
-		return demoNone, frame.Pass
+		return demoNone, frame.Consume
 	}
-	p.active = false
 	switch {
-	case key.MatchString("1"):
-		return demoNext, frame.Consume
-	case key.MatchString("2"):
-		return demoBackground, frame.Consume
-	case key.MatchString("3"):
-		return demoBorder, frame.Consume
-	case key.MatchString("ctrl+b"):
-		return demoNone, frame.Pass
+	case key.MatchString(prefixKey):
+		p.active = true
+		return demoNone, frame.Consume
+	case key.MatchString(quitKey):
+		return demoQuit, frame.Consume
 	}
-	return demoNone, frame.Consume
+	return demoNone, frame.Pass
 }
 
 // pressedKey returns the key of a press that is not a reported repeat.

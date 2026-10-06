@@ -494,8 +494,8 @@ func reportKeys(t *testing.T, flags ghostty.KittyKeyFlags, strokes ...keyStroke)
 // as a legacy terminal reports them and with Kitty disambiguation and release
 // events, which the outer terminal runs because the child requests them. A
 // release or repeat between Ctrl+B and the digit leaves the prefix in place, a
-// second Ctrl+B reaches the child as the terminal sent it, and another key
-// after the prefix is discarded.
+// second Ctrl+B reaches the child as the terminal sent it, another key after
+// the prefix is discarded, and Ctrl+Q after the prefix quits.
 func TestDemoPrefixKeysThroughRealSession(t *testing.T) {
 	const press, repeat, release = ghostty.KeyActionPress, ghostty.KeyActionRepeat, ghostty.KeyActionRelease
 	ctrlB := func(action ghostty.KeyAction) keyStroke {
@@ -579,7 +579,8 @@ func TestDemoPrefixKeysThroughRealSession(t *testing.T) {
 			typed := reportKeys(t, form.flags, one(press), one(release))
 			send(ctrlB(press), ctrlB(release), x(press), x(release), one(press), one(release))
 			awaitChild(forwarded + typed)
-			send(ctrlQ(press), ctrlQ(release))
+			// Ctrl+Q has no prefix binding and falls through to quit.
+			send(ctrlB(press), ctrlB(release), ctrlQ(press), ctrlQ(release))
 			var got demoOutcome
 			select {
 			case got = <-done:

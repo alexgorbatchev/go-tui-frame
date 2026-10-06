@@ -191,11 +191,12 @@ func TestPaintingTinyAndAgentCanvases(t *testing.T) {
 	}
 }
 
-// The demo binds a tmux-style prefix: Ctrl+B, then 1, 2 or 3 runs an action,
-// a second Ctrl+B passes to the child, and any other key ends the prefix and
-// is discarded. Ctrl+Q quits without the prefix. Releases, repeats and lone
-// modifier or lock keys, which Kitty terminals report, leave the prefix as it
-// is; the frame gives a reported release its press's disposition.
+// The demo binds a tmux-style prefix: Ctrl+B, then 1, 2 or 3 runs an action
+// and a second Ctrl+B passes to the child. Ctrl+Q quits with or without the
+// prefix, and any other key ends the prefix and is discarded. Releases,
+// repeats and lone modifier or lock keys, which Kitty terminals report, leave
+// the prefix as it is; the frame gives a reported release its press's
+// disposition.
 func TestDemoPrefixKeys(t *testing.T) {
 	type step struct {
 		key         uv.KeyEvent
@@ -217,8 +218,10 @@ func TestDemoPrefixKeys(t *testing.T) {
 		{"quit", []step{{uv.KeyPressEvent{Code: 'q', Mod: uv.ModCtrl}, demoQuit, frame.Consume}}},
 		{"second Ctrl+B passes and ends the prefix", append(prefixed(ctrlB, demoNone, frame.Pass), step{digit('1'), demoNone, frame.Pass})},
 		{"other key ends the prefix and is discarded", append(prefixed(digit('x'), demoNone, frame.Consume), step{digit('1'), demoNone, frame.Pass})},
-		{"Ctrl+Q after the prefix is discarded", append(prefixed(uv.KeyPressEvent{Code: 'q', Mod: uv.ModCtrl}, demoNone, frame.Consume),
-			step{uv.KeyPressEvent{Code: 'q', Mod: uv.ModCtrl}, demoQuit, frame.Consume})},
+		// As in tmux, a key without a prefix binding falls through to the
+		// bindings without the prefix.
+		{"Ctrl+Q after the prefix quits", append(prefixed(uv.KeyPressEvent{Code: 'q', Mod: uv.ModCtrl}, demoQuit, frame.Consume),
+			step{digit('1'), demoNone, frame.Pass})},
 		{"modified digit after the prefix is discarded", prefixed(uv.KeyPressEvent{Code: '1', Mod: uv.ModCtrl}, demoNone, frame.Consume)},
 		{"release between the keys", []step{
 			{ctrlB, demoNone, frame.Consume}, {uv.KeyReleaseEvent{Code: 'b', Mod: uv.ModCtrl}, demoNone, frame.Pass}, {digit('1'), demoNext, frame.Consume},

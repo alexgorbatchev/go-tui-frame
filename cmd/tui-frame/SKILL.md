@@ -9,7 +9,7 @@ description: >-
 author: alexgorbatchev
 metadata:
   created_on: 2026-10-01 13:23
-  last_modified: 2026-10-06 14:27
+  last_modified: 2026-10-06 14:48
   status: current
 ---
 
@@ -55,17 +55,18 @@ footer.
 | Ctrl+Q | Cancel the session and terminate observed process groups in the owned child session |
 
 The wrapper consumes Ctrl+B, the digit that follows it, and Ctrl+Q, including
-their reported key-release events. After Ctrl+B, any other key ends the prefix
-and is discarded, including Ctrl+Q; a second Ctrl+B reaches the child exactly as
-the terminal sent it. Reported key releases and repeats and lone modifier or lock
-keys leave the prefix waiting. Lock state does not count as a modifier, so the
-controls work while Caps Lock or Num Lock is on. Other keyboard events, such as
-plain digits and F5/F6 outside the prefix, follow the library's child input
-route. Paste, mouse input, and unknown controls follow ordinary routing.
-Child mouse coordinates follow the child viewport geometry. The child can
-change terminal modes and responds to terminal resizing through its PTY. The
-terminal runs the child's keyboard modes, and keys reach the child exactly as
-the terminal sends them. The controls use keys every terminal reports
+their reported key-release events. After Ctrl+B, a second Ctrl+B reaches the
+child exactly as the terminal sent it, and Ctrl+Q still quits: as in tmux, a key
+with no binding after the prefix falls through to the bindings without it. Any
+other key ends the prefix and is discarded. Reported key releases and repeats
+and lone modifier or lock keys leave the prefix waiting. Lock state does not
+count as a modifier, so the controls work while Caps Lock or Num Lock is on.
+Other keyboard events, such as plain digits and F5/F6 outside the prefix, follow
+the library's child input route. Paste, mouse input, and unknown controls follow
+ordinary routing. Child mouse coordinates follow the child viewport geometry.
+The child can change terminal modes and responds to terminal resizing through
+its PTY. The terminal runs the child's keyboard modes, and keys reach the child
+exactly as the terminal sends them. The controls use keys every terminal reports
 distinctly, so they work with legacy input. While the terminal has not reported
 Kitty keyboard support, the child's Kitty keyboard query gets no reply. The
 viewport paints terminal cells; it does not render inline graphics. Native Kitty

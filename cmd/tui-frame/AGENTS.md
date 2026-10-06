@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 13:56
-last_modified: 2026-10-06 14:27
+last_modified: 2026-10-06 14:48
 status: current
 ---
 
@@ -49,9 +49,11 @@ Demo painting can also be checked independently with
   tmux-style Ctrl+B prefix: Ctrl+B, then 1 changes layout and Ctrl+B, then 2
   changes the native header background independently through immutable region
   payloads. Ctrl+B, then 3 uses `SetBorder` to change the child inset and PTY size
-  during the session. Ctrl+B, then Ctrl+B passes one Ctrl+B to the child; any
-  other key after the prefix ends it and is discarded. Ctrl+Q stays a direct
-  binding that cancels the session. Reported releases and repeats and lone
+  during the session. Ctrl+B, then Ctrl+B passes one Ctrl+B to the child. Ctrl+Q
+  stays a direct binding that cancels the session; as in tmux, a key with no
+  binding after the prefix falls through to the bindings without it, so Ctrl+B,
+  then Ctrl+Q also quits. Any other key after the prefix ends it and is
+  discarded. Reported releases and repeats and lone
   modifier or lock keys never advance or end the prefix. Pass other keys outside
   the prefix, such as plain digits and F5/F6, to the child.
 - Use only keys legacy input distinguishes, since the outer terminal runs the
