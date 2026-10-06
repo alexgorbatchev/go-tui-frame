@@ -198,6 +198,34 @@ func waitPaint(t *testing.T, paints <-chan regionPaint, match func(regionPaint) 
 	}
 }
 
+// demoOutcome is what a demo session's Run returned.
+type demoOutcome struct {
+	result frame.Result
+	err    error
+}
+
+// startDemo starts run in the background and delivers its outcome. When the
+// test ends, cancel stops the session and the test waits for Run to return.
+func startDemo(t *testing.T, cancel context.CancelFunc, run func() (frame.Result, error)) <-chan demoOutcome {
+	t.Helper()
+	done := make(chan demoOutcome, 1)
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		result, err := run()
+		done <- demoOutcome{result, err}
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-exited:
+		case <-time.After(sessionTimeout):
+			t.Error("demo session did not stop")
+		}
+	})
+	return done
+}
+
 func TestDemoControlsRepaintAndResizeRealChild(t *testing.T) {
 	type outerObservation struct {
 		flags  ghostty.KittyKeyFlags
@@ -234,24 +262,7 @@ func TestDemoControlsRepaintAndResizeRealChild(t *testing.T) {
 		drawFooter(ctx)
 		paints <- regionPaint{region: "footer", data: ctx.Data, term: ctx.Term}
 	})
-	done := make(chan error, 1)
-	exited := make(chan struct{})
-	go func() {
-		defer close(exited)
-		result, err := app.Run(ctx)
-		if err == nil && (result.ProcessState == nil || result.ProcessState.ExitCode() != 0) {
-			err = errors.New("child did not exit successfully")
-		}
-		done <- err
-	}()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-exited:
-		case <-time.After(sessionTimeout):
-			t.Error("demo session did not stop")
-		}
-	})
+	done := startDemo(t, cancel, func() (frame.Result, error) { return app.Run(ctx) })
 	ready := waitPaint(t, paints, func(p regionPaint) bool {
 		return p.term.Terminal.Title == "demo-child" && p.term.Child.PID > 0
 	})
@@ -355,8 +366,8 @@ func TestDemoControlsRepaintAndResizeRealChild(t *testing.T) {
 	if _, err := io.WriteString(master, "123\x1b[15~\x1b[17~ hello child\n"); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-done; err != nil {
-		t.Fatal(err)
+	if outcome := <-done; outcome.err != nil || outcome.result.ProcessState == nil || outcome.result.ProcessState.ExitCode() != 0 {
+		t.Fatalf("child did not exit successfully: %+v, %v", outcome.result, outcome.err)
 	}
 	got, err := os.ReadFile(inputFile)
 	if err != nil || string(got) != "123\x1b[15~\x1b[17~ hello child" {
@@ -369,66 +380,15 @@ func TestDemoControlsRepaintAndResizeRealChild(t *testing.T) {
 }
 
 func TestDemoQuitPreservesCauseAndReapsChild(t *testing.T) {
-	master, slave := demoTTY(t)
-	ctx, cancel := context.WithTimeout(context.Background(), sessionTimeout)
-	defer cancel()
-	ctx, quit := context.WithCancelCause(ctx)
-	defer quit(nil)
-	child := exec.Command("sh", "-c", "sleep 30")
-	app := newDemoSession(child, UIData{}, quit).frame.Terminal(slave, slave)
-	ready := make(chan struct{}, 1)
-	app.Header(headerRows, func(ctx frame.DrawContext[UIData]) {
-		drawHeader(ctx)
-		if ctx.Term.Child.PID > 0 {
-			select {
-			case ready <- struct{}{}:
-			default:
-			}
-		}
-	})
-	type outcome struct {
-		result frame.Result
-		err    error
-	}
-	done := make(chan outcome, 1)
-	exited := make(chan struct{})
-	go func() {
-		defer close(exited)
-		result, err := app.Run(ctx)
-		done <- outcome{result, err}
-	}()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-exited:
-		case <-time.After(sessionTimeout):
-			t.Error("quit session did not stop")
-		}
-	})
-	select {
-	case <-ready:
-	case <-ctx.Done():
-		t.Fatal("child never painted its PID")
-	}
-	if _, err := master.Write([]byte{0x11}); err != nil {
-		t.Fatal(err)
-	}
-	got := <-done
-	if !errors.Is(got.err, errDemoQuit) || got.result.ProcessState == nil || !got.result.ProcessState.Exited() && got.result.ProcessState.ExitCode() != -1 {
-		t.Fatalf("quit lost cause or unreaped process: %+v, %v", got.result, got.err)
-	}
-	if got.result.DrainError != nil || got.result.CleanupError != nil {
-		t.Fatalf("quit failed cleanup: %+v", got.result)
-	}
-}
-
-func TestDemoQuitIgnoresLockStatesInKittyReports(t *testing.T) {
 	for _, tt := range []struct {
-		name   string
-		report string
+		name  string
+		input string
+		kitty bool
 	}{
-		{"caps lock", "\x1b[113;69u"},
-		{"num lock", "\x1b[113;133u"},
+		{"legacy", "\x11", false},
+		// A Kitty terminal sets an enabled lock's bit on the Ctrl+Q it reports.
+		{"kitty caps lock", "\x1b[113;69u", true},
+		{"kitty num lock", "\x1b[113;133u", true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			negotiated := make(chan struct{}, 1)
@@ -455,50 +415,40 @@ func TestDemoQuitIgnoresLockStatesInKittyReports(t *testing.T) {
 			ready := make(chan struct{}, 1)
 			app.Header(headerRows, func(ctx frame.DrawContext[UIData]) {
 				drawHeader(ctx)
-				if ctx.Term.Terminal.Title == "raw-child" {
+				if ctx.Term.Child.PID > 0 && ctx.Term.Terminal.Title == "raw-child" {
 					select {
 					case ready <- struct{}{}:
 					default:
 					}
 				}
 			})
-			type outcome struct {
-				result frame.Result
-				err    error
-			}
-			done := make(chan outcome, 1)
-			exited := make(chan struct{})
-			go func() {
-				defer close(exited)
-				result, err := app.Run(ctx)
-				done <- outcome{result, err}
-			}()
-			t.Cleanup(func() {
-				cancel()
-				select {
-				case <-exited:
-				case <-time.After(sessionTimeout):
-					t.Error("quit session did not stop")
-				}
-			})
+			done := startDemo(t, cancel, func() (frame.Result, error) { return app.Run(ctx) })
 			select {
 			case <-ready:
 			case <-ctx.Done():
-				t.Fatal("child never entered raw mode")
+				t.Fatal("child never painted its PID in raw mode")
 			}
-			select {
-			case <-negotiated:
-			case <-ctx.Done():
-				t.Fatal("outer terminal was not asked to disambiguate Ctrl+Q")
+			if tt.kitty {
+				select {
+				case <-negotiated:
+				case <-ctx.Done():
+					t.Fatal("outer terminal was not asked to disambiguate Ctrl+Q")
+				}
 			}
-			if _, err := io.WriteString(master, tt.report); err != nil {
+			if _, err := io.WriteString(master, tt.input); err != nil {
 				t.Fatal(err)
 			}
 			got := <-done
 			read, readErr := os.ReadFile(inputFile)
-			if !errors.Is(got.err, errDemoQuit) || got.result.ProcessState == nil || readErr != nil || len(read) != 0 {
-				t.Fatalf("report %q: err=%v process=%v; child read %q (%v), want a quit before the child reads anything",
-					tt.report, got.err, got.result.ProcessState, read, readErr)
+			if !errors.Is(got.err, errDemoQuit) || readErr != nil || len(read) != 0 {
+				t.Fatalf("input %q: err=%v, child read %q (%v); want a quit before the child reads anything",
+					tt.input, got.err, read, readErr)
+			}
+			if state := got.result.ProcessState; state == nil || !state.Exited() && state.ExitCode() != -1 {
+				t.Fatalf("quit left the child unreaped: %+v", got.result)
+			}
+			if got.result.DrainError != nil || got.result.CleanupError != nil {
+				t.Fatalf("quit failed cleanup: %+v", got.result)
 			}
 		})
 	}
@@ -580,16 +530,7 @@ func TestAgentDemoStartsPlainAndCanEnableChildBorder(t *testing.T) {
 		drawHeader(ctx)
 		paints <- regionPaint{data: ctx.Data, term: ctx.Term, bg: ctx.View.CellAt(0, 0).Style.Bg}
 	})
-	done := make(chan error, 1)
-	go func() { _, err := app.Run(ctx); done <- err }()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-done:
-		case <-time.After(sessionTimeout):
-			t.Error("agent demo did not stop")
-		}
-	})
+	startDemo(t, cancel, func() (frame.Result, error) { return app.Run(ctx) })
 	initial := waitPaint(t, paints, func(p regionPaint) bool { return p.term.Child.PID > 0 })
 	if initial.data.Border || initial.term.Viewport != (frame.Size{Cols: 100, Rows: 15}) || initial.bg != nil {
 		t.Fatalf("agent defaults are not plain and borderless: %+v", initial)
