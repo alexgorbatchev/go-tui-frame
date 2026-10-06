@@ -64,13 +64,16 @@ _native target prefix cache:
             fi
             rm -f "$download"
         }
-        # Without job control a job ignores SIGINT and SIGQUIT, so Ctrl+C
-        # and Ctrl+\ reach only this shell. It stops curl, removes the file,
-        # and re-raises the signal.
+        # Ctrl+C and Ctrl+\ reach curl too, but a job started without job
+        # control ignores SIGINT and SIGQUIT, so this trap stops curl,
+        # removes the file, and re-raises the signal. bash 5.2 ignores
+        # SIGQUIT again once the trap is reset, so the shell then exits
+        # with 128 plus the signal number.
         stop_download() {
             remove_download
             trap - EXIT "$1"
             kill -s "$1" "$$"
+            exit $((128 + $(kill -l "$1")))
         }
         # Only a verified download is renamed to $archive. A cached archive
         # that fails the check, such as a partial file from an older recipe,
