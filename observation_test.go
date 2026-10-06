@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -173,6 +174,57 @@ func TestRunDeliversStartedSnapshotLargerThanObservationBudget(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("Run did not finish", ctx.Err())
+	}
+}
+
+// A Started that overflows the queue fails Run before the session has started
+// the child's lifecycle, so the reap in cleanup emits no Exited, even for an
+// observer that catches up before that reap.
+func TestOverflowingStartedIsFollowedByNoExited(t *testing.T) {
+	// One Started snapshot of this terminal outweighs the whole budget, so it
+	// overflows while any other record's callback runs.
+	h := newSizedHarness(t, 512, 256)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	blocked, resume := make(chan struct{}), make(chan struct{})
+	release := sync.OnceFunc(func() { close(resume) })
+	t.Cleanup(release)
+	var first sync.Once
+	var observed eventLog
+	app := New(childCommand(t), struct{}{}).Terminal(h.slave, h.slave)
+	app.ObserveEvents([]EventKind{OuterInput, Started, Exited}, func(e Event) {
+		observed.record(e)
+		// The first record is a startup probe reply; holding its callback
+		// keeps the budget occupied when Started arrives.
+		first.Do(func() { close(blocked); <-resume })
+	})
+	done := startRun(ctx, app)
+	select {
+	case <-blocked:
+	case <-ctx.Done():
+		t.Fatal("startup probe input was not observed", ctx.Err())
+	}
+	// The controller closes as Run's body returns, before cleanup reaps the
+	// child. Releasing the observer then leaves the dispatcher idle, so any
+	// Exited the reap emitted would be admitted and delivered.
+	for !errors.Is(app.SetBorder(false), ErrSessionClosed) {
+		if ctx.Err() != nil {
+			t.Fatal("Run did not end after Started overflowed", ctx.Err())
+		}
+		time.Sleep(100 * time.Microsecond)
+	}
+	release()
+	var got runOutcome
+	select {
+	case got = <-done:
+	case <-ctx.Done():
+		t.Fatal("Run did not finish", ctx.Err())
+	}
+	if !errors.Is(got.err, ErrObservationOverflow) || got.result.ProcessState == nil || got.result.CleanupError != nil {
+		t.Fatalf("Run = %#v, %v; want %v, the reaped child's state and no cleanup error", got.result, got.err, ErrObservationOverflow)
+	}
+	if kinds := eventKinds(observed.events()); slices.Contains(kinds, Started) || slices.Contains(kinds, Exited) {
+		t.Fatalf("observer received %v, want neither Started nor Exited", kinds)
 	}
 }
 

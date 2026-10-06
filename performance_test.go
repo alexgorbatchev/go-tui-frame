@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alexgorbatchev/go-tui-frame/internal/input"
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	ghostty "go.mitchellh.com/libghostty"
@@ -389,7 +390,8 @@ func TestObservationSelectionPreservesPerReadSnapshotsAndDamage(t *testing.T) {
 // The session loop reaps the launch leader while it runs, and cleanup once it
 // has returned. After Started, either reap emits one Exited carrying the
 // display the child's last output left, also when Wait fails without reporting
-// an exit status. Cleanup for a session that failed before Started emits none.
+// an exit status or the loop cannot route held input. Cleanup for a session
+// that failed before Started emits none.
 func TestExitSubscriptionCapturesPendingOutput(t *testing.T) {
 	loopReap := func(s *session[string], waitErr error) error {
 		s.wait = make(chan error, 1)
@@ -406,22 +408,40 @@ func TestExitSubscriptionCapturesPendingOutput(t *testing.T) {
 		reap    func(s *session[string], waitErr error) error
 		started bool
 		waitErr error
+		// unroutable holds input for the reap to route behind a border that
+		// cannot fit, so routing it fails with ErrViewportTooSmall.
+		unroutable bool
+		want       error
 	}{
-		{"session loop", loopReap, true, nil},
-		{"session loop after Wait failure", loopReap, true, waitFailure},
-		{"cleanup", cleanupReap, true, nil},
-		{"cleanup after Wait failure", cleanupReap, true, waitFailure},
-		{"cleanup before Started", cleanupReap, false, nil},
+		{name: "session loop", reap: loopReap, started: true},
+		{name: "session loop after Wait failure", reap: loopReap, started: true, waitErr: waitFailure, want: waitFailure},
+		{name: "session loop routing held input fails", reap: loopReap, started: true, unroutable: true, want: ErrViewportTooSmall},
+		{name: "cleanup", reap: cleanupReap, started: true},
+		{name: "cleanup after Wait failure", reap: cleanupReap, started: true, waitErr: waitFailure, want: waitFailure},
+		{name: "cleanup before Started", reap: cleanupReap},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			s, _, slave := newRepaintSession(t, ansi.ModeReset, nil)
+			size := Size{Cols: 20, Rows: 6}
+			var header func(DrawContext[string])
+			if tt.unroutable {
+				// A one-row header leaves the child two of three rows, too few for
+				// a border.
+				size, header = Size{Cols: 20, Rows: 3}, func(DrawContext[string]) {}
+			}
+			s, _, slave := newRepaintSessionSize(t, size, ansi.ModeReset, header)
 			s.started = tt.started
 			var got []Event
 			s.events = newEventDispatcher(eventBit(Exited), sessionCancel(t), func(ev Event) { got = append(got, ev) })
 			t.Cleanup(s.events.close)
 			readRepaintChunk(t, s, slave, "final")
-			if err := tt.reap(s, tt.waitErr); !errors.Is(err, tt.waitErr) || !s.waited {
-				t.Fatalf("reap = %v, waited %v; want %v and the leader reaped", err, s.waited, tt.waitErr)
+			if tt.unroutable {
+				if err := s.frame.SetBorder(true); err != nil {
+					t.Fatal(err)
+				}
+				s.held = []input.Packet{{Raw: []byte("a")}}
+			}
+			if err := tt.reap(s, tt.waitErr); !errors.Is(err, tt.want) || !s.waited {
+				t.Fatalf("reap = %v, waited %v; want %v and the leader reaped", err, s.waited, tt.want)
 			}
 			s.events.close()
 			want := []EventKind{Exited}
