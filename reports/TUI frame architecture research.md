@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 10:47
-last_modified: 2026-10-06 06:28
+last_modified: 2026-10-06 06:47
 status: current
 ---
 
@@ -121,7 +121,7 @@ The selected stack has concrete gaps: graphics are not rasterized or advertised 
 
 The selected broad-compatibility path is **creack/pty + libghostty + Ultraviolet composition/rendering, with optional Lip Gloss styling for consumer regions**. The researched pure Go path would substitute **x/vt** and require substantive protocol work to meet the same requested scope. Native Lip Gloss canvases favor Ultraviolet composition; a tcell renderer is a higher-adoption alternative requiring deliberate cell mapping and input ownership. Dependency selection does not reduce the requested compatibility scope. Neither stack is established as arbitrary-TUI transparent here. Raw input ownership must remain deliberate regardless of the renderer, and tview cannot silently be upgraded from its tcell v2 dependency to v3. ([Ultraviolet ownership](https://github.com/charmbracelet/ultraviolet/blob/main/README.md), [Lip Gloss native surface](https://github.com/charmbracelet/lipgloss/blob/v2.0.6/canvas.go), [tcell v3](https://github.com/gdamore/tcell/blob/main/README.md), [tview module](https://github.com/rivo/tview/blob/master/go.mod).)
 
-Lip Gloss v2.0.6 is the demo's optional styling library. Its layers/compositors accept the public `uv.Screen` contract directly; no adapter or frame styling API is required. Core region buffers, border glyphs, and production dependencies are independent of Lip Gloss. Lip Gloss v2.0.6 requires Ultraviolet `006e29f97886`. This module requires upstream Ultraviolet `878653296cfd` and replaces it with the `alexgorbatchev/ultraviolet` fork at `0ff1fafbd555`, that commit plus a Kitty alternate-key decoder fix and a `MatchString` that ignores lock states a binding does not name, so the demo builds against the fork. ([demo](../cmd/tui-frame/demo.go), [core drawing](../layout.go), [border](../composition.go), [module](../go.mod), [UV interfaces](https://github.com/charmbracelet/ultraviolet/blob/878653296cfd/uv.go).)
+Lip Gloss v2.0.6 is the demo's optional styling library. Its layers/compositors accept the public `uv.Screen` contract directly; no adapter or frame styling API is required. Core region buffers, border glyphs, and production dependencies are independent of Lip Gloss. Lip Gloss v2.0.6 requires Ultraviolet `006e29f97886`. This module requires upstream Ultraviolet `878653296cfd` and replaces it with the `alexgorbatchev/ultraviolet` fork at `0ff1fafbd555`, that commit plus a Kitty alternate-key decoder fix and a `MatchString` that ignores lock states a binding does not name, except Caps Lock on a key whose text has a character that `unicode.ToUpper` and `unicode.ToLower` map to different runes, so the demo builds against the fork. ([demo](../cmd/tui-frame/demo.go), [core drawing](../layout.go), [border](../composition.go), [module](../go.mod), [UV interfaces](https://github.com/charmbracelet/ultraviolet/blob/878653296cfd/uv.go).)
 
 ## A concise Go API still needs explicit execution contracts
 
