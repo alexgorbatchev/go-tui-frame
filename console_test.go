@@ -1,6 +1,7 @@
 package frame
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -1371,5 +1372,29 @@ func TestProbeKeepsPasteFramingAcrossSessionHandoff(t *testing.T) {
 	}
 	if len(packets) != 2 || !packets[0].Paste || string(packets[0].Raw) != "\x11after" {
 		t.Fatalf("paste handoff reclassified input: %#v", packets)
+	}
+}
+
+// Each child read mirrors the child's keyboard and focus modes on the outer
+// terminal from the routing state that read refreshes, in both directions.
+func TestChildReadMirrorsInputModes(t *testing.T) {
+	for _, m := range []ansi.DECMode{1, 66, 67, 1004, 1035, 1036, 1039} {
+		t.Run(fmt.Sprint(m), func(t *testing.T) {
+			s, out, slave := newRepaintSession(t, ansi.ModeReset, nil)
+			s.console.entry[m] = ansi.ModeReset
+			for _, on := range []bool{true, false} {
+				seq := ansi.ResetMode(m)
+				if on {
+					seq = ansi.SetMode(m)
+				}
+				readRepaintChunk(t, s, slave, seq)
+				if s.console.applied[m] != on {
+					t.Fatalf("after the child wrote %q, outer mode %d applied = %v", seq, m, s.console.applied[m])
+				}
+			}
+			if output := repaintOutput(t, out); !bytes.Contains(output, []byte(ansi.SetMode(m)+ansi.ResetMode(m))) {
+				t.Errorf("outer terminal received %q, want mode %d set and then reset", output, m)
+			}
+		})
 	}
 }
