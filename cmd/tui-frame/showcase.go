@@ -14,11 +14,11 @@ const showcaseInterval = 2 * time.Second
 func (d *demoSession) startShowcase(ctx context.Context) func() {
 	ctx, cancel := context.WithCancel(ctx)
 	ready := make(chan struct{})
-	d.frame.Observe(func(event frame.Event) {
-		if event.Kind == frame.Started {
-			close(ready)
-		}
-	})
+	// Started arrives once per Run, and a Frame runs one session. Selecting
+	// only Started keeps child output, protocol effects and state snapshots out
+	// of the bounded observation queue, which they would overflow whenever the
+	// delivery goroutine falls behind, ending the session.
+	d.frame.ObserveEvents([]frame.EventKind{frame.Started}, func(frame.Event) { close(ready) })
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

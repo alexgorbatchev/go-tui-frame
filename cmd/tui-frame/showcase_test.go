@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -70,6 +72,33 @@ func TestShowcaseUpdatesIdleChildFrame(t *testing.T) {
 	}
 	if err := <-played; err != nil {
 		t.Fatal(err)
+	}
+}
+
+// showcaseBells is a protocol burst longer than the library's 64-record
+// observation queue (observationQueueLimit). The child writes it at once, so
+// one PTY read carries it and the session emits a Protocol event for every bell
+// before it next parks.
+const showcaseBells = 200
+
+// The showcase waits only for Started. A burst of child output must not reach
+// the observation queue on its behalf, or a dispatcher that falls behind ends
+// the session with ErrObservationOverflow. A single scheduler P holds the
+// dispatcher goroutine deterministically: it cannot run until the session
+// goroutine parks, so every Protocol event of one read would queue up behind
+// the session if the showcase selected it.
+func TestShowcaseSurvivesChildOutputBurstWithHeldObserver(t *testing.T) {
+	procs := runtime.GOMAXPROCS(1)
+	t.Cleanup(func() { runtime.GOMAXPROCS(procs) })
+	burst := strings.Repeat("\a", showcaseBells)
+	_, diagnostic := cliTTY(t, "--showcase", "--", "sh", "-c", `printf '%s' "$1"`, "sh", burst)
+	code := execute()
+	message, err := os.ReadFile(diagnostic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 || len(message) != 0 {
+		t.Fatalf("showcase session returned %d with stderr %q; want the child's status 0 and no diagnostic", code, message)
 	}
 }
 
