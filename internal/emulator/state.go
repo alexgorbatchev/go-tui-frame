@@ -308,7 +308,6 @@ func (t *Terminal) convertVisual() error {
 	// point leaves t.visual.colors unchanged, and partial rows already used
 	// the new conversions.
 	if !t.colorsInterned || t.internedColors != *colors {
-		t.styleValid = false
 		t.internColors(colors)
 	}
 	visual.cursor, visual.colors = *cursor, *colors
@@ -353,10 +352,7 @@ func (t *Terminal) copyRow(y int, visual *visualState) error {
 	if err != nil {
 		return fmt.Errorf("reading native row selection: %w", err)
 	}
-	t.plainStyle = capturedStyle{native: *t.defaultStyle, visual: t.cellStyle(t.defaultStyle, &visual.colors)}
-	// Style IDs belong to the source page and may be reused after mutations.
-	// Reuse only within this captured row; retain map storage between rows.
-	clear(t.styles)
+	t.resetRowStyles()
 	start := y * t.size.Cols
 	cells, natives := visual.cells[start:start+t.size.Cols], visual.nativeCells[start:start+t.size.Cols]
 	for x := range cells {
@@ -448,13 +444,6 @@ func cellText(text []byte, previous string) string {
 	return string(text)
 }
 
-func (t *Terminal) cellStyle(style *ghostty.Style, colors *ghostty.RenderStateColors) uv.Style {
-	if !t.styleValid || t.style != *style {
-		t.style, t.cachedStyle, t.styleValid = *style, t.uvStyle(style, colors), true
-	}
-	return t.cachedStyle
-}
-
 func (t *Terminal) uvStyle(style *ghostty.Style, colors *ghostty.RenderStateColors) uv.Style {
 	result := uv.Style{
 		Fg: t.styleColor(style.FgColor(), &colors.Palette), Bg: t.styleColor(style.BgColor(), &colors.Palette),
@@ -506,13 +495,16 @@ func (t *Terminal) styleColor(value ghostty.StyleColor, palette *ghostty.Palette
 }
 
 // internColors discards colors converted from previous render colors and
-// converts the default colors. Palette entries are converted on first use,
-// so a change does not convert all 256 entries.
+// converts the default colors and the default style. Palette entries are
+// converted on first use, so a change does not convert all 256 entries. The
+// render colors are the only conversion input that changes after New: the
+// host colors are set once by initializeProfile.
 func (t *Terminal) internColors(colors *ghostty.RenderStateColors) {
 	clear(t.palette[:])
 	t.foreground = defaultColor(t.hostForeground, colors.Foreground)
 	t.background = defaultColor(t.hostBackground, colors.Background)
 	t.internedColors, t.colorsInterned = *colors, true
+	t.plainStyle = capturedStyle{native: *t.defaultStyle, visual: t.uvStyle(t.defaultStyle, colors)}
 }
 
 // defaultColor keeps a host-matching default as default rendition (nil) to

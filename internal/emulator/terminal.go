@@ -9,7 +9,6 @@ import (
 	"image/color"
 
 	"github.com/charmbracelet/colorprofile"
-	uv "github.com/charmbracelet/ultraviolet"
 	ghostty "go.mitchellh.com/libghostty"
 )
 
@@ -92,12 +91,15 @@ type Terminal struct {
 	indexedEntries                 int
 	text                           []byte
 	layout                         cellLayout
-	styles                         map[uint16]capturedStyle
-	plainStyle                     capturedStyle
-	style                          ghostty.Style
-	cachedStyle                    uv.Style
-	styleValid                     bool
-	defaultStyle                   *ghostty.Style
+	// rowStyles maps the current row's style IDs to their styles, and
+	// lastRowStyle indexes the entry the previous cell used. rowStyleIndex
+	// indexes rowStyles by ID on rows with many styles. plainStyle holds
+	// the default style converted with internedColors.
+	rowStyles     []rowStyleEntry
+	rowStyleIndex map[uint16]int
+	lastRowStyle  int
+	plainStyle    capturedStyle
+	defaultStyle  *ghostty.Style
 	// Converting a color value to color.Color allocates, so captures reuse
 	// converted colors. palette holds resolved entries, filled on first use;
 	// foreground and background hold the default colors, nil where the
@@ -297,6 +299,7 @@ func (t *Terminal) Close() {
 	t.visual = visualState{}
 	t.input = inputSample{}
 	t.text = nil
-	t.styles = nil
+	t.rowStyles = nil
+	t.rowStyleIndex = nil
 	t.defaultStyle = nil
 }

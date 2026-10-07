@@ -3,6 +3,7 @@ package emulator
 import (
 	"encoding/json"
 	"fmt"
+	"image/color"
 	"slices"
 	"strings"
 	"testing"
@@ -156,6 +157,115 @@ func TestRowCaptureAllocationsDoNotScaleWithWidth(t *testing.T) {
 			})
 		}
 	}
+}
+
+// styleReadAllocations is what RenderStateRowCells.Style allocates: the C
+// style value and the returned Style. Every dirty row reads each style it
+// uses once, because native style IDs are page-local.
+const styleReadAllocations = 2
+
+func TestRowCaptureDoesNotReconvertRepeatedStyles(t *testing.T) {
+	const cols = 40
+	for _, tt := range []struct {
+		name string
+		// sgrs style consecutive runs of each damaged row; an empty entry
+		// writes default-style text.
+		sgrs []string
+	}{
+		{"palette", []string{"38;5;33"}},
+		{"RGB", []string{"38;2;11;22;33"}},
+		{"styled and plain", []string{"1;38;5;33", "", "4;38;2;11;22;33"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			plain := rowCaptureSlope(t, cols, []string{""})
+			styled := rowCaptureSlope(t, cols, tt.sgrs)
+			distinct := 0
+			for _, sgr := range tt.sgrs {
+				if sgr != "" {
+					distinct++
+				}
+			}
+			limit := plain + float64(distinct*styleReadAllocations)
+			t.Logf("plain row %.1f, styled row %.1f, limit %.1f allocations", plain, styled, limit)
+			// Each further row reuses the conversions of the row above, so it
+			// costs a plain row plus the native read of each of its styles.
+			if styled > limit {
+				t.Errorf("each further row with the same styles added %.1f allocations; want at most %.1f", styled, limit)
+			}
+		})
+	}
+}
+
+// A row with more styles than rowStyleScanLimit looks its styles up by
+// index. Cycling the styles makes later cells return to earlier ones, so each
+// lookup must find the style of its own ID, on the first capture and after
+// the row is captured again.
+func TestManyStyledRowKeepsEachCellStyle(t *testing.T) {
+	const cols, styles = 60, 2*rowStyleScanLimit + 3
+	em := newTerminal(t, cols, 2)
+	want := func(x int) color.RGBA { return color.RGBA{R: uint8(x % styles), G: 9, B: 7, A: 255} }
+	var state State
+	for _, text := range []string{"a", "b"} {
+		var b strings.Builder
+		b.WriteString("\x1b[H")
+		for x := range cols {
+			c := want(x)
+			fmt.Fprintf(&b, "\x1b[38;2;%d;%d;%dm%s", c.R, c.G, c.B, text)
+		}
+		writeTerminal(t, em, b.String()+"\x1b[0m")
+		if err := em.UpdateState(&state); err != nil {
+			t.Fatal(err)
+		}
+		for x, cell := range state.Cells[:cols] {
+			if cell.Style.Fg != want(x) || cell.Content != text {
+				t.Fatalf("capture of %q: cell %d = %q with foreground %#v; want %q with %#v", text, x, cell.Content, cell.Style.Fg, text, want(x))
+			}
+		}
+	}
+}
+
+// rowCaptureSlope reports the allocations each further damaged row adds to a
+// write and an internal capture, measured from one to four rows that each
+// repeat the runs sgrs style.
+func rowCaptureSlope(t *testing.T, cols int, sgrs []string) float64 {
+	t.Helper()
+	measure := func(rows int) float64 {
+		em := newTerminal(t, cols, 6)
+		var state State
+		frames := [2]string{}
+		for i, text := range []byte{'a', 'b'} {
+			var b strings.Builder
+			for y := range rows {
+				fmt.Fprintf(&b, "\x1b[%d;1H", y+1)
+				for _, sgr := range sgrs {
+					fmt.Fprintf(&b, "\x1b[%sm%s\x1b[0m", sgr, strings.Repeat(string(text), cols/len(sgrs)))
+				}
+			}
+			frames[i] = b.String()
+		}
+		capture := func(frame string) {
+			if _, err := em.Write([]byte(frame)); err != nil {
+				t.Fatal(err)
+			}
+			if err := em.UpdateState(&state); err != nil {
+				t.Fatal(err)
+			}
+			if !em.DirtyRows()[rows-1] {
+				t.Fatalf("%q left row %d clean", frame, rows-1)
+			}
+			em.ClearDamage()
+		}
+		// Warm the converted colors and the visual storage.
+		capture(frames[0])
+		capture(frames[1])
+		i := 0
+		return testing.AllocsPerRun(20, func() {
+			capture(frames[i%2])
+			i++
+		})
+	}
+	one, four := measure(1), measure(4)
+	return (four - one) / 3
 }
 
 func TestCaptureMatchesNativeCellData(t *testing.T) {

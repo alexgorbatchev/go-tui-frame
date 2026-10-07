@@ -3,8 +3,10 @@ package emulator
 import (
 	"fmt"
 	"image/color"
+	"strings"
 	"testing"
 
+	uv "github.com/charmbracelet/ultraviolet"
 	ghostty "go.mitchellh.com/libghostty"
 )
 
@@ -38,34 +40,46 @@ func TestErasedCellsKeepBackground(t *testing.T) {
 	}
 }
 
-// Captures reuse resolved palette colors, so a palette change must reach
-// erased cells whose background references the changed entry.
-func TestErasedPaletteBackgroundFollowsOSCPaletteChanges(t *testing.T) {
-	em := newTerminal(t, 12, 3)
-	writeTerminal(t, em, "\x1b[48;5;33m\x1b[2K\x1b[0m")
-	initial := terminalState(t, em)
-	changed := ghostty.ColorRGB{R: 0x12, G: 0x34, B: 0x56}
-	if initial.Colors.Palette[33] == changed {
-		t.Fatalf("palette entry 33 already has the changed color %#v", changed)
-	}
-	for _, step := range []struct {
-		name, sequence string
-		want           ghostty.ColorRGB
+// Captures reuse resolved palette colors, and each row reuses the styles it
+// converted, so a palette change must reach every cell whose color references
+// the changed entry: erased cells through their background and text through
+// its style.
+func TestPaletteColorsFollowOSCPaletteChanges(t *testing.T) {
+	for _, tt := range []struct {
+		name, text string
+		color      func(uv.Style) color.Color
 	}{
-		{"initial", "", initial.Colors.Palette[33]},
-		{"OSC 4", "\x1b]4;33;rgb:12/34/56\x1b\\", changed},
-		{"OSC 104", "\x1b]104;33\x1b\\", initial.Colors.Palette[33]},
+		{"erased background", "\x1b[48;5;33m\x1b[2K\x1b[0m", func(s uv.Style) color.Color { return s.Bg }},
+		{"styled foreground", "\x1b[38;5;33m" + strings.Repeat("x", 12) + "\x1b[0m", func(s uv.Style) color.Color { return s.Fg }},
 	} {
-		writeTerminal(t, em, step.sequence)
-		s := terminalState(t, em)
-		if s.Colors.Palette[33] != step.want {
-			t.Fatalf("%s: palette entry 33 = %#v; want %#v", step.name, s.Colors.Palette[33], step.want)
-		}
-		for x, cell := range s.Cells[:s.Size.Cols] {
-			if cell.Style.Bg != rgbColor(step.want) {
-				t.Fatalf("%s: erased cell %d background = %#v; want %#v", step.name, x, cell.Style.Bg, rgbColor(step.want))
+		t.Run(tt.name, func(t *testing.T) {
+			em := newTerminal(t, 12, 3)
+			writeTerminal(t, em, tt.text)
+			initial := terminalState(t, em)
+			changed := ghostty.ColorRGB{R: 0x12, G: 0x34, B: 0x56}
+			if initial.Colors.Palette[33] == changed {
+				t.Fatalf("palette entry 33 already has the changed color %#v", changed)
 			}
-		}
+			for _, step := range []struct {
+				name, sequence string
+				want           ghostty.ColorRGB
+			}{
+				{"initial", "", initial.Colors.Palette[33]},
+				{"OSC 4", "\x1b]4;33;rgb:12/34/56\x1b\\", changed},
+				{"OSC 104", "\x1b]104;33\x1b\\", initial.Colors.Palette[33]},
+			} {
+				writeTerminal(t, em, step.sequence)
+				s := terminalState(t, em)
+				if s.Colors.Palette[33] != step.want {
+					t.Fatalf("%s: palette entry 33 = %#v; want %#v", step.name, s.Colors.Palette[33], step.want)
+				}
+				for x, cell := range s.Cells[:s.Size.Cols] {
+					if got := tt.color(cell.Style); got != rgbColor(step.want) {
+						t.Fatalf("%s: cell %d color = %#v; want %#v", step.name, x, got, rgbColor(step.want))
+					}
+				}
+			}
+		})
 	}
 }
 

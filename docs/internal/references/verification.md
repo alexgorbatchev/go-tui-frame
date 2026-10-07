@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 20:10
-last_modified: 2026-10-07 11:43
+last_modified: 2026-10-07 11:51
 status: current
 ---
 
@@ -129,6 +129,60 @@ counts were measured on 2026-10-07. Capture converts each palette entry and
 each default color once after the render colors change, and reuses the most
 recent direct RGB color, so erased cells add no allocation per column. The RGB
 row adds one allocation because each iteration changes the color.
+
+`TestRowCaptureDoesNotReconvertRepeatedStyles` in the same file measures how
+many allocations each further damaged row adds, from one to four 40-column
+rows that repeat the same styled runs. Native style IDs belong to the source
+page, so each dirty row reads each of its styles once from libghostty, and
+`RenderStateRowCells.Style` allocates twice per read. Each row converts each
+of its styles once, and the default style is converted once per change of the
+render colors:
+
+```sh
+scripts/with-libghostty-cppflags go test -count=1 -v -run 'TestRowCaptureDoesNotReconvertRepeatedStyles' ./internal/emulator
+```
+
+| Runs in each row | Styles | Per further row | Test limit |
+| :--- | ---: | ---: | ---: |
+| Plain text | 0 | 6 | — |
+| One palette style (`38;5;33`) | 1 | 8 | 8 |
+| One RGB style (`38;2;11;22;33`) | 1 | 8 | 8 |
+| Two styles around plain text (`1;38;5;33`, `4;38;2;11;22;33`) | 2 | 10 | 10 |
+
+The limit is the plain row's count plus two allocations per style. These
+counts were measured on 2026-10-07 and are the same with `-race`. A row with
+two or more direct RGB colors converts each of them again on every row,
+because capture keeps only the most recent RGB color.
+
+### Styled captures
+
+`BenchmarkStyledCapture` in [damage tests](../../../internal/emulator/damage_test.go)
+times an internal capture (`UpdateState`) after a write that damages every
+row; the write is not timed. The styles stay the same across iterations and
+only the text alternates. Few styles writes three runs on each row: bold
+palette, plain and underlined RGB. Style per cell gives every cell its own
+direct RGB color, as gradients and image-to-ANSI output do. A row finds its
+styles by scanning up to 16 of them and through an ID index past that, so a
+row of distinct styles costs time linear in its width:
+
+```sh
+scripts/with-libghostty-cppflags go test -run '^$' -bench 'BenchmarkStyledCapture' -benchmem -count=3 ./internal/emulator
+```
+
+| Viewport | Time/op (indicative) | Bytes/op | Allocations/op |
+| :--- | ---: | ---: | ---: |
+| Few styles, 120×40 | 144.6 µs | 17,648 | 479 |
+| Style per cell, 40×24 | 189.3 µs | 161,393 | 3,103 |
+| Style per cell, 200×24 | 898.1 µs | 791,159 | 14,623 |
+| Style per cell, 400×2 | 153.6 µs | 133,920 | 2,491 |
+| Style per cell, 1000×1 | 191.8 µs | 166,664 | 3,085 |
+
+These figures were measured on 2026-10-07 with load averages of 6.4–7.7 over
+1 minute, directly after the same benchmark on the previous capture code
+under the same load. That code converted the default style again on every
+row and kept the row's styles in a map it cleared on every row; its medians
+were 233.5, 212.3, 1,017.6, 182.5 and 228.5 µs in the order above, with the
+same bytes and allocations.
 
 ### Synchronized-update captures
 
