@@ -1,16 +1,15 @@
 package emulator
 
 import (
-	"fmt"
-	"math"
 	"slices"
 
 	uv "github.com/charmbracelet/ultraviolet"
 	ghostty "go.mitchellh.com/libghostty"
 )
 
-// capturedStyle is a native style's index in the terminal's style table and
-// its conversion to UV.
+// capturedStyle is a native style's position in the current row's style
+// section and its conversion to UV. Position 0 is the default style, which
+// belongs to no section; position p > 0 is the section's entry p-1.
 type capturedStyle struct {
 	index  uint32
 	visual uv.Style
@@ -20,65 +19,85 @@ type capturedStyle struct {
 // zero NativeCell resolves to the default style.
 const defaultStyleIndex = 0
 
+// styleSpan locates one row's section in a style table.
+type styleSpan struct{ start, len uint32 }
+
+// The style table that UpdateState lends holds the default style at index 0
+// and then one section per viewport row, in row order. A row's section holds
+// each style the row's cells use once, found by native style ID while the row
+// is converted, so no style value is hashed. A row of N cells has at most N
+// styles, so the table never holds more than one style per cell plus the
+// default style. A style that several rows use is stored once per row.
+//
+// Clean rows keep their sections and their cells' indices. A conversion
+// collects the sections of the rows it reads; assembleStyles then builds the
+// next table from those and the clean rows' sections, and moves the indices
+// of clean rows whose section moved.
+
 // initStyles creates the style table holding only the default style.
 func (t *Terminal) initStyles() {
 	t.styles = []ghostty.Style{*t.defaultStyle}
-	t.styleIndex = map[ghostty.Style]uint32{*t.defaultStyle: defaultStyleIndex}
 }
 
-// compactStyles bounds the table that UpdateState lends at one style per cell
-// plus the default style, so a snapshot of distinct styles is no larger than
-// one whose cells each held a full style. Once a conversion leaves the table
-// above that bound, it drops the styles no cell of cells references and
-// renumbers the cells' indices in place, so clean rows need no recapture.
-// Kept styles keep their order, and the default style keeps index 0.
-func (t *Terminal) compactStyles(cells []NativeCell) {
-	if len(t.styles) <= len(cells)+1 {
+// beginStyles prepares the section storage for a conversion of a viewport
+// of rows rows. A geometry change makes the conversion read every row, so a
+// resized row span's earlier value is never used.
+func (t *Terminal) beginStyles(rows int) {
+	t.convertedStyles = t.convertedStyles[:0]
+	if len(t.rowSpans) != rows {
+		t.rowSpans = slices.Grow(t.rowSpans[:0], rows)[:rows]
+		t.convertedSpans = slices.Grow(t.convertedSpans[:0], rows)[:rows]
+		t.convertedRows = slices.Grow(t.convertedRows[:0], rows)[:rows]
+	}
+	clear(t.convertedRows)
+}
+
+// endRowStyles records the section of row y, whose styles the conversion
+// collected from start on.
+func (t *Terminal) endRowStyles(y, start int) {
+	t.convertedSpans[y] = styleSpan{start: uint32(start), len: uint32(len(t.convertedStyles) - start)}
+	t.convertedRows[y] = true
+}
+
+// assembleStyles builds the table for cells, a complete conversion's
+// viewport: the default style, then each row's section. Converted rows take
+// their new sections, and their cells' section positions become table
+// indices; clean rows keep their sections, and their indices move with them.
+// The previous table becomes the spare storage of the next assembly.
+func (t *Terminal) assembleStyles(cells []NativeCell) {
+	if !slices.Contains(t.convertedRows, true) {
 		return
 	}
-	// remap marks each referenced style, then holds its new index.
-	remap := slices.Grow(t.styleRemap[:0], len(t.styles))[:len(t.styles)]
-	clear(remap)
-	remap[defaultStyleIndex] = 1
-	for i := range cells {
-		remap[cells[i].StyleIndex] = 1
-	}
-	kept := 0
-	for i := range t.styles {
-		if remap[i] == 0 {
-			delete(t.styleIndex, t.styles[i])
+	next := append(t.spareStyles[:0], *t.defaultStyle)
+	cols := t.size.Cols
+	for y, old := range t.rowSpans {
+		row := cells[y*cols : (y+1)*cols]
+		start := uint32(len(next))
+		if t.convertedRows[y] {
+			span := t.convertedSpans[y]
+			next = append(next, t.convertedStyles[span.start:span.start+span.len]...)
+			moveStyleIndices(row, start-1)
+			t.rowSpans[y] = styleSpan{start: start, len: span.len}
 			continue
 		}
-		remap[i] = uint32(kept)
-		if kept != i {
-			t.styles[kept] = t.styles[i]
-			t.styleIndex[t.styles[kept]] = uint32(kept)
+		next = append(next, t.styles[old.start:old.start+old.len]...)
+		if start != old.start {
+			// Unsigned arithmetic wraps, so the delta also moves indices down.
+			moveStyleIndices(row, start-old.start)
 		}
-		kept++
+		t.rowSpans[y].start = start
 	}
-	t.styles = t.styles[:kept]
-	for i := range cells {
-		cells[i].StyleIndex = remap[cells[i].StyleIndex]
-	}
-	t.styleRemap = remap
+	t.spareStyles, t.styles = t.styles, next
 }
 
-// internStyle returns style's index in the style table, appending it on first
-// use. The table persists across captures because clean rows keep the indices
-// an earlier capture assigned; native style IDs cannot serve as indices,
-// because they belong to the source page and may be reused. Indices stay
-// valid until compactStyles renumbers the cells that hold them.
-func (t *Terminal) internStyle(style *ghostty.Style) (uint32, error) {
-	if i, ok := t.styleIndex[*style]; ok {
-		return i, nil
+// moveStyleIndices adds delta to the style index of every cell of row that
+// does not use the default style.
+func moveStyleIndices(row []NativeCell, delta uint32) {
+	for i := range row {
+		if row[i].StyleIndex != defaultStyleIndex {
+			row[i].StyleIndex += delta
+		}
 	}
-	if uint64(len(t.styles)) > math.MaxUint32 {
-		return 0, fmt.Errorf("native style table exceeds %d styles", uint64(math.MaxUint32)+1)
-	}
-	i := uint32(len(t.styles))
-	t.styles = append(t.styles, *style)
-	t.styleIndex[*style] = i
-	return i, nil
 }
 
 // rowStyleScanLimit is how many of a row's styles rowStyle scans. Rows with
@@ -126,10 +145,9 @@ func (t *Terminal) rowStyle(x, id uint16, colors *ghostty.RenderStateColors) (*c
 	if err != nil {
 		return nil, err
 	}
-	index, err := t.internStyle(style)
-	if err != nil {
-		return nil, err
-	}
+	// Each row style entry is one entry of the row's section, in order.
+	t.convertedStyles = append(t.convertedStyles, *style)
+	index := uint32(len(t.rowStyles) + 1)
 	t.rowStyles = append(t.rowStyles, rowStyleEntry{id: id, style: capturedStyle{index: index, visual: t.uvStyle(style, colors)}})
 	t.lastRowStyle = len(t.rowStyles) - 1
 	t.indexRowStyles()

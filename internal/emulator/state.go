@@ -33,9 +33,10 @@ type State struct {
 	Size        Size
 	Cells       []uv.Cell
 	NativeCells []NativeCell
-	// NativeStyles is this snapshot's style table: each style once, indexed
-	// by NativeCell.StyleIndex. Index 0 is the default style. The table can
-	// also hold styles no cell references, but never more styles than
+	// NativeStyles is this snapshot's style table, indexed by
+	// NativeCell.StyleIndex. Index 0 is the default style; each viewport row
+	// then holds each style its cells use once, so a style that several rows
+	// use appears once per row. The table never holds more styles than
 	// NativeCells has cells plus the default style.
 	NativeStyles       []ghostty.Style
 	Cursor             ghostty.RenderStateCursor
@@ -308,6 +309,7 @@ func (t *Terminal) convertVisual() error {
 	colors := &t.renderColors
 	visual := t.visual
 	count := t.size.Cols * t.size.Rows
+	t.beginStyles(t.size.Rows)
 	if len(visual.cells) != count {
 		visual.cells = slices.Grow(visual.cells, max(0, count-len(visual.cells)))[:count]
 		visual.nativeCells = slices.Grow(visual.nativeCells, max(0, count-len(visual.nativeCells)))[:count]
@@ -348,10 +350,10 @@ func (t *Terminal) convertVisual() error {
 	if err := t.render.Clean(); err != nil {
 		return fmt.Errorf("consuming native render damage: %w", err)
 	}
-	// Compact only after a complete conversion: a failed one leaves rows
-	// whose cells the next conversion rewrites, and the table only grew, so
-	// every index it left still resolves.
-	t.compactStyles(visual.nativeCells)
+	// Assemble only after a complete conversion. A failed one leaves the
+	// rows it read dirty, and the next conversion reads them again, so the
+	// table and the clean rows' indices stay as the last success left them.
+	t.assembleStyles(visual.nativeCells)
 	t.visual = visual
 	return nil
 }
@@ -369,6 +371,7 @@ func (t *Terminal) copyRow(y int, visual *visualState) error {
 		return fmt.Errorf("reading native row selection: %w", err)
 	}
 	t.resetRowStyles()
+	sectionStart := len(t.convertedStyles)
 	start := y * t.size.Cols
 	cells, natives := visual.cells[start:start+t.size.Cols], visual.nativeCells[start:start+t.size.Cols]
 	for x := range cells {
@@ -381,6 +384,7 @@ func (t *Terminal) copyRow(y int, visual *visualState) error {
 			return fmt.Errorf("copying native cell %d,%d: %w", x, y, err)
 		}
 	}
+	t.endRowStyles(y, sectionStart)
 	return nil
 }
 

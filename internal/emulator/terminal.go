@@ -101,11 +101,13 @@ type Terminal struct {
 	plainStyle    capturedStyle
 	defaultStyle  *ghostty.Style
 	// styles is the style table that captured cells index and UpdateState
-	// lends; styleIndex finds a style's entry. Conversions append to it, and
-	// compactStyles then bounds it, renumbering cells through styleRemap.
-	styles     []ghostty.Style
-	styleIndex map[ghostty.Style]uint32
-	styleRemap []uint32
+	// lends, and rowSpans locates each row's section in it. A conversion
+	// collects the sections of the rows it reads in convertedStyles, located
+	// by convertedSpans for the rows convertedRows marks; assembleStyles
+	// builds the next table in spareStyles and swaps the two.
+	styles, spareStyles, convertedStyles []ghostty.Style
+	rowSpans, convertedSpans             []styleSpan
+	convertedRows                        []bool
 	// Converting a color value to color.Color allocates, so captures reuse
 	// converted colors. palette holds resolved entries, filled on first use;
 	// foreground and background hold the default colors, nil where the
@@ -308,8 +310,7 @@ func (t *Terminal) Close() {
 	t.text = nil
 	t.rowStyles = nil
 	t.rowStyleIndex = nil
-	t.styles = nil
-	t.styleIndex = nil
-	t.styleRemap = nil
+	t.styles, t.spareStyles, t.convertedStyles = nil, nil, nil
+	t.rowSpans, t.convertedSpans, t.convertedRows = nil, nil, nil
 	t.defaultStyle = nil
 }

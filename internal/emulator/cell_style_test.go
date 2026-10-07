@@ -2,6 +2,7 @@ package emulator
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -97,25 +98,19 @@ func TestNativeStylesResolveAcrossCapturesAndClones(t *testing.T) {
 
 	clone := CloneState(second)
 	cloneStyles := resolvedStyles(t, clone)
-	// Each write gives the last row six new RGB styles. Once a capture
-	// leaves the table with more styles than the viewport has cells, besides
-	// the default style, it drops the styles no cell references and
-	// renumbers every row, clean ones included.
-	compacted := false
-	for seed := 0; !compacted; seed++ {
-		if seed == 32 {
-			t.Fatalf("the style table grew to %d entries without compacting", len(em.styles))
-		}
-		before := len(em.styles)
-		writeTerminal(t, em, rgbRow(3, 6, seed))
+	// Each write gives the first row six new RGB styles, so its section
+	// grows from two styles and the sections of the clean rows below it
+	// move, with their cells' indices.
+	for seed := range 3 {
+		writeTerminal(t, em, rgbRow(1, 6, seed)+"\x1b[3;1H")
 		state := terminalState(t, em)
-		compacted = len(em.styles) < before
+		if dirty := em.DirtyRows(); !dirty[0] || dirty[1] {
+			t.Fatalf("capture %d: dirty rows = %v, want the first row recaptured and the second clean", seed, dirty)
+		}
+		em.ClearDamage()
 		assertStyles(t, fmt.Sprintf("capture %d", seed), resolvedStyles(t, state), renderStyles(t, em))
 	}
-	if limit := 6*3 + 1; len(em.styles) > limit {
-		t.Fatalf("compacted table holds %d styles, want at most %d", len(em.styles), limit)
-	}
-	assertStyles(t, "clone after compaction", resolvedStyles(t, clone), cloneStyles)
+	assertStyles(t, "clone after later captures", resolvedStyles(t, clone), cloneStyles)
 
 	if err := em.Resize(Size{Cols: 4, Rows: 2}); err != nil {
 		t.Fatal(err)
@@ -156,10 +151,15 @@ func TestLentStyleTableHoldsAtMostOneStylePerCell(t *testing.T) {
 		// held is whether the output leaves a render hold whose preserved
 		// frame waits for the read to convert it.
 		held bool
-		// firstDirty is the first row the capture converts; rows above it
-		// keep the indices of earlier captures.
-		firstDirty int
+		// dirty lists the rows the capture converts, or nil for every row.
+		// The other rows keep their sections and cells from earlier
+		// captures.
+		dirty []int
 	}
+	lastRow := []int{rows - 1}
+	firstRow := []int{0}
+	oneStyleRow := "\x1b[1;1H\x1b[31m" + strings.Repeat("x", cols) + "\x1b[0m"
+	plainRow := "\x1b[1;1H" + strings.Repeat("y", cols)
 	tests := []struct {
 		name  string
 		steps []step
@@ -176,16 +176,26 @@ func TestLentStyleTableHoldsAtMostOneStylePerCell(t *testing.T) {
 			},
 		},
 		{
-			// Each compaction drops the last row's previous styles and moves
-			// its new ones down. Rewriting the row then finds the moved
-			// styles, and the dropped ones are interned again.
 			name: "new styles in the last row beside clean rows",
 			steps: []step{
 				{output: rgbFrame(cols, rows, 0)},
-				{output: rgbRow(rows, cols, 1), firstDirty: rows - 1},
-				{output: rgbRow(rows, cols, 2), firstDirty: rows - 1},
-				{output: rgbRow(rows, cols, 2), firstDirty: rows - 1},
-				{output: rgbRow(rows, cols, 1), firstDirty: rows - 1},
+				{output: rgbRow(rows, cols, 1), dirty: lastRow},
+				{output: rgbRow(rows, cols, 2), dirty: lastRow},
+				{output: rgbRow(rows, cols, 2), dirty: lastRow},
+				{output: rgbRow(rows, cols, 1), dirty: lastRow},
+			},
+		},
+		{
+			// The first row's section shrinks to one style, then to none,
+			// and grows back, so every clean row's section moves.
+			name: "first row changes its number of styles above clean rows",
+			steps: []step{
+				{output: rgbFrame(cols, rows, 0)},
+				// Moving the cursor off the last row converts that row again.
+				{output: oneStyleRow, dirty: []int{0, rows - 1}},
+				{output: plainRow, dirty: firstRow},
+				{output: rgbRow(1, cols, 1), dirty: firstRow},
+				{output: oneStyleRow, dirty: firstRow},
 			},
 		},
 		{
@@ -214,8 +224,8 @@ func TestLentStyleTableHoldsAtMostOneStylePerCell(t *testing.T) {
 					t.Fatalf("%s: Held = %v, want %v", name, s.Held, st.held)
 				}
 				for y, dirty := range em.DirtyRows() {
-					if dirty != (y >= st.firstDirty) {
-						t.Fatalf("%s: dirty rows = %v, want rows %d to %d", name, em.DirtyRows(), st.firstDirty, rows-1)
+					if dirty != (st.dirty == nil || slices.Contains(st.dirty, y)) {
+						t.Fatalf("%s: dirty rows = %v, want %v (nil: all)", name, em.DirtyRows(), st.dirty)
 					}
 				}
 				em.ClearDamage()
