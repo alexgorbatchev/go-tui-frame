@@ -939,10 +939,11 @@ func TestSessionErrorCleanupReleasesStoppedChildOutput(t *testing.T) {
 	d.finish(t, cleaned, ErrObservationOverflow)
 }
 
-// Cancellation leaves the loop polling for the killed launch leader, whose exit
-// on Darwin waits for output that flow control has stopped while a process in
+// Cancellation leaves the loop polling for the killed launch leader. On Darwin
+// its exit waits for output that flow control has stopped while a process in
 // another session holds the slave. The wait for its reap must be bounded, and
-// cleanup must share that bound rather than start its own.
+// cleanup must share that bound rather than start its own. On Linux the leader
+// exits at once and the loop reaps it.
 func TestCancellationReleasesStoppedChildOutput(t *testing.T) {
 	stopped := make(chan struct{})
 	var observed eventLog
@@ -964,14 +965,35 @@ func TestCancellationReleasesStoppedChildOutput(t *testing.T) {
 	if status, ok := got.result.ProcessState.Sys().(syscall.WaitStatus); !ok || !status.Signaled() || status.Signal() != syscall.SIGTERM {
 		t.Fatalf("launch leader exit = %v, want the frame's SIGTERM", got.result.ProcessState)
 	}
-	// Cleanup reaps the leader only after closing the child PTY, which released
-	// it. Exited must still report that exit, with a PTY sample cleanup took
-	// before the close rather than one read through the closed descriptor. The
-	// loop's last sample predates the reap deadline, which the loop returns at.
+	// Exited must report that exit with a PTY sample read through the open
+	// master. A read through a closed descriptor fails every ioctl.
 	pty := requireExited(t, observed.events(), got.result).Snapshot.Child.PTY
+	if pty.Window == nil || pty.WindowError != nil || pty.SettingsError != nil || !pty.ForegroundGroup.Available {
+		t.Fatalf("Exited PTY sample = %#v, want one read while the child PTY was open", pty)
+	}
 	reapDeadline := canceled.Add(terminationTimeout + drainTimeout)
-	if pty.Window == nil || pty.WindowError != nil || pty.SettingsError != nil || pty.ObservedAt.Before(reapDeadline) {
-		t.Fatalf("Exited PTY sample = %#v, want one taken at %v or later while the child PTY was open", pty, reapDeadline)
+	switch runtime.GOOS {
+	case "darwin":
+		// A session leader's exit drains its controlling terminal (ttywait in
+		// XNU's proc_exit) for as long as the master is open, so the loop
+		// returns at the reap deadline and cleanup reaps the leader only after
+		// closing the child PTY. Cleanup must take Exited's sample before the
+		// close. The loop's last sample predates the reap deadline.
+		if pty.ObservedAt.Before(reapDeadline) {
+			t.Fatalf("Exited PTY sample taken at %v, want one cleanup took at %v or later", pty.ObservedAt, reapDeadline)
+		}
+	case "linux":
+		// Linux neither drains a PTY when its session leader exits nor lets a
+		// stopped write outlast SIGTERM: disassociate_ctty only signals the
+		// foreground group and clears it, and n_tty_write returns on a pending
+		// signal. The loop reaps the leader long before the reap deadline and
+		// samples the PTY then, while the master is open. Only a sample taken
+		// after the exit sees no foreground group.
+		if !pty.ObservedAt.Before(reapDeadline) || pty.ForegroundGroup.Value != 0 {
+			t.Fatalf("Exited PTY sample = %#v, want the loop's, taken after the leader's exit and before %v", pty, reapDeadline)
+		}
+	default:
+		t.Fatalf("no expectation for the launch leader's reap on %s", runtime.GOOS)
 	}
 }
 
