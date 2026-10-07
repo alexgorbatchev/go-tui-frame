@@ -154,20 +154,23 @@ func (f *Frame[T]) InheritTerminal(enabled bool) *Frame[T] {
 // protocol distinguishes. With a legacy child, Ctrl+digit arrives as the
 // digit or control character a legacy terminal sends for it, Ctrl+I as Tab,
 // Ctrl+M as Enter, and Ctrl+[ as Escape. A child that enables Kitty
-// disambiguation or modifyOtherKeys mode 2 makes those keys distinct. While
-// the outer terminal reports key releases, the press determines how its
+// disambiguation or modifyOtherKeys mode 2 makes those keys distinct.
+//
+// While the outer terminal reports key releases, a press decides how its
 // reported repeats and its release are routed: the handler still runs for
-// them, but its return value is ignored. Unless the child requests every key
-// as an escape code, the terminal sends a key that types text as that text,
-// and unmodified Enter, Tab or Backspace as its legacy byte, so each repeat
-// arrives as a new press that the handler routes and that determines the
-// release. The terminal then reports no release for Enter, Tab or Backspace,
-// and reports a text key's release by its key rather than its text. The
-// release matches the press only when the text is the key's unshifted
-// character or, for an ASCII letter, its capital. Otherwise, as when Shift+1
-// types !, Shift+й types Й, a keypad key types a digit or a macOS Option key
-// types a character, the release matches no press, and the handler's answer
-// for the release routes it.
+// them, but its answer is ignored.
+//
+// This pairing is incomplete while the child does not request every key as an
+// escape code. The terminal then sends a key that types text as that text, and
+// unmodified Enter, Tab or Backspace as its legacy byte, so their repeats
+// arrive as new presses that the handler routes. It reports no release for
+// Enter, Tab or Backspace, and reports a text key's release by the key rather
+// than its text. Such a release follows its press only when the key is not on
+// the keypad and the press typed the key's unshifted character or, for an
+// ASCII letter, its capital. Any other release, such as that of Shift+1 typing
+// !, Shift+й typing Й, a keypad digit or a macOS Option character, is not
+// paired with its press: it can reach the child after a consumed press, or be
+// withheld after a passed one.
 func (f *Frame[T]) Capture(handler func(Input) Disposition) *Frame[T] {
 	f.configure(func() { f.capture = handler })
 	return f

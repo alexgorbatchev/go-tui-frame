@@ -12,10 +12,11 @@ import (
 // protocol reports releases, the press determines who owns its reported
 // repeats and its release. A repeat the terminal sends as plain text or a
 // legacy byte decodes as a new press, which takes over the held key. A release
-// reports the key rather than its text, so it matches a plain-text press only
-// when the text is the key's unshifted character or, for an ASCII letter, its
-// capital. Otherwise, as for Shift+1 typing ! or Shift+й typing Й, the
-// handler's answer routes that release.
+// reports the key rather than its text, so it pairs with a plain-text press
+// only when the key is not on the keypad and the text is the key's unshifted
+// character or, for an ASCII letter, its capital. Otherwise the release is not
+// paired: the handler's answer routes it, unless it reports the code of an
+// earlier unpaired press, whose disposition it then takes (#109).
 type keyboardFilter struct {
 	handler  func(Input) Disposition
 	releases bool
