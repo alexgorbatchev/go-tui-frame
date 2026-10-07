@@ -69,6 +69,33 @@ func TestErasedPaletteBackgroundFollowsOSCPaletteChanges(t *testing.T) {
 	}
 }
 
+// A capture can fail after it has converted the new render colors. When the
+// colors then return to those of the last successful capture, the converted
+// colors and styles must still be rebuilt from the colors actually rendered.
+func TestFailedCaptureDoesNotLeaveStaleColors(t *testing.T) {
+	em := newTerminal(t, 8, 2)
+	writeTerminal(t, em, "one")
+	initial := terminalState(t, em)
+	writeTerminal(t, em, "\x1b]10;#123456\a\x1b[Htwo")
+	// A closed row-cells handle makes libghostty reject the row read with
+	// an invalid-value result, after capture has seen the changed colors.
+	em.cells.Close()
+	if _, err := em.State(); err == nil {
+		t.Fatal("capture with a closed row-cells handle succeeded")
+	}
+	cells, err := ghostty.NewRenderStateRowCells()
+	if err != nil {
+		t.Fatal(err)
+	}
+	em.cells = cells
+	writeTerminal(t, em, "\x1b]110\a\x1b[Hsix")
+	s := terminalState(t, em)
+	if s.Colors.Foreground != initial.Colors.Foreground {
+		t.Fatalf("render foreground = %#v; want %#v", s.Colors.Foreground, initial.Colors.Foreground)
+	}
+	assertDefaultColors(t, s, initial.Colors.Foreground, initial.Colors.Background, -1)
+}
+
 func TestOSCDefaultColorsRepaintExistingCells(t *testing.T) {
 	for _, tt := range []struct {
 		name, change, reset string

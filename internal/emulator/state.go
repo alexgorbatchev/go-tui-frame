@@ -209,7 +209,11 @@ func (t *Terminal) captureVisual() error {
 	if len(visual.dirty) != t.size.Rows {
 		visual.dirty = slices.Grow(visual.dirty, max(0, t.size.Rows-len(visual.dirty)))[:t.size.Rows]
 	}
-	if colorsChanged || !t.colorsInterned {
+	// Key the converted colors and styles on the colors they were built from,
+	// not on the last successful capture: a capture that fails after this
+	// point leaves t.visual.colors unchanged, and partial rows already used
+	// the new conversions.
+	if !t.colorsInterned || t.internedColors != *colors {
 		t.styleValid = false
 		t.internColors(colors)
 	}
@@ -414,7 +418,7 @@ func (t *Terminal) internColors(colors *ghostty.RenderStateColors) {
 	clear(t.palette[:])
 	t.foreground = defaultColor(t.hostForeground, colors.Foreground)
 	t.background = defaultColor(t.hostBackground, colors.Background)
-	t.colorsInterned = true
+	t.internedColors, t.colorsInterned = *colors, true
 }
 
 // defaultColor keeps a host-matching default as default rendition (nil) to

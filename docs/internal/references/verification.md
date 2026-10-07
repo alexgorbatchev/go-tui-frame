@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 20:10
-last_modified: 2026-10-07 09:39
+last_modified: 2026-10-07 09:48
 status: current
 ---
 
@@ -229,7 +229,8 @@ unsupported manifests.
 palette backgrounds survive erase-line and erase-display, and that a later erase
 with default attributes restores the default background. They also verify
 that erased cells follow an OSC 4 change and an OSC 104 reset of their
-palette entry. In
+palette entry, and that a capture failing after a color change leaves no
+stale converted colors once the colors change back. In
 [repaint tests](../../../repaint_test.go), child output that erases with a
 background color arrives through a real PTY. Replaying the repaint on a native
 outer terminal shows that background on the erased rows without overwriting the

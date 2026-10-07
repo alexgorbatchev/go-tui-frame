@@ -101,10 +101,12 @@ type Terminal struct {
 	// converted colors. palette holds resolved entries, filled on first use;
 	// foreground and background hold the default colors, nil where the
 	// default rendition is kept. Both are reset when the render colors
-	// change. lastRGB caches the most recent direct RGB color, which erased
-	// runs and styled text repeat.
+	// differ from internedColors, the colors they were converted from.
+	// lastRGB caches the most recent direct RGB color, which erased runs and
+	// styled text repeat.
 	palette                [ghostty.PaletteSize]color.Color
 	foreground, background color.Color
+	internedColors         ghostty.RenderStateColors
 	colorsInterned         bool
 	lastRGB                ghostty.ColorRGB
 	lastRGBColor           color.Color
