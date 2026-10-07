@@ -94,45 +94,7 @@ func (t *Terminal) UpdateState(s *State) error {
 	if err := t.InputState(s); err != nil {
 		return err
 	}
-	return t.readMetadata(s)
-}
-
-// InputState observes current routing modes, the active screen and hold state
-// without capturing the viewport. Routing needs the active screen because a
-// terminal converts wheel steps into cursor keys only on its alternate screen.
-// Other fields are unchanged until UpdateState is called.
-func (t *Terminal) InputState(s *State) error {
-	if t == nil || t.native == nil {
-		return ErrClosed
-	}
-	s.Size, s.Held = t.size, t.held
-	if s.Modes == nil {
-		s.Modes = make(map[ghostty.Mode]bool, len(knownModes))
-	}
-	if s.ModeErrors == nil {
-		s.ModeErrors = make(map[ghostty.Mode]error)
-	}
-	clear(s.Modes)
-	clear(s.ModeErrors)
-	var err error
-	s.ModifyOtherKeys2, err = t.modifyOtherKeys2()
-	if err != nil {
-		return err
-	}
-	s.MouseTrackingMode, err = t.mouseTrackingMode()
-	if err != nil {
-		return err
-	}
-	var screen ghostty.TerminalScreen
-	if err := errors.Join(
-		read("active screen", &screen, t.native.ActiveScreen),
-		read("Kitty keyboard flags", &s.KittyKeyboardFlags, t.native.KittyKeyboardFlags),
-		read("mouse tracking", &s.MouseTracking, t.native.MouseTracking),
-	); err != nil {
-		return err
-	}
-	s.Alternate = screen == ghostty.ScreenAlternate
-	for _, mode := range knownModes {
+	for _, mode := range stateModes {
 		value, err := t.native.Mode(mode)
 		if err != nil {
 			s.ModeErrors[mode] = err
@@ -140,6 +102,85 @@ func (t *Terminal) InputState(s *State) error {
 		}
 		s.Modes[mode] = value
 	}
+	return t.readMetadata(s)
+}
+
+// inputSample holds the native values InputState last read. After New, only
+// Write, Resize and ReleaseHold change the native terminal, and each discards
+// the sample, so a read without a mutation in between copies it instead of
+// calling a native getter for each value.
+type inputSample struct {
+	valid                                      bool
+	modes                                      [len(inputModes)]bool
+	modeErrors                                 [len(inputModes)]error
+	kittyKeyboardFlags                         ghostty.KittyKeyFlags
+	mouseTrackingMode                          ghostty.MouseTrackingMode
+	alternate, mouseTracking, modifyOtherKeys2 bool
+}
+
+// InputState observes the modes routing reads, keyboard and mouse protocol
+// state, the active screen and hold state without capturing the viewport.
+// Routing needs the active screen because a terminal converts wheel steps into
+// cursor keys only on its alternate screen. Modes holds only the routing
+// modes until UpdateState adds the rest; other fields are unchanged.
+func (t *Terminal) InputState(s *State) error {
+	if t == nil || t.native == nil {
+		return ErrClosed
+	}
+	s.Size, s.Held = t.size, t.held
+	if s.Modes == nil {
+		s.Modes = make(map[ghostty.Mode]bool, len(inputModes)+len(stateModes))
+	}
+	if s.ModeErrors == nil {
+		s.ModeErrors = make(map[ghostty.Mode]error)
+	}
+	clear(s.Modes)
+	clear(s.ModeErrors)
+	if !t.input.valid {
+		if err := t.readInput(); err != nil {
+			return err
+		}
+	}
+	in := &t.input
+	s.ModifyOtherKeys2, s.MouseTrackingMode = in.modifyOtherKeys2, in.mouseTrackingMode
+	s.KittyKeyboardFlags, s.MouseTracking, s.Alternate = in.kittyKeyboardFlags, in.mouseTracking, in.alternate
+	for i, mode := range inputModes {
+		if err := in.modeErrors[i]; err != nil {
+			s.ModeErrors[mode] = err
+			continue
+		}
+		s.Modes[mode] = in.modes[i]
+	}
+	return nil
+}
+
+// readInput replaces the input sample with the current native values. A
+// failed read leaves the sample invalid.
+func (t *Terminal) readInput() error {
+	var in inputSample
+	var err error
+	in.modifyOtherKeys2, err = t.modifyOtherKeys2()
+	if err != nil {
+		return err
+	}
+	in.mouseTrackingMode, err = t.mouseTrackingMode()
+	if err != nil {
+		return err
+	}
+	var screen ghostty.TerminalScreen
+	if err := errors.Join(
+		read("active screen", &screen, t.native.ActiveScreen),
+		read("Kitty keyboard flags", &in.kittyKeyboardFlags, t.native.KittyKeyboardFlags),
+		read("mouse tracking", &in.mouseTracking, t.native.MouseTracking),
+	); err != nil {
+		return err
+	}
+	in.alternate = screen == ghostty.ScreenAlternate
+	for i, mode := range inputModes {
+		in.modes[i], in.modeErrors[i] = t.native.Mode(mode)
+	}
+	in.valid = true
+	t.input = in
 	return nil
 }
 
@@ -488,18 +529,28 @@ func rgbColor(rgb ghostty.ColorRGB) color.RGBA {
 	return color.RGBA{R: rgb.R, G: rgb.G, B: rgb.B, A: 255}
 }
 
-// This is the binding's explicit set of named modes. A failed getter is kept in
+// The binding names these modes and no others. A failed getter is kept in
 // ModeErrors; it is never converted into an invented disabled value.
-var knownModes = []ghostty.Mode{
+//
+// inputModes are the modes the session reads to route input and to mirror the
+// child's input modes on the outer terminal. Between captures State.Modes
+// holds only these: routing rejects an absent mode, and the console mirrors
+// one as reset, so every mode either reads must be listed here.
+var inputModes = [...]ghostty.Mode{
+	ghostty.ModeDECCKM, ghostty.ModeKeypadKeys, ghostty.ModeBackarrowKeyMode, ghostty.ModeNumlockKeypad,
+	ghostty.ModeAltEscPrefix, ghostty.ModeAltSendsEsc, ghostty.ModeFocusEvent, ghostty.ModeAltScroll,
+	ghostty.ModeBracketedPaste, ghostty.ModeUTF8Mouse, ghostty.ModeSGRMouse, ghostty.ModeURxvtMouse,
+	ghostty.ModeSGRPixelsMouse,
+}
+
+// stateModes are the remaining named modes, which only UpdateState reads.
+var stateModes = [...]ghostty.Mode{
 	ghostty.ModeKAM, ghostty.ModeInsert, ghostty.ModeSRM, ghostty.ModeLinefeed,
-	ghostty.ModeDECCKM, ghostty.Mode132Column, ghostty.ModeSlowScroll, ghostty.ModeReverseColors,
-	ghostty.ModeOrigin, ghostty.ModeWraparound, ghostty.ModeAutorepeat, ghostty.ModeX10Mouse,
-	ghostty.ModeCursorBlinking, ghostty.ModeCursorVisible, ghostty.ModeEnableMode3, ghostty.ModeReverseWrap,
-	ghostty.ModeAltScreenLegacy, ghostty.ModeKeypadKeys, ghostty.ModeBackarrowKeyMode, ghostty.ModeLeftRightMargin,
-	ghostty.ModeNormalMouse, ghostty.ModeButtonMouse, ghostty.ModeAnyMouse, ghostty.ModeFocusEvent,
-	ghostty.ModeUTF8Mouse, ghostty.ModeSGRMouse, ghostty.ModeAltScroll, ghostty.ModeURxvtMouse,
-	ghostty.ModeSGRPixelsMouse, ghostty.ModeNumlockKeypad, ghostty.ModeAltEscPrefix, ghostty.ModeAltSendsEsc,
+	ghostty.Mode132Column, ghostty.ModeSlowScroll, ghostty.ModeReverseColors, ghostty.ModeOrigin,
+	ghostty.ModeWraparound, ghostty.ModeAutorepeat, ghostty.ModeX10Mouse, ghostty.ModeCursorBlinking,
+	ghostty.ModeCursorVisible, ghostty.ModeEnableMode3, ghostty.ModeReverseWrap, ghostty.ModeAltScreenLegacy,
+	ghostty.ModeLeftRightMargin, ghostty.ModeNormalMouse, ghostty.ModeButtonMouse, ghostty.ModeAnyMouse,
 	ghostty.ModeReverseWrapExt, ghostty.ModeAltScreen, ghostty.ModeSaveCursor, ghostty.ModeAltScreenSave,
-	ghostty.ModeBracketedPaste, ghostty.ModeSyncOutput, ghostty.ModeGraphemeCluster, ghostty.ModeColorSchemeReport,
-	ghostty.ModeVisibilityReport, ghostty.ModeInBandResize, ghostty.ModePasteEvents,
+	ghostty.ModeSyncOutput, ghostty.ModeGraphemeCluster, ghostty.ModeColorSchemeReport, ghostty.ModeVisibilityReport,
+	ghostty.ModeInBandResize, ghostty.ModePasteEvents,
 }

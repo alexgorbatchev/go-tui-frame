@@ -90,6 +90,10 @@ func TestCellLayoutRejectsUnsupportedManifests(t *testing.T) {
 	}
 }
 
+// unchangedMode resets cursor-key mode, which a new terminal already has
+// reset. Writing it changes no native value and damages no row.
+const unchangedMode = "\x1b[?1l"
+
 func TestRowCaptureAllocationsDoNotScaleWithWidth(t *testing.T) {
 	for _, tt := range []struct {
 		name string
@@ -116,6 +120,7 @@ func TestRowCaptureAllocationsDoNotScaleWithWidth(t *testing.T) {
 				if err := em.UpdateState(&state); err != nil {
 					t.Fatal(err)
 				}
+				em.ClearDamage()
 				writes := tt.writes(cols)
 				capture := func() {
 					if err := em.UpdateState(&state); err != nil {
@@ -123,7 +128,17 @@ func TestRowCaptureAllocationsDoNotScaleWithWidth(t *testing.T) {
 					}
 					em.ClearDamage()
 				}
-				unchanged := testing.AllocsPerRun(20, capture)
+				// Every write discards the input sample, so the baseline writes
+				// a mode the terminal already has, which damages no row.
+				undamaged := testing.AllocsPerRun(20, func() {
+					writeTerminal(t, em, unchangedMode)
+					if err := em.UpdateState(&state); err != nil {
+						t.Fatal(err)
+					}
+					if slices.Contains(em.DirtyRows(), true) {
+						t.Fatalf("%q damaged a row", unchangedMode)
+					}
+				})
 				i := 0
 				row := testing.AllocsPerRun(20, func() {
 					if _, err := em.Write([]byte(writes[i%len(writes)])); err != nil {
@@ -132,10 +147,10 @@ func TestRowCaptureAllocationsDoNotScaleWithWidth(t *testing.T) {
 					i++
 					capture()
 				})
-				t.Logf("unchanged %.0f, damaged row %.0f, additional %.0f allocations", unchanged, row, row-unchanged)
+				t.Logf("undamaged %.0f, damaged row %.0f, additional %.0f allocations", undamaged, row, row-undamaged)
 				// Row iterator queries have a fixed cost; cells must not add
 				// allocations as the viewport becomes wider.
-				if extra := row - unchanged; extra > tt.limit {
+				if extra := row - undamaged; extra > tt.limit {
 					t.Errorf("%d-column row capture added %.0f allocations", cols, extra)
 				}
 			})

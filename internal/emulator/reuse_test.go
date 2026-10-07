@@ -1,6 +1,7 @@
 package emulator
 
 import (
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -55,12 +56,113 @@ func TestBorrowedStateReusesStorageAndAccumulatesDamage(t *testing.T) {
 	}
 }
 
+// cgoCalls reports the cgo calls f makes. The emulator starts no goroutines,
+// so every call counted while f runs is f's.
+func cgoCalls(f func()) int {
+	before := runtime.NumCgoCall()
+	f()
+	return int(runtime.NumCgoCall() - before)
+}
+
+func TestInputStateReadsRoutingValuesOncePerMutation(t *testing.T) {
+	em := newTerminal(t, 120, 40)
+	var state State
+	inputState := func() {
+		if err := em.InputState(&state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	inputState()
+	// Besides one getter per routing mode, a read with mouse tracking off
+	// calls three getters (active screen, Kitty flags, mouse tracking), the
+	// key probe's three encoder calls, the mouse probe's four encoder
+	// options, of which the size makes two calls, and three calls for the
+	// probe's first event, which the encoder drops.
+	const otherCalls = 3 + 3 + 5 + 3
+	// Every write discards the input sample, even one that changes nothing.
+	writeTerminal(t, em, unchangedMode)
+	if calls := cgoCalls(inputState); calls > len(inputModes)+otherCalls {
+		t.Errorf("InputState after a write made %d cgo calls, want at most %d for %d routing modes", calls, len(inputModes)+otherCalls, len(inputModes))
+	}
+	if calls := cgoCalls(inputState); calls != 0 {
+		t.Errorf("InputState without a mutation made %d cgo calls, want 0", calls)
+	}
+	if allocs := testing.AllocsPerRun(20, inputState); allocs != 0 {
+		t.Errorf("InputState without a mutation allocated %.0f times, want 0", allocs)
+	}
+}
+
+func TestInputStateObservesEveryMutation(t *testing.T) {
+	em := newTerminal(t, 8, 3)
+	var input, full State
+	tests := []struct {
+		name  string
+		write string
+		// resize, when set, replaces the write.
+		resize *Size
+		want   func(State) bool
+	}{
+		{"cursor keys", "\x1b[?1h", nil, func(s State) bool { return s.Modes[ghostty.ModeDECCKM] }},
+		{"SGR mouse format", "\x1b[?1006h", nil, func(s State) bool { return s.Modes[ghostty.ModeSGRMouse] }},
+		{"bracketed paste", "\x1b[?2004h", nil, func(s State) bool { return s.Modes[ghostty.ModeBracketedPaste] }},
+		{"button tracking", "\x1b[?1002h", nil, func(s State) bool {
+			return s.MouseTracking && s.MouseTrackingMode == ghostty.MouseTrackingButton
+		}},
+		// Resetting another tracking mode turns tracking off while the
+		// getter still reports the set 1002 bit.
+		{"tracking reset", "\x1b[?1000l", nil, func(s State) bool {
+			return s.MouseTracking && s.MouseTrackingMode == ghostty.MouseTrackingNone
+		}},
+		{"Kitty keyboard", "\x1b[>1u", nil, func(s State) bool { return s.KittyKeyboardFlags == ghostty.KittyKeyDisambiguate }},
+		{"modifyOtherKeys 2", "\x1b[>4;2m", nil, func(s State) bool { return s.ModifyOtherKeys2 }},
+		{"alternate screen", "\x1b[?1049h", nil, func(s State) bool { return s.Alternate }},
+		{"resize", "", &Size{Cols: 10, Rows: 4}, func(s State) bool { return s.Size == Size{Cols: 10, Rows: 4} }},
+		{"synchronized output", "\x1b[?2026h", nil, func(s State) bool { return s.Held }},
+	}
+	for _, tt := range tests {
+		// Read before each mutation, so the next read follows a cached one.
+		if err := em.InputState(&input); err != nil {
+			t.Fatal(err)
+		}
+		if tt.resize != nil {
+			if err := em.Resize(*tt.resize); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			writeTerminal(t, em, tt.write)
+		}
+		if err := em.InputState(&input); err != nil {
+			t.Fatal(err)
+		}
+		if !tt.want(input) {
+			t.Errorf("%s: InputState did not observe the mutation", tt.name)
+		}
+		if err := em.UpdateState(&full); err != nil {
+			t.Fatal(err)
+		}
+		if !tt.want(full) {
+			t.Errorf("%s: UpdateState after a cached InputState did not observe the mutation", tt.name)
+		}
+	}
+	if err := em.ReleaseHold(); err != nil {
+		t.Fatal(err)
+	}
+	if err := em.InputState(&input); err != nil || input.Held {
+		t.Errorf("InputState after ReleaseHold = held %v, %v", input.Held, err)
+	}
+	// UpdateState reads the modes routing does not use at every capture.
+	writeTerminal(t, em, "\x1b[4h")
+	if err := em.UpdateState(&full); err != nil || !full.Modes[ghostty.ModeInsert] || !full.Modes[ghostty.ModeDECCKM] {
+		t.Errorf("UpdateState after insert mode = insert %v, cursor keys %v, %v", full.Modes[ghostty.ModeInsert], full.Modes[ghostty.ModeDECCKM], err)
+	}
+}
+
 func BenchmarkBorrowedState(b *testing.B) {
 	const cols, rows = 120, 40
 	// Erasing and refilling the display dirties every row, so the capture
 	// converts every viewport cell.
 	fullViewport := []byte("\x1b[H\x1b[2J" + strings.Repeat(strings.Repeat("x", cols), rows))
-	for _, name := range []string{"input", "unchanged", "one row", "full viewport"} {
+	for _, name := range []string{"input", "input unchanged", "unchanged", "one row", "full viewport"} {
 		b.Run(name, func(b *testing.B) {
 			em, err := New(Options{Size: Size{Cols: cols, Rows: rows}})
 			if err != nil {
@@ -94,9 +196,15 @@ func BenchmarkBorrowedState(b *testing.B) {
 						b.Fatal(err)
 					}
 				}
-				if name == "input" {
+				switch name {
+				case "input":
+					// Discard the sample as a write would, without the
+					// write's own native calls.
+					em.input.valid = false
 					err = em.InputState(&state)
-				} else {
+				case "input unchanged":
+					err = em.InputState(&state)
+				default:
 					err = em.UpdateState(&state)
 				}
 				if err != nil {

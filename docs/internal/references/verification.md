@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 20:10
-last_modified: 2026-10-07 09:48
+last_modified: 2026-10-07 10:18
 status: current
 ---
 
@@ -39,8 +39,8 @@ captures, which vary by a few bytes/op between runs. Re-measure both when a
 change touches capture, repaint or input delivery.
 
 Timings depend on machine load and are indicative only. The machine was shared
-with other work during the benchmark runs: load averages were 3.1–3.5 over
-1 minute and 7.6–8.7 over 5 minutes. Each table reports the median of three
+with other work during the benchmark runs: load averages were 4.5–4.8 over
+1 minute and 6.5–6.9 over 5 minutes. Each table reports the median of three
 one-second runs. Compare a timing only with a run on the same machine under
 similar load.
 
@@ -52,10 +52,19 @@ capture a 120×40 native viewport with plain ASCII text. Owned captures
 (`State`) copy storage for a durable caller. Internal captures (`UpdateState`)
 reuse the viewport and its maps. A one-row capture first writes
 `\x1b[Hupdated`. A full-viewport capture first erases the display and fills
-all 40 rows with text, so it converts every cell. Input modes only reads the terminal modes, keyboard protocol
-flags and mouse tracking (`InputState`), without the display. It includes the
+all 40 rows with text, so it converts every cell.
+
+Input modes only reads the values input routing uses (`InputState`), without
+the display: the 13 modes routing and the outer input-mode mirror read, the
+active screen, keyboard protocol flags and mouse tracking. It includes the
 key- and mouse-encoder probes that derive `ModifyOtherKeys2` and
-`MouseTrackingMode`.
+`MouseTrackingMode`. The terminal keeps these values until the next `Write`,
+`Resize` or `ReleaseHold`, which are the only calls that change the native
+terminal after it is created. Input modes only discards them before each
+read, as a child read does; input modes, unchanged reads them without a
+mutation in between and makes no native call. An internal capture takes these
+values from `InputState` and reads the other 30 named modes itself, so an
+unchanged internal capture reads no routing value again.
 
 ```sh
 scripts/with-libghostty-cppflags go test -run '^$' -bench 'BenchmarkBorrowedState|BenchmarkStateCapture' -benchmem -count=3 ./internal/emulator
@@ -63,19 +72,20 @@ scripts/with-libghostty-cppflags go test -run '^$' -bench 'BenchmarkBorrowedStat
 
 | Capture | Time/op (indicative) | Bytes/op | Allocations/op |
 | :--- | ---: | ---: | ---: |
-| Owned, unchanged | 158.4 µs | about 1,010,680 | 89 |
-| Owned, one row | 120.6 µs | about 1,010,756 | 96 |
-| Internal, unchanged | 3.804 µs | 2,600 | 79 |
-| Internal, one row | 8.076 µs | 2,664 | 88 |
-| Internal, full viewport | 169.3 µs | 4,848 | 322 |
-| Input modes only | 2.541 µs | 520 | 55 |
+| Owned, unchanged | 160.6 µs | about 1,010,680 | 89 |
+| Owned, one row | 133.1 µs | about 1,010,756 | 96 |
+| Internal, unchanged | 2.905 µs | 2,200 | 54 |
+| Internal, one row | 8.018 µs | 2,664 | 88 |
+| Internal, full viewport | 167.4 µs | 4,848 | 322 |
+| Input modes only | 1.099 µs | 400 | 25 |
+| Input modes, unchanged | 166.1 ns | 0 | 0 |
 
-These capture figures were re-measured on 2026-10-07 on the same machine after
-cell conversion began writing each cell in place and passing the render colors
-by pointer. Load averages were 11.2–13.9 over 1 minute during that run. In an
-interleaved comparison of eight runs per binary under similar load, the
-full-viewport median fell from 433.3 µs to 175.4 µs and the one-row median from
-15.31 µs to 8.413 µs; bytes and allocations did not change.
+These capture figures were re-measured on 2026-10-07 after `InputState`
+began reading only the routing modes and keeping its values until the next
+mutation. Before that change, on the same machine, input modes only made 55
+allocations (520 B) and an unchanged internal capture 79 (2,600 B). Every
+capture that follows a write still reads each value once, so the one-row,
+full-viewport and owned figures are unchanged.
 
 The owned one-row median is below the owned unchanged median. An owned capture
 allocates about 1 MB more than an internal one because `State` clones the
@@ -95,21 +105,24 @@ go tool pprof -sample_index=alloc_objects -top .tmp/emulator.test .tmp/borrowed.
 ### Row capture allocations
 
 `TestRowCaptureAllocationsDoNotScaleWithWidth` in
-[row tests](../../../internal/emulator/row_test.go) logs the allocations of an
-unchanged internal capture and of a capture after one damaged row. It runs at
-20, 120 and 240 columns. The erased rows alternate two backgrounds, so each
-iteration damages the row:
+[row tests](../../../internal/emulator/row_test.go) logs the allocations of a write and an
+internal capture, first for a write that damages no row and then for one that
+damages a row. Both writes make the capture read the input values again, so
+the difference is the damaged row's cost. The undamaged write resets
+cursor-key mode, which is already reset. The test runs at 20, 120 and 240
+columns. The erased rows alternate two backgrounds, so each iteration damages
+the row:
 
 ```sh
 scripts/with-libghostty-cppflags go test -count=1 -v -run 'TestRowCaptureAllocationsDoNotScaleWithWidth' ./internal/emulator
 ```
 
-| Damaged row | Unchanged | Damaged | Additional | Test limit |
+| Damaged row | Undamaged | Damaged | Additional | Test limit |
 | :--- | ---: | ---: | ---: | ---: |
-| Plain text (`updated`) | 79 | 89 | 10 | 12 |
-| Two styles across the full width | 79 | 93 | 14 | 24 |
-| Erased with a palette background (`48;5;33`, `48;5;34`) | 79 | 89 | 10 | 12 |
-| Erased with an RGB background (`48;2;10;20;30`, `48;2;40;50;60`) | 79 | 90 | 11 | 12 |
+| Plain text (`updated`) | 83 | 89 | 6 | 12 |
+| Two styles across the full width | 83 | 93 | 10 | 24 |
+| Erased with a palette background (`48;5;33`, `48;5;34`) | 83 | 89 | 6 | 12 |
+| Erased with an RGB background (`48;2;10;20;30`, `48;2;40;50;60`) | 83 | 90 | 7 | 12 |
 
 Each count is the same at all three widths, and the same with `-race`. These
 counts were measured on 2026-10-07. Capture converts each palette entry and
@@ -138,11 +151,16 @@ scripts/with-libghostty-cppflags go test -run '^$' -bench 'BenchmarkSessionRepai
 
 | Session operation | Viewport | Time/op (indicative) | Outer bytes/op | Bytes/op | Allocations/op |
 | :--- | :--- | ---: | ---: | ---: | ---: |
-| Unchanged render | 20×6 | 166.9 ns | 0 | 0 | 0 |
-| Unchanged capture and render | 20×6 | 5.460 µs | 0 | 2,408 | 74 |
-| Changing-row capture and repaint | 20×6 | 10.49 µs | 9 | 2,504 | 89 |
-| Populated changing-row capture and repaint | 120×40 | 23.06 µs | 9 | 2,504 | 89 |
-| Warmed input delivery | 20×6 | 1.057 µs | — | 0 | 0 |
+| Unchanged render | 20×6 | 189.1 ns | 0 | 0 | 0 |
+| Unchanged capture and render | 20×6 | 4.766 µs | 0 | 2,200 | 54 |
+| Changing-row capture and repaint | 20×6 | 11.08 µs | 9 | 2,696 | 94 |
+| Populated changing-row capture and repaint | 120×40 | 17.50 µs | 9 | 2,696 | 94 |
+| Warmed input delivery | 20×6 | 1.055 µs | — | 0 | 0 |
+
+These session figures were re-measured on 2026-10-07 together with the capture
+benchmarks. Before `InputState` kept its values between mutations, a run on
+the same machine reported 79 allocations (2,600 B) for an unchanged capture and render and
+94 for both changing-row repaints.
 
 The allocation profile of a 20×6 changing-row repaint attributes 92% of
 allocated objects to capture, through the same libghostty binding calls as the

@@ -81,6 +81,7 @@ type Terminal struct {
 	mouseProbe                     *ghostty.MouseEvent
 	size                           Size
 	visual                         visualState
+	input                          inputSample
 	held                           bool
 	effects                        []Effect
 	callbackErr                    error
@@ -200,6 +201,7 @@ func (t *Terminal) Write(data []byte) (int, error) {
 		return 0, ErrClosed
 	}
 	t.callbackErr = nil
+	t.input.valid = false
 	t.native.VTWrite(data)
 	failed, err := t.native.VTProcessingError()
 	if err != nil {
@@ -220,6 +222,7 @@ func (t *Terminal) Resize(size Size) error {
 	}
 	previous := t.size
 	t.callbackErr = nil
+	t.input.valid = false
 	// Resize can synchronously query SizeFn for mode 2048's report.
 	t.size = size
 	if err := t.native.Resize(uint16(size.Cols), uint16(size.Rows), size.CellWidthPx, size.CellHeightPx); err != nil {
@@ -236,6 +239,7 @@ func (t *Terminal) ReleaseHold() error {
 	if t == nil || t.native == nil {
 		return ErrClosed
 	}
+	t.input.valid = false
 	if err := t.native.SetMode(ghostty.ModeSyncOutput, false); err != nil {
 		return fmt.Errorf("releasing native render hold: %w", err)
 	}
@@ -283,6 +287,7 @@ func (t *Terminal) Close() {
 		t.native = nil
 	}
 	t.visual = visualState{}
+	t.input = inputSample{}
 	t.text = nil
 	t.styles = nil
 	t.defaultStyle = nil
