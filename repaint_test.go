@@ -493,6 +493,8 @@ func TestInvalidationRepaintsFollowFramePacing(t *testing.T) {
 	before := repaintOutput(t, out)
 	start := time.Now()
 	wakeRepaint(t, s, "idle")
+	// The idle repaint finished before painted.
+	painted := time.Now()
 	if got := repaintOutput(t, out)[len(before):]; !bytes.Contains(got, []byte("idle")) || repaintFrames(got) != 1 {
 		t.Fatalf("invalidation after a quiet period was not painted at once: %q", got)
 	}
@@ -506,13 +508,32 @@ func TestInvalidationRepaintsFollowFramePacing(t *testing.T) {
 	if allowed := int(time.Since(start) / renderInterval); repaintFrames(got) > allowed {
 		t.Fatalf("%d invalidations painted %d frames where pacing allows %d: %q", burst, repaintFrames(got), allowed, got)
 	}
+	// A burst within one interval of the idle repaint leaves its frame to a
+	// deadline no later than one interval after that repaint.
+	pending := !s.renderDeadline.IsZero()
+	if time.Since(painted) < renderInterval && (!pending || s.renderDeadline.After(painted.Add(renderInterval))) {
+		t.Fatalf("in-interval invalidations left deadline %v; want one no later than %v", s.renderDeadline, painted.Add(renderInterval))
+	}
 	time.Sleep(2 * renderInterval)
+	before = repaintOutput(t, out)
 	if err := s.deadlines(); err != nil {
 		t.Fatal(err)
 	}
-	last := "burst" + strconv.Itoa(burst-1)
-	if got := repaintOutput(t, out)[len(before):]; !bytes.Contains(got, []byte(last)) {
-		t.Fatalf("paced invalidation never painted the latest region data: %q", got)
+	painting := repaintOutput(t, out)[len(before):]
+	if pending && repaintFrames(painting) != 1 {
+		t.Fatalf("frame deadline painted %d frames; want 1: %q", repaintFrames(painting), painting)
+	}
+	// After an unpainted burst, the deadline frame replaces the idle header
+	// with the whole latest value.
+	if repaintFrames(got) == 0 && !bytes.Contains(painting, []byte("burst"+strconv.Itoa(burst-1))) {
+		t.Fatalf("frame deadline did not paint the latest region data: %q", painting)
+	}
+	var header strings.Builder
+	for x := range len("burst") + 1 {
+		header.WriteString(s.screen.CellAt(x, 0).Content)
+	}
+	if last := "burst" + strconv.Itoa(burst-1); header.String() != last {
+		t.Fatalf("paced invalidation painted header %q; want %q", header.String(), last)
 	}
 	if timeout := s.pollTimeout(); timeout != -1 {
 		t.Fatalf("painted invalidation left a rendering timer: %d", timeout)
