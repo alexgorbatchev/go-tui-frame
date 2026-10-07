@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -75,12 +77,16 @@ func runReadmeCapture(t *testing.T, binary string) {
 		name string
 		// child is the sh script the program runs as nvim. It prints started
 		// once it runs, and finds its own directory, which it shares with
-		// readmeProgram.dir, as ${0%/*}.
+		// readmeProgram.dir, as ${0%/*}. A child that handles SIGTERM is
+		// TestReadmeSIGTERMChild, which the script execs.
 		child string
 		// quit presses Ctrl+Q; nil lets the child exit on its own.
 		quit   func(ctx context.Context, t *testing.T, h *terminalHarness, p *readmeProgram)
 		code   int
 		stderr *regexp.Regexp
+		// handlesSIGTERM requires the child to have recorded that its SIGTERM
+		// handler ran.
+		handlesSIGTERM bool
 	}{
 		{
 			// The quit's SIGTERM ends the child, and the program reports that
@@ -92,17 +98,13 @@ func runReadmeCapture(t *testing.T, binary string) {
 			stderr: regexp.MustCompile(`^signal: terminated\n$`),
 		},
 		{
-			// A SIGTERM that reaches sh just before it enters wait leaves the
-			// trap pending until the waited-for job ends, and a job still
-			// between fork and exec has the shell's handler and survives the
-			// group SIGTERM; together they hold the trap past the frame's
-			// SIGKILL. This job prints started itself after its exec, with
-			// SIGTERM's default action, so the SIGTERM that follows Ctrl+Q
-			// always ends it, wait returns, and the trap runs.
-			name:   "Ctrl+Q to a child that exits 0 on SIGTERM",
-			child:  "trap 'exit 0' TERM; sh -c 'printf started; exec sleep 30' & wait",
-			quit:   quitWhenStarted,
-			stderr: regexp.MustCompile(`^$`),
+			// The child exits 0 from its SIGTERM handler, so only the record
+			// it leaves tells a handled signal from any other exit 0.
+			name:           "Ctrl+Q to a child that exits 0 on SIGTERM",
+			child:          readmeSIGTERMChild("exit"),
+			quit:           quitWhenStarted,
+			stderr:         regexp.MustCompile(`^$`),
+			handlesSIGTERM: true,
 		},
 		{
 			name:   "Ctrl+Q held until the child exited",
@@ -121,13 +123,13 @@ func runReadmeCapture(t *testing.T, binary string) {
 			// The child answers the quit's SIGTERM by switching to 132 columns
 			// (DECCOLM), which the viewport cannot fit, so a session error
 			// follows the quit. It then outlives the SIGTERM until the frame's
-			// SIGKILL. As in the SIGTERM case above, its exec'd job prints
-			// started, so the trap runs promptly.
-			name:   "Ctrl+Q with a later session error",
-			child:  `trap 'printf "\033[?40h\033[?3h"' TERM; sh -c 'printf started; exec sleep 30' & wait; exec sleep 30`,
-			quit:   quitWhenStarted,
-			code:   1,
-			stderr: regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(ErrGeometry.Error()) + `: `),
+			// SIGKILL.
+			name:           "Ctrl+Q with a later session error",
+			child:          readmeSIGTERMChild("deccolm"),
+			quit:           quitWhenStarted,
+			code:           1,
+			stderr:         regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(ErrGeometry.Error()) + `: `),
+			handlesSIGTERM: true,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -160,8 +162,59 @@ func runReadmeCapture(t *testing.T, binary string) {
 			if code := p.cmd.ProcessState.ExitCode(); code != tt.code || !tt.stderr.MatchString(p.stderr.String()) {
 				t.Fatalf("README program %s, want status %d and stderr matching %q", p.outcome(), tt.code, tt.stderr)
 			}
+			if tt.handlesSIGTERM {
+				if _, err := os.Stat(filepath.Join(p.dir, "terminated")); err != nil {
+					t.Fatalf("README program %s, but its child did not record a handled SIGTERM: %v", p.outcome(), err)
+				}
+			}
 		})
 	}
+}
+
+// readmeSIGTERMChild returns the nvim script that execs this test binary as
+// TestReadmeSIGTERMChild in mode. A race-enabled binary otherwise sleeps for
+// the race detector's default atexit_sleep_ms of 1000 when it exits, which
+// lasts until the frame's SIGKILL.
+func readmeSIGTERMChild(mode string) string {
+	return `exec env GORACE=atexit_sleep_ms=0 FRAME_README_SIGTERM_CHILD=` + mode +
+		` "$FRAME_README_TEST_BINARY" -test.run='^TestReadmeSIGTERMChild$'`
+}
+
+// TestReadmeSIGTERMChild runs as the nvim of a README capture case. It handles
+// SIGTERM from before it prints started. When the signal arrives it records
+// that in its directory, then exits 0 in "exit" mode, or in "deccolm" mode
+// switches to 132 columns (DECCOLM) and runs on until the frame's SIGKILL.
+//
+// It is one process, so the frame's group SIGTERM always reaches its handler.
+// A shell that traps SIGTERM while it waits for a job can miss the trap: XNU's
+// killpg signals a group's members one at a time, so the job can die and the
+// shell exit before its own SIGTERM arrives, and a job still between fork and
+// exec loses the signal to the shell's inherited handler.
+func TestReadmeSIGTERMChild(t *testing.T) {
+	mode := os.Getenv("FRAME_README_SIGTERM_CHILD")
+	if mode == "" {
+		return
+	}
+	terminated := make(chan os.Signal, 1)
+	signal.Notify(terminated, syscall.SIGTERM)
+	if _, err := os.Stdout.WriteString("started"); err != nil {
+		t.Fatal(err)
+	}
+	<-terminated
+	if err := os.WriteFile(filepath.Join(os.Getenv("FRAME_README_CHILD_DIR"), "terminated"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	switch mode {
+	case "exit":
+		os.Exit(0)
+	case "deccolm":
+		if _, err := os.Stdout.WriteString("\x1b[?40h\x1b[?3h"); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(30 * time.Second)
+		t.Fatal("frame did not kill the child")
+	}
+	t.Fatalf("unknown FRAME_README_SIGTERM_CHILD mode %q", mode)
 }
 
 // readmeProgram is a README program running on a harness terminal.
@@ -264,7 +317,8 @@ func (p *readmeProgram) awaitText(ctx context.Context, t *testing.T, h *terminal
 
 // readmeChildEnv returns this process's environment with a PATH whose nvim
 // runs script with sh, ignoring the arguments it receives, and the directory
-// that holds that nvim.
+// that holds that nvim. The environment also names this test binary and that
+// directory for TestReadmeSIGTERMChild.
 func readmeChildEnv(t *testing.T, script string) (env []string, dir string) {
 	t.Helper()
 	// exec.LookPath rejects a relative PATH entry's result.
@@ -276,7 +330,11 @@ func readmeChildEnv(t *testing.T, script string) (env []string, dir string) {
 		t.Fatal(err)
 	}
 	// The last PATH entry wins in an exec.Cmd environment.
-	return append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH")), dir
+	return append(os.Environ(),
+		"PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"FRAME_README_TEST_BINARY="+os.Args[0],
+		"FRAME_README_CHILD_DIR="+dir,
+	), dir
 }
 
 // pressCtrlQ makes the outer terminal report a Ctrl+Q press.
