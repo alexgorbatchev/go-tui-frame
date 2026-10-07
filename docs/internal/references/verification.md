@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 20:10
-last_modified: 2026-10-07 06:55
+last_modified: 2026-10-07 07:07
 status: current
 ---
 
@@ -51,7 +51,8 @@ and `BenchmarkBorrowedState` in [reuse tests](../../../internal/emulator/reuse_t
 capture a 120×40 native viewport with plain ASCII text. Owned captures
 (`State`) copy storage for a durable caller. Internal captures (`UpdateState`)
 reuse the viewport and its maps. A one-row capture first writes
-`\x1b[Hupdated`. Input modes only reads the terminal modes, keyboard protocol
+`\x1b[Hupdated`. A full-viewport capture first erases the display and fills
+all 40 rows with text, so it converts every cell. Input modes only reads the terminal modes, keyboard protocol
 flags and mouse tracking (`InputState`), without the display. It includes the
 key- and mouse-encoder probes that derive `ModifyOtherKeys2` and
 `MouseTrackingMode`.
@@ -62,14 +63,19 @@ scripts/with-libghostty-cppflags go test -run '^$' -bench 'BenchmarkBorrowedStat
 
 | Capture | Time/op (indicative) | Bytes/op | Allocations/op |
 | :--- | ---: | ---: | ---: |
-| Owned, unchanged | 163.6 µs | about 1,010,680 | 89 |
-| Owned, one row | 125.7 µs | about 1,010,755 | 96 |
-| Internal, unchanged | 3.933 µs | 2,600 | 79 |
-| Internal, one row | 15.27 µs | 2,664 | 88 |
-| Input modes only | 2.647 µs | 520 | 55 |
+| Owned, unchanged | 158.4 µs | about 1,010,680 | 89 |
+| Owned, one row | 120.6 µs | about 1,010,756 | 96 |
+| Internal, unchanged | 3.804 µs | 2,600 | 79 |
+| Internal, one row | 8.076 µs | 2,664 | 88 |
+| Internal, full viewport | 169.3 µs | 4,848 | 322 |
+| Input modes only | 2.541 µs | 520 | 55 |
 
-These capture figures were re-measured on 2026-10-06 on the same machine after
-`InputState` gained the mouse-encoder probe for `MouseTrackingMode`.
+These capture figures were re-measured on 2026-10-07 on the same machine after
+cell conversion began writing each cell in place and passing the render colors
+by pointer. Load averages were 11.2–13.9 over 1 minute during that run. In an
+interleaved comparison of eight runs per binary under similar load, the
+full-viewport median fell from 433.3 µs to 175.4 µs and the one-row median from
+15.31 µs to 8.413 µs; bytes and allocations did not change.
 
 The owned one-row median is below the owned unchanged median. An owned capture
 allocates about 1 MB more than an internal one because `State` clones the
@@ -209,7 +215,9 @@ each row.
 
 [Row tests](../../../internal/emulator/row_test.go) compare captured content,
 packed metadata, full styles, erased-cell backgrounds and hyperlinks with
-libghostty's own getters. They also reject unsupported manifests.
+libghostty's own getters. They verify that plain text written over a captured
+hyperlink leaves no link in the reused cell storage, and they reject
+unsupported manifests.
 [Color tests](../../../internal/emulator/colors_test.go) verify that RGB and
 palette backgrounds survive erase-line and erase-display, and that a later erase
 with default attributes restores the default background. In
