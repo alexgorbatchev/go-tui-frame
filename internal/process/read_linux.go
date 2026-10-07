@@ -6,13 +6,14 @@ package process
 import "C"
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -20,14 +21,23 @@ import (
 
 const maxObservationBytes = 16 * 1024 * 1024
 
-func readProc(path string) ([]byte, error) {
+// procReader reuses one scratch buffer across the procfs files that a single
+// Read observes. Every caller copies what it keeps, so each result aliases the
+// buffer and stays valid only until the next read.
+type procReader struct {
+	buf []byte
+}
+
+// procReadChunk is the smallest step by which the scratch buffer grows.
+const procReadChunk = 4096
+
+func (r *procReader) read(path string) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	data, readErr := io.ReadAll(io.LimitReader(f, maxObservationBytes+1))
-	err = errors.Join(readErr, f.Close())
-	if err != nil {
+	data, readErr := r.fill(f)
+	if err := errors.Join(readErr, f.Close()); err != nil {
 		return nil, err
 	}
 	if len(data) > maxObservationBytes {
@@ -36,13 +46,37 @@ func readProc(path string) ([]byte, error) {
 	return data, nil
 }
 
+// fill reads f to EOF into the scratch buffer, stopping one byte past
+// maxObservationBytes so read can report an oversized observation.
+func (r *procReader) fill(f *os.File) ([]byte, error) {
+	const limit = maxObservationBytes + 1
+	data := r.buf[:0]
+	for len(data) < limit {
+		if len(data) == cap(data) {
+			data = slices.Grow(data, procReadChunk)
+		}
+		n, err := f.Read(data[len(data):min(cap(data), limit)])
+		data = data[:len(data)+n]
+		if err != nil {
+			r.buf = data
+			if err == io.EOF {
+				return data, nil
+			}
+			return nil, err
+		}
+	}
+	r.buf = data
+	return data, nil
+}
+
 // Read samples procfs/native syscall observations without helper programs.
 func Read(pid int) Snapshot {
 	if pid <= 0 {
 		return missing(pid, fmt.Errorf("reading process %d: invalid PID", pid))
 	}
+	var r procReader
 	base := filepath.Join("/proc", strconv.Itoa(pid))
-	raw, err := readProc(filepath.Join(base, "stat"))
+	raw, err := r.read(filepath.Join(base, "stat"))
 	if err != nil {
 		return missing(pid, err)
 	}
@@ -73,16 +107,16 @@ func Read(pid int) Snapshot {
 	}
 	s.Directory = readLink(filepath.Join(base, "cwd"))
 	s.Executable = readLink(filepath.Join(base, "exe"))
-	s.Args = readStrings(filepath.Join(base, "cmdline"), "kernel argument memory view; process may modify contents")
-	s.Environment = readStrings(filepath.Join(base, "environ"), "kernel exec-image environment memory view; does not follow libc environment changes")
-	status, err := readProc(filepath.Join(base, "status"))
+	s.Args = r.readStrings(filepath.Join(base, "cmdline"), "kernel argument memory view; process may modify contents")
+	s.Environment = r.readStrings(filepath.Join(base, "environ"), "kernel exec-image environment memory view; does not follow libc environment changes")
+	status, err := r.read(filepath.Join(base, "status"))
 	if err != nil {
 		s.Status = unavailable[string]("procfs status", err)
 	} else {
 		s.Status = available(string(status), "procfs status; protected fields may be zeroed by kernel")
 	}
 	s.Resources = statResources(stat)
-	raw, err = readProc(filepath.Join(base, "stat"))
+	raw, err = r.read(filepath.Join(base, "stat"))
 	if err != nil {
 		return missing(pid, err)
 	}
@@ -104,8 +138,8 @@ func readLink(path string) Field[string] {
 	return available(value, path)
 }
 
-func readStrings(path, meaning string) Field[[]string] {
-	raw, err := readProc(path)
+func (r *procReader) readStrings(path, meaning string) Field[[]string] {
+	raw, err := r.read(path)
 	if err != nil {
 		return unavailable[[]string](path+"; "+meaning, err)
 	}
@@ -115,12 +149,9 @@ func readStrings(path, meaning string) Field[[]string] {
 	if raw[len(raw)-1] != 0 {
 		return unavailable[[]string](path, fmt.Errorf("unterminated procfs string vector"))
 	}
-	parts := bytes.Split(raw[:len(raw)-1], []byte{0})
-	values := make([]string, len(parts))
-	for i, part := range parts {
-		values[i] = string(part)
-	}
-	return available(values, path+"; "+meaning)
+	// One conversion and one split keep the allocation count independent of
+	// the element count; the elements share one immutable backing string.
+	return available(strings.Split(string(raw[:len(raw)-1]), "\x00"), path+"; "+meaning)
 }
 
 func statResources(stat procStat) Resources {
