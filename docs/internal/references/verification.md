@@ -25,13 +25,13 @@ macOS:
 
 ```sh
 export CGO_ENABLED=1 PKG_CONFIG_PATH="$PWD/.tmp/native/prefix/share/pkgconfig" TMPDIR="$PWD/.tmp"
-export CGO_CPPFLAGS="$(pkg-config --static --cflags libghostty-vt-static)"
 ```
 
-`CGO_CPPFLAGS` names this checkout's prefix in Go's build cache key, as
-`scripts/with-libghostty-cppflags` does for the recipes; without it, Go can
-reuse a binding built against another checkout's archive. Linux uses a
-different prefix and compiler; see the [pinned native build](native-build.md).
+The commands below run `go` through `scripts/with-libghostty-cppflags`, as the
+recipes do. It adds this checkout's prefix and the archive's SHA-256 to
+`CGO_CPPFLAGS`; without them, Go can reuse a binding or test binary built
+against another archive. Linux uses a different prefix and compiler; see the
+[pinned native build](native-build.md).
 
 Allocation counts are deterministic: each benchmark reports the same count in
 every run. Byte counts are also identical across runs, except for owned
@@ -55,7 +55,7 @@ reuse the viewport and its maps. A one-row capture first writes
 flags and mouse tracking (`InputState`), without the display.
 
 ```sh
-go test -run '^$' -bench 'BenchmarkBorrowedState|BenchmarkStateCapture' -benchmem -count=3 ./internal/emulator
+scripts/with-libghostty-cppflags go test -run '^$' -bench 'BenchmarkBorrowedState|BenchmarkStateCapture' -benchmem -count=3 ./internal/emulator
 ```
 
 | Capture | Time/op (indicative) | Bytes/op | Allocations/op |
@@ -76,7 +76,7 @@ allocated objects to libghostty binding calls. These are terminal getters
 the key-encoder call that derives `ModifyOtherKeys2`:
 
 ```sh
-go test -run '^$' -bench 'BenchmarkBorrowedState/one_row' -benchmem -memprofile .tmp/borrowed.mem -memprofilerate=1 -o .tmp/emulator.test ./internal/emulator
+scripts/with-libghostty-cppflags go test -run '^$' -bench 'BenchmarkBorrowedState/one_row' -benchmem -memprofile .tmp/borrowed.mem -memprofilerate=1 -o .tmp/emulator.test ./internal/emulator
 go tool pprof -sample_index=alloc_objects -top .tmp/emulator.test .tmp/borrowed.mem
 ```
 
@@ -88,7 +88,7 @@ unchanged internal capture and of a capture after one damaged row. It runs at
 20, 120 and 240 columns:
 
 ```sh
-go test -count=1 -v -run 'TestRowCaptureAllocationsDoNotScaleWithWidth' ./internal/emulator
+scripts/with-libghostty-cppflags go test -count=1 -v -run 'TestRowCaptureAllocationsDoNotScaleWithWidth' ./internal/emulator
 ```
 
 | Damaged row | Unchanged | Damaged | Additional | Test limit |
@@ -114,7 +114,7 @@ the output written to the outer file per iteration. Warmed input delivery
 queues 5 bytes, writes them to the PTY master and reads them from the slave.
 
 ```sh
-go test -run '^$' -bench 'BenchmarkSessionRepaint|BenchmarkPopulatedSessionRepaint|BenchmarkSessionInputQueue' -benchmem -count=3 .
+scripts/with-libghostty-cppflags go test -run '^$' -bench 'BenchmarkSessionRepaint|BenchmarkPopulatedSessionRepaint|BenchmarkSessionInputQueue' -benchmem -count=3 .
 ```
 
 | Session operation | Viewport | Time/op (indicative) | Outer bytes/op | Bytes/op | Allocations/op |
@@ -131,7 +131,7 @@ capture benchmarks. Rendering accounts for 6%, mostly Ultraviolet's cursor
 movement and the cursor-position sequences it builds with `x/ansi`:
 
 ```sh
-go test -run '^$' -bench 'BenchmarkSessionRepaint/changing_row' -benchmem -memprofile .tmp/session.mem -memprofilerate=1 -o .tmp/frame.test .
+scripts/with-libghostty-cppflags go test -run '^$' -bench 'BenchmarkSessionRepaint/changing_row' -benchmem -memprofile .tmp/session.mem -memprofilerate=1 -o .tmp/frame.test .
 go tool pprof -sample_index=alloc_objects -top .tmp/frame.test .tmp/session.mem
 ```
 
@@ -148,7 +148,7 @@ through a writer. The session's incremental repaint emits 9 bytes for the same
 change.
 
 ```sh
-go test -run '^$' -bench 'BenchmarkGhosttyVTFormatter' -benchmem -count=3 ./internal/emulator
+scripts/with-libghostty-cppflags go test -run '^$' -bench 'BenchmarkGhosttyVTFormatter' -benchmem -count=3 ./internal/emulator
 ```
 
 ## Whole-repository gate
@@ -176,7 +176,7 @@ The CLI's statement coverage is 93.5%, with or without `-race`.
 [CLI maintenance](../../../cmd/tui-frame/AGENTS.md) requires 90%:
 
 ```sh
-go test -coverprofile=.tmp/cli-coverage.out ./cmd/tui-frame
+scripts/with-libghostty-cppflags go test -coverprofile=.tmp/cli-coverage.out ./cmd/tui-frame
 go tool cover -func=.tmp/cli-coverage.out | tail -1
 ```
 
@@ -356,12 +356,14 @@ repository files.
 Go's build cache key for a cgo package includes the cgo flags from the
 environment and `#cgo` directives, but not `pkg-config` output (`buildActionID`
 in Go 1.27.1's `cmd/go/internal/work/exec.go`). The recipes add the prefix's
-include flags to `CGO_CPPFLAGS`, so a cached libghostty package is reused only
-for the same native prefix; see the [pinned native build](native-build.md).
-`TestBuildCacheKeepsNativePrefixesApart` in
-[the CLI tests](../../../cmd/tui-frame/native_cache_test.go) builds against two
-prefixes with one build cache and removes the first before building the second.
-Both audited cross-builds used an empty `GOCACHE`, so each linked this
+include flags and the archive's SHA-256 to `CGO_CPPFLAGS`, so a cached
+libghostty package or link is reused only for the same native prefix and
+archive; see the [pinned native build](native-build.md). In
+[the CLI tests](../../../cmd/tui-frame/native_cache_test.go),
+`TestBuildCacheKeepsNativePrefixesApart` builds against two prefixes with one
+build cache and removes the first before building the second.
+`TestBuildCacheFollowsNativeArchiveContents` changes the archive in place and
+requires the rebuilt executable to get a new build ID. Both audited cross-builds used an empty `GOCACHE`, so each linked this
 checkout's archive.
 
 These audits follow the [pinned native build](native-build.md). Source changes

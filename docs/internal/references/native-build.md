@@ -59,9 +59,10 @@ temporary file. A download that fails the check stops the recipe with the URL,
 the cached path, and the expected digest. A cached archive that fails the
 check, because its digest differs or it cannot be read, is removed and
 downloaded again. When `shasum` is interrupted or cannot run, the recipe stops
-with its status and leaves the cached archive in place. `shasum` is needed only
-while `.tmp/native/ghostty` does not exist; without it, the recipe stops before
-it checks or downloads the archive.
+with its status and leaves the cached archive in place. The native recipe needs
+`shasum` only while `.tmp/native/ghostty` does not exist; without it, the recipe
+stops before it checks or downloads the archive. Recipes that run Go always need
+`shasum`; see below.
 
 Ghostty's build runs `git` in its source directory to detect its version. The
 extracted archive is not a git repository, so the recipe runs `zig build`
@@ -96,25 +97,36 @@ pinned directory. Zig caches and downloaded sources remain under ignored
 The binding gets the archive's include and link flags from a `#cgo pkg-config`
 directive. Go's build cache key for a cgo package includes the `CGO_CPPFLAGS`,
 `CGO_CFLAGS`, and `CGO_LDFLAGS` environment and the package's `#cgo`
-directives, but not `pkg-config` output (`buildActionID` in Go 1.27.1's
-`cmd/go/internal/work/exec.go`). The binding's module-cache directory is the
-same in every checkout, so without another key input a binding compiled in one
-checkout is reused in the others and links the first checkout's archive. Once
-that checkout's `.tmp/native` is removed, the other checkouts fail to link.
-Recipes that compile cgo therefore run `go` through
-`scripts/with-libghostty-cppflags`. The script appends
-`pkg-config --static --cflags libghostty-vt-static`, the include flag that
-names the prefix, to `CGO_CPPFLAGS`, where Go also puts `pkg-config`'s
-`--cflags` output. Each prefix then gets its own cache entry. The `--libs`
-output is not exported through `CGO_LDFLAGS`: Go applies that variable to every
-cgo package, so the archive would reach the final link once for each of them,
-and the macOS linker warns about the duplicates.
+directives, but not `pkg-config` output or the files it names (`buildActionID`
+in Go 1.27.1's `cmd/go/internal/work/exec.go`; see also
+[`go help cache`](https://pkg.go.dev/cmd/go#hdr-Build_and_test_caching)). The
+binding's module-cache directory is the same in every checkout, so without
+another key input a binding compiled in one checkout is reused in the others
+and links the first checkout's archive. Once that checkout's `.tmp/native` is
+removed, the other checkouts fail to link. An archive rebuilt at the same
+prefix, for example for another Ghostty revision, changes no key either: Go
+reuses the compiled binding, the existing `bin/tui-frame`, and cached test
+results.
 
-The cache key covers the prefix path, not the archive or header contents. As
-[`go help cache`](https://pkg.go.dev/cmd/go#hdr-Build_and_test_caching) states,
-the build cache does not detect changes to C libraries. After the archive is
-rebuilt at the same prefix, for example for another Ghostty revision, run
-`go clean -cache` or build with `-a`.
+Recipes that compile cgo therefore run `go` through
+`scripts/with-libghostty-cppflags`. The script appends two values to
+`CGO_CPPFLAGS`, where Go also puts `pkg-config`'s `--cflags` output:
+
+- `pkg-config --static --cflags libghostty-vt-static`, the include flag that
+  names the prefix, so each prefix gets its own cache entries.
+- `-DGO_TUI_FRAME_LIBGHOSTTY_VT_SHA256=<digest>`, the SHA-256 of the archive
+  that `pkg-config --static --libs` names. No C code reads the macro; it only
+  identifies the archive. Go records `CGO_CPPFLAGS` in each executable's build
+  information, so a changed archive also changes the cache key of the link step
+  and of test results. Hashing the 11 MB macOS arm64 archive with `shasum`
+  takes about 40 ms per command on an Apple M4 Pro.
+
+Go does not record cgo flags in the build information of a `-trimpath` build,
+so such a build still reuses its previous link after the archive changes. The
+recipes do not use `-trimpath`. The `--libs` output is not exported through
+`CGO_LDFLAGS`: Go applies that variable to every cgo package, so the archive
+would reach the final link once for each of them, and the macOS linker warns
+about the duplicates.
 
 `just check` checks module hygiene, builds all packages and `bin/tui-frame`,
 runs vet, and runs race tests. `just linkage` inspects the resulting executable.
@@ -145,15 +157,17 @@ amd64/arm64 executables. Linux runtime tests have not executed locally.
 ## Build a consumer
 
 Build the pinned archive first. For a macOS consumer, export its actual absolute
-prefix before running the consumer's ordinary Go build. Go's build cache is
-shared by every project of the user, so also add the prefix's include flags to
-`CGO_CPPFLAGS`, as `scripts/with-libghostty-cppflags` does for this repository:
+prefix, then run the consumer's ordinary Go build through this checkout's
+`scripts/with-libghostty-cppflags`. Go's build cache is shared by every project
+of the user, so the script's prefix and archive identity keep it from reusing a
+binding or link built against another archive. The script computes them for
+each command; a `CGO_CPPFLAGS` value exported once would keep the digest of the
+archive that existed at export time.
 
 ```sh
 export CGO_ENABLED=1
 export PKG_CONFIG_PATH="/absolute/path/to/go-tui-frame/.tmp/native/prefix/share/pkgconfig"
-export CGO_CPPFLAGS="$(pkg-config --static --cflags libghostty-vt-static)"
-go build ./...
+/absolute/path/to/go-tui-frame/scripts/with-libghostty-cppflags go build ./...
 ```
 
 For a Linux amd64 consumer, use the musl archive and a static final link:
@@ -163,12 +177,11 @@ export CGO_ENABLED=1
 export GOOS=linux GOARCH=amd64
 export CC='zig cc -target x86_64-linux-musl'
 export PKG_CONFIG_PATH="/absolute/path/to/go-tui-frame/.tmp/native/linux-musl/amd64/prefix/share/pkgconfig"
-export CGO_CPPFLAGS="$(pkg-config --static --cflags libghostty-vt-static)"
-go build -ldflags='-linkmode=external -extldflags=-static' ./...
+/absolute/path/to/go-tui-frame/scripts/with-libghostty-cppflags go build -ldflags='-linkmode=external -extldflags=-static' ./...
 ```
 
-These commands replace any earlier `CGO_CPPFLAGS` value; keep other flags by
-prepending them.
+The script keeps any `CGO_CPPFLAGS` value already set, including one set with
+`go env -w`, and appends its own flags.
 
 For Linux arm64, first run `just native-linux arm64`, then change `GOARCH` to
 `arm64`, the C compiler target to `aarch64-linux-musl`, and the prefix segment to

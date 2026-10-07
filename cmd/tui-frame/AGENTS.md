@@ -25,7 +25,8 @@ From the repository root:
 - Before invoking Go checks directly, export the native `PKG_CONFIG_PATH` and
   `CGO_ENABLED=1`, and run `go` through `scripts/with-libghostty-cppflags`, as
   the recipes do. Without the wrapper, Go's build cache can reuse a binding
-  built in another checkout, which links that checkout's archive; see
+  built in another checkout, which links that checkout's archive, or a link and
+  test results from before the archive was rebuilt; see
   [native build setup](../../docs/internal/references/native-build.md).
 - `scripts/with-libghostty-cppflags go test -coverprofile=.tmp/cli-coverage.out ./cmd/tui-frame`
   measures unit coverage after that environment setup. Integration binaries can
