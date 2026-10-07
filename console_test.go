@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -1332,6 +1333,11 @@ func TestConsoleAppliesAndRestoresReportedModifyOtherKeys(t *testing.T) {
 
 func TestProbeKeepsPasteFramingAcrossSessionHandoff(t *testing.T) {
 	h := newHarness(t)
+	// Append the opening bracketed paste sequence and lead text directly to
+	// the terminal's DA1 reply, so the paste is received before the capability
+	// probe finishes. Injecting from an observer callback races probe's return
+	// against dispatcher delivery on loaded hosts.
+	h.replace(regexp.MustCompile(`\x1b\[\?62;22c`), "\x1b[?62;22c\x1b[200~before")
 	fd, device, _, err := inspectConsole(h.slave, h.slave)
 	if err != nil {
 		t.Fatal(err)
@@ -1345,26 +1351,12 @@ func TestProbeKeepsPasteFramingAcrossSessionHandoff(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	var once sync.Once
-	writeErr := make(chan error, 1)
-	events := newEventDispatcher(allEvents, sessionCancel(t), func(e Event) {
-		if e.Kind == OuterInput && strings.Contains(string(e.Bytes), "\x1b[?1049;2$y") {
-			once.Do(func() { writeErr <- h.writeReplies([]byte("\x1b[200~before")) })
-		}
-	})
+	events := newEventDispatcher(allEvents, sessionCancel(t), nil)
 	defer events.close()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if _, err := c.probe(ctx, events, capabilityTimeout); err != nil {
 		t.Fatal(err)
-	}
-	select {
-	case err := <-writeErr:
-		if err != nil {
-			t.Fatal(err)
-		}
-	default:
-		t.Fatal("paste was not injected after terminal capability replies")
 	}
 	packets, err := c.framer.Feed([]byte("\x11after\x1b[201~"))
 	if err != nil {
