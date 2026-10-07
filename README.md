@@ -41,7 +41,7 @@ The compiled consumer needs no separate libghostty runtime. macOS binaries use O
 go get github.com/alexgorbatchev/go-tui-frame
 ```
 
-Set up the native archive before compiling your consumer; `go get` installs the Go dependency, not the native build tools or archive. Build it with the `scripts/native.sh` that ships in the `go-tui-frame` module version your `go.mod` selects, so the Ghostty revision it builds matches that version; [Build a consumer](docs/internal/references/native-build.md#build-a-consumer) lists the commands.
+Set up the native archive before compiling your consumer; `go get` installs the Go dependency, not the native build tools or archive. Build it with the `scripts/native.sh` that ships in the `go-tui-frame` module version your `go.mod` selects, so the Ghostty revision it builds matches that version. `v1.0.0` ships no `scripts/` directory, so this needs a later `go-tui-frame` release. [Build a consumer](docs/internal/references/native-build.md#build-a-consumer) lists the commands.
 
 # Quick Start
 
