@@ -495,8 +495,10 @@ func (c *console) setModify(level int) error {
 
 // writeEntryModes writes every switchable mode as the terminal reported it at
 // entry. A mutually exclusive group is written resets first, then its set
-// modes in group order: on a terminal that keeps stale bits, such as Ghostty,
-// several may be reported set, and the last one written is the active mode.
+// modes in group order, so the last one written is the active mode. A terminal
+// that keeps the bits of replaced modes, such as Ghostty, can report several
+// set; which one was active cannot be queried, so the highest-numbered one is
+// left active even where the program before the session set a lower one last.
 func (c *console) writeEntryModes() error {
 	for _, m := range consoleModes {
 		if m == ansi.ModeAltScreenSaveCursor || !c.switchable(m) {
