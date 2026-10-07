@@ -548,10 +548,14 @@ func (s *session[T]) route(p input.Packet) error {
 		return err
 	}
 	if r.Disposition == Consume {
+		if !s.events.wants(Captured) {
+			return nil
+		}
 		if k, ok := p.Event.(uv.KeyEvent); ok {
 			in := Input{Raw: p.Raw, Key: k}
 			return s.events.emit(Event{Kind: Captured, Bytes: p.Raw, Input: &in, Disposition: Consume, Origin: r.Origin})
 		}
+		return nil
 	}
 	if len(r.Bytes) == 0 || r.Origin != "user-input" {
 		if err := s.events.emit(Event{Kind: Routed, Bytes: p.Raw, Origin: r.Origin, Disposition: r.Disposition}); err != nil {
@@ -632,7 +636,10 @@ func (s *session[T]) writeInput() error {
 var kittyKeyboardReply = regexp.MustCompile(`\A\x1b\[\?[0-9]+u\z`)
 
 func (s *session[T]) effects() error {
-	for _, e := range s.terminal.Effects() {
+	effects := s.terminal.Effects()
+	wantsProtocol := s.events.wants(Protocol)
+	for i := range effects {
+		e := &effects[i]
 		if e.Kind == emulator.Reply && !s.console.kittySupported && kittyKeyboardReply.Match(e.Bytes) {
 			// The child would enable a protocol the outer terminal never sends.
 			// Unanswered, the query reads as a terminal without it, so the reply
@@ -645,8 +652,10 @@ func (s *session[T]) effects() error {
 				return err
 			}
 		}
-		if err := s.events.emit(Event{Kind: Protocol, Origin: string(e.Kind), Effect: &e}); err != nil {
-			return err
+		if wantsProtocol {
+			if err := s.events.emit(Event{Kind: Protocol, Origin: string(e.Kind), Effect: e}); err != nil {
+				return err
+			}
 		}
 		if e.Kind == emulator.Bell {
 			if _, err := s.console.renderer.WriteString("\a"); err != nil {

@@ -568,3 +568,53 @@ func TestDeferredCapturePreservesSynchronizedCheckpoint(t *testing.T) {
 		})
 	}
 }
+
+func TestUnobservedRoutingAndEffectsDoNotAllocate(t *testing.T) {
+	s, _, _ := newRepaintSession(t, ansi.ModeReset, nil)
+	s.started = true
+	router, err := newInputRouter(s.terminal, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(router.close)
+	s.router = router
+	s.router.filter.handler = func(Input) Disposition { return Consume }
+
+	packet := input.Packet{
+		Raw:   []byte("\x03"),
+		Event: uv.KeyPressEvent{Code: 'c', Mod: uv.ModCtrl},
+	}
+
+	// 1. Verify consumed key routing allocates only for the handler's Input.Raw
+	// copy, and does not heap-allocate an Input or Event when Captured is unobserved.
+	if allocs := testing.AllocsPerRun(100, func() {
+		if err := s.route(packet); err != nil {
+			t.Fatal(err)
+		}
+	}); allocs != 1 {
+		t.Fatalf("unobserved consumed key allocated %.0f times, want 1", allocs)
+	}
+
+	// 2. Verify effects() does not heap-allocate an Effect when Protocol is unobserved.
+	// Write generates a CPR reply effect in libghostty; s.effects() must process
+	// that effect without adding any heap allocation over Write itself.
+	writeAllocs := testing.AllocsPerRun(100, func() {
+		if _, err := s.terminal.Write([]byte("\a")); err != nil {
+			t.Fatal(err)
+		}
+		_ = s.terminal.Effects()
+	})
+
+	totalAllocs := testing.AllocsPerRun(100, func() {
+		if _, err := s.terminal.Write([]byte("\a")); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.effects(); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	if totalAllocs > writeAllocs {
+		t.Fatalf("unobserved effects() added %.0f allocations (total %.0f > write %.0f), want 0", totalAllocs-writeAllocs, totalAllocs, writeAllocs)
+	}
+}
