@@ -9,7 +9,7 @@ description: >-
 author: alexgorbatchev
 metadata:
   created_on: 2026-10-01 13:23
-  last_modified: 2026-10-06 16:49
+  last_modified: 2026-10-06 17:10
   status: current
 ---
 
@@ -154,11 +154,13 @@ protocol endpoints; their stdout contains completion candidates and a final
 | Variable | Effective behavior |
 | --- | --- |
 | `AGENT` | Trim whitespace and ignore case; `1`, `true`, or `yes` selects agent mode; every other value selects human mode |
-| `COLUMNS` | A positive integer caps human help width; otherwise use detected stdout terminal width, falling back to 80 cells; agent help remains untruncated |
+| `COLUMNS` | A positive integer caps human help width; otherwise use detected stdout terminal width, falling back to 80 cells; agent help remains untruncated; removed from the child environment |
+| `LINES` | Removed from the child environment; the child's size comes from its PTY window |
 | `PATH` | Standard executable search for a child name without a path separator |
 | `TERM`, `COLORTERM` | Child receives `xterm-256color` and `truecolor` to describe its virtual endpoint |
-| `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `KITTY_WINDOW_ID`, `GHOSTTY_RESOURCES_DIR`, `GHOSTTY_BIN_DIR`, `WEZTERM_PANE`, `ITERM_SESSION_ID` | Removed from the child environment because physical-terminal vendor hints misdescribe the virtual endpoint |
-| Other variables | Inherited by the child process |
+| `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `LC_TERMINAL`, `TERM_FEATURES`, `KONSOLE_VERSION`, `VTE_VERSION`, `KITTY_WINDOW_ID`, `KITTY_PID`, `GHOSTTY_RESOURCES_DIR`, `GHOSTTY_BIN_DIR`, `GHOSTTY_SHELL_FEATURES`, `WEZTERM_EXECUTABLE`, `WEZTERM_PANE`, `ITERM_SESSION_ID`, `ITERM_PROFILE`, `TERM_SESSION_ID`, `XTERM_VERSION`, `MLTERM`, `TERMINAL_NAME`, `EAT_SHELL_INTEGRATION_DIR`, `WARP_HONOR_PS1`, `WARP_SESSION_ID`, `WARP_TERMINAL_SESSION_UUID`, `WARP_IS_LOCAL_SHELL_SESSION`, `VSCODE_INJECTION`, `TABBY_CONFIG_DIRECTORY`, `CURSOR_TRACE_ID`, `WT_SESSION` | Removed from the child environment because programs read them to choose something the virtual endpoint does not provide, such as Kitty graphics, Sixel, iTerm2 inline images, VTE's shell-integration sequences, Ghostty's terminfo on ssh hosts, or OSC 52 clipboard writes; without `WEZTERM_PANE`, `KITTY_WINDOW_ID`, `KITTY_PID`, and `ITERM_SESSION_ID`, remote-control commands in the child need an explicit target, such as `wezterm cli --pane-id` |
+| `TMUX`, `TMUX_PANE`, `WEZTERM_UNIX_SOCKET`, `KITTY_LISTEN_ON`, `ALACRITTY_SOCKET`, and similar socket handles | Inherited by the child, so `tmux`, `wezterm cli`, `kitten @`, and `alacritty msg` can reach the outer multiplexer or terminal; programs can also read them to choose tmux- or Alacritty-specific output |
+| Other variables, including ones that only name the outer terminal, such as `TERMINAL_EMULATOR` | Inherited by the child process |
 
 Human help uses a command tree and hides generated completion commands from
 that tree. Agent help describes the full public interface and starts with
