@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 20:10
-last_modified: 2026-10-07 11:29
+last_modified: 2026-10-07 11:38
 status: current
 ---
 
@@ -264,21 +264,31 @@ against 46.3 s for a cold build with the Zig packages already fetched and
 0.6 s for a rebuild on the same host. Each `ubuntu-latest` CPU model, and each
 runner image with a new kernel or macOS version, therefore costs one full
 native build and saves one entry of about 160 MiB. After every host a job
-lands on has saved its entry, runs hit, as long as each entry is used within
-the week after which GitHub evicts unused entries. The step that resolves the
-key prints the host block, so a miss shows which host field changed.
+lands on has saved its entry, runs hit while that entry stays in the cache.
+GitHub removes entries not accessed for 7 days. It also limits a repository's
+caches to 10 GB by default, and once that is reached it evicts entries in
+order of last access, so with many hosts an entry can go before a week has
+passed. The step that resolves the key prints the host block, so a miss shows
+which host field changed.
 
-The workflow sets no `restore-keys`: a restored entry from another host would
-rebuild the library anyway, and a restored source tree from another revision
-fails the script's revision check. `actions/cache` saves an entry only after
+The workflow sets no `restore-keys`. A restore key that ends at `-inputs-`
+would match an entry with the same `scripts/native.sh`, and so the same
+Ghostty revision, from another host. That restore would save only the archive
+download and the Zig package fetch, since the library still rebuilds. The
+entry saved after it would hold both hosts' cache objects, and each later
+host would add its own. `actions/cache` saves an entry only after
 a successful job and never replaces an existing one. On a hit, Zig re-hashes
 the restored files, whose inodes changed, and reuses its cached outputs when
 their contents match. Locally, a `.tmp/native` restored from a tar of those
 four directories, without the archive, rebuilt in under two seconds with no
 download and produced the same `libghostty-vt.a`. On CI, the macOS job hit
 the cache on its second run (CI run 37665156959) and did not download the
-archive. The Linux job missed on that run because its host digest changed, so
-its hit rate is still to be confirmed on real CI.
+archive. The Linux job missed on that run because its `inputs` digest
+changed. The host block is the only part of that digest that varies between
+runs, but those runs did not print it, so the host is the inferred cause. CI
+run 37667067041 (`e9fc4fa`) also missed on Linux and saved a third key, so
+each of the first three Linux runs produced a distinct key. The Linux hit rate
+is still to be confirmed on real CI.
 
 The same gate passes locally. The race suite's package results follow; the
 elapsed times are indicative, with load averages of 4.9–5.7 over 1 minute

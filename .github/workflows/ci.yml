@@ -91,9 +91,11 @@ jobs:
       # Restores the extracted source, which carries its revision marker, the
       # installed prefix and both Zig caches, so `just native` neither
       # downloads the archive nor recompiles. There are no restore-keys: a
-      # prefix match would restore another revision's source, which
-      # scripts/native.sh refuses. The action saves only after a successful
-      # job, and only when no entry exists for the key.
+      # key ending at `-inputs-` would restore another host's entry for the
+      # same revision, which saves only the download and the package fetch,
+      # since the library still rebuilds, and the entry saved afterwards
+      # would hold both hosts' cache objects. The action saves only after a
+      # successful job, and only when no entry exists for the key.
       - name: Restore native build cache
         uses: actions/cache@v6
         with:
