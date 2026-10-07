@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
+	"github.com/alexgorbatchev/go-tui-frame/internal/emulator"
 	"github.com/alexgorbatchev/go-tui-frame/internal/input"
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
@@ -66,9 +69,49 @@ func TestRegionCanvasReusedAndSnapshotsRemainOwned(t *testing.T) {
 	if snapshots[0].Terminal.Cells[0].Content != " " || snapshots[1].Terminal.Cells[0].Content != "c" {
 		t.Fatal("retained callback snapshot borrowed live display storage")
 	}
+	for i, snap := range snapshots {
+		if &snap.Terminal.Cells[0] != &snap.Terminal.Native.Cells[0] {
+			t.Fatalf("callback snapshot %d holds Terminal.Cells and Native.Cells as separate grids", i)
+		}
+		if &snap.Terminal.Cells[0] == &s.snapshot.Terminal.Cells[0] {
+			t.Fatalf("callback snapshot %d shares the session's live cell grid", i)
+		}
+	}
 	snapshots[1].Terminal.Cells[0].Content = "mutated"
 	if s.snapshot.Terminal.Cells[0].Content != "c" {
 		t.Fatal("callback mutation reached internal display storage")
+	}
+}
+
+var cloneSink Snapshot
+
+// allocatedBytes reports the heap bytes one call of f allocates, averaged over
+// runs, on one P as testing.AllocsPerRun measures allocation counts.
+func allocatedBytes(runs int, f func()) uint64 {
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
+	f()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for range runs {
+		f()
+	}
+	runtime.ReadMemStats(&after)
+	return (after.TotalAlloc - before.TotalAlloc) / uint64(runs)
+}
+
+func TestCloneSnapshotCopiesSharedCellGridOnce(t *testing.T) {
+	const cells = 120 * 40
+	snap := sharedCellSnapshot(cells)
+	clone := func() { cloneSink = cloneSnapshot(snap) }
+	if allocs := testing.AllocsPerRun(20, clone); allocs != 2 {
+		t.Fatalf("cloneSnapshot allocated %.0f times, want 2: one uv.Cell grid and one native cell grid", allocs)
+	}
+	grid := uint64(cells * unsafe.Sizeof(uv.Cell{}))
+	owned := grid + uint64(cells*unsafe.Sizeof(emulator.NativeCell{}))
+	// A second uv.Cell grid would add grid bytes; half of it bounds the
+	// allocator's size-class rounding of the two owned grids.
+	if got := allocatedBytes(20, clone); got >= owned+grid/2 {
+		t.Fatalf("cloneSnapshot allocated %d bytes per call, want about %d for one shared cell grid", got, owned)
 	}
 }
 

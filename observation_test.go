@@ -13,6 +13,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/alexgorbatchev/go-tui-frame/internal/emulator"
 	uv "github.com/charmbracelet/ultraviolet"
 	"golang.org/x/sys/unix"
 )
@@ -113,6 +114,77 @@ func TestObservationBudgetBoundsBacklogRatherThanLoneRecords(t *testing.T) {
 				if g, w := recordSummary(got[i]), recordSummary(want[i]); g != w {
 					t.Fatalf("delivered record %d = %s, want %s", i, g, w)
 				}
+			}
+		})
+	}
+}
+
+// sharedCellSnapshot returns a snapshot shaped like the session's live one:
+// Terminal.Cells and Terminal.Native.Cells are the same cell grid.
+func sharedCellSnapshot(cells int) Snapshot {
+	native := NativeState{Cells: make([]uv.Cell, cells), NativeCells: make([]emulator.NativeCell, cells)}
+	return Snapshot{Terminal: TerminalSnapshot{Cells: native.Cells, Native: native}}
+}
+
+func TestObservedSnapshotsShareOneOwnedCellGrid(t *testing.T) {
+	var got []Event
+	d, entered, release := pausedDispatcher(t, func(ev Event) { got = append(got, ev) })
+	live := sharedCellSnapshot(2)
+	live.Terminal.Cells[0] = uv.Cell{Content: "a", Width: 1}
+	if err := d.emit(Event{Kind: StateChanged, Snapshot: &live}); err != nil {
+		t.Fatal(err)
+	}
+	<-entered
+	if err := d.emit(Event{Kind: StateChanged, Snapshot: &live}); err != nil {
+		t.Fatal(err)
+	}
+	live.Terminal.Cells[0].Content = "live"
+	release()
+	d.close()
+	if len(got) != 2 {
+		t.Fatalf("observed %d snapshots, want 2", len(got))
+	}
+	for i, ev := range got {
+		term := ev.Snapshot.Terminal
+		if &term.Cells[0] != &term.Native.Cells[0] {
+			t.Fatalf("snapshot %d holds Terminal.Cells and Native.Cells as separate grids", i)
+		}
+		if &term.Cells[0] == &live.Terminal.Cells[0] || term.Cells[0].Content != "a" {
+			t.Fatalf("snapshot %d borrowed live cell storage: %q", i, term.Cells[0].Content)
+		}
+	}
+	got[0].Snapshot.Terminal.Native.Cells[0].Content = "observer"
+	if got[0].Snapshot.Terminal.Cells[0].Content != "observer" {
+		t.Fatal("a native cell edit did not reach the shared Terminal.Cells grid")
+	}
+	if got[1].Snapshot.Terminal.Cells[0].Content != "a" || live.Terminal.Cells[0].Content != "live" {
+		t.Fatal("an observer's cell edit reached another snapshot or live storage")
+	}
+}
+
+func TestEventWeightCountsSharedCellGridOnce(t *testing.T) {
+	shared := sharedCellSnapshot(4)
+	shared.Terminal.Cells[0] = uv.Cell{Content: "grid", Width: 1, Link: uv.Link{URL: "https://example.com", Params: "id=1"}}
+	nativeOnly := shared
+	nativeOnly.Terminal.Cells = nil
+	separate := shared
+	separate.Terminal.Cells = slices.Clone(shared.Terminal.Cells)
+	grid := 0
+	for _, c := range shared.Terminal.Cells {
+		grid += int(unsafe.Sizeof(c)) + len(c.Content) + len(c.Link.URL) + len(c.Link.Params)
+	}
+	base := eventWeight(Event{Kind: StateChanged, Snapshot: &nativeOnly})
+	for _, tt := range []struct {
+		name string
+		snap Snapshot
+		want int
+	}{
+		{"shared grid", shared, base},
+		{"separate grid", separate, base + grid},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := eventWeight(Event{Kind: StateChanged, Snapshot: &tt.snap}); got != tt.want {
+				t.Fatalf("eventWeight = %d, want %d", got, tt.want)
 			}
 		})
 	}

@@ -83,6 +83,8 @@ type PTYSnapshot struct {
 }
 
 // TerminalSnapshot owns its cell storage rather than borrowing emulator cells.
+// Cells and Native.Cells share that storage within one snapshot: an edit to
+// either is visible through the other, and never reaches another snapshot.
 // On a 256-color outer terminal, a cell color that uses an inherited palette
 // entry the child has not redefined is an ansi.BasicColor (entries 0-15) or
 // ansi.IndexedColor index; a 16-color outer terminal does this for entries

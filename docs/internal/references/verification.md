@@ -261,6 +261,7 @@ PTY. They verify:
 - immediate outer input-mode writes;
 - reusable cleared region canvases;
 - independent retained drawing snapshots;
+- one shared cell grid per snapshot copy;
 - zero allocations for unchanged rendering and warmed input delivery;
 - partial-write compaction and input origins;
 - composition limited to damaged rows;
@@ -268,9 +269,10 @@ PTY. They verify:
 - exit-only snapshot freshness;
 - synchronized-update checkpoints.
 
-Each drawing callback receives its own copy of the snapshot. Capture also
-allocates when the geometry changes, for new graphemes and styles, and in native
-getter calls.
+Each drawing callback receives its own copy of the snapshot. The copy holds
+one cell grid, which `Terminal.Cells` and `Terminal.Native.Cells` share, and
+the observation budget weighs that grid once. Capture also allocates when the
+geometry changes, for new graphemes and styles, and in native getter calls.
 
 ### Default foreground and background colors
 

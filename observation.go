@@ -12,6 +12,7 @@ import (
 
 	"github.com/alexgorbatchev/go-tui-frame/internal/emulator"
 	"github.com/alexgorbatchev/go-tui-frame/internal/process"
+	uv "github.com/charmbracelet/ultraviolet"
 )
 
 const (
@@ -304,8 +305,8 @@ func eventWeight(ev Event) int {
 				w += len(value)
 			}
 		}
-		for _, cell := range s.Terminal.Cells {
-			w += int(unsafe.Sizeof(cell)) + len(cell.Content) + len(cell.Link.URL) + len(cell.Link.Params)
+		if !sharesCellGrid(s.Terminal) {
+			w += cellsWeight(s.Terminal.Cells)
 		}
 		w += nativeStateWeight(s.Terminal.Native)
 		w += processWeight(s.Child.OperatingSystem)
@@ -332,7 +333,12 @@ func eventWeight(ev Event) int {
 func nativeStateWeight(s emulator.State) int {
 	w := len(s.Title) + len(s.Directory) + len(s.Modes)*(int(unsafe.Sizeof(0))+int(unsafe.Sizeof(false))) + len(s.ModeErrors)*(int(unsafe.Sizeof(0))+int(unsafe.Sizeof(error(nil))))
 	w += len(s.NativeCells) * int(unsafe.Sizeof(emulator.NativeCell{}))
-	for _, c := range s.Cells {
+	return w + cellsWeight(s.Cells)
+}
+
+func cellsWeight(cells []uv.Cell) int {
+	w := 0
+	for _, c := range cells {
 		w += int(unsafe.Sizeof(c)) + len(c.Content) + len(c.Link.URL) + len(c.Link.Params)
 	}
 	return w

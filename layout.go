@@ -103,8 +103,13 @@ func drawClipped(dst uv.Screen, src uv.Screen, area image.Rectangle) {
 func cloneSnapshot(s Snapshot) Snapshot {
 	s.Child.Args = slices.Clone(s.Child.Args)
 	s.Child.Environment = slices.Clone(s.Child.Environment)
-	s.Terminal.Cells = slices.Clone(s.Terminal.Cells)
+	shared := sharesCellGrid(s.Terminal)
 	s.Terminal.Native = emulator.CloneState(s.Terminal.Native)
+	if shared {
+		s.Terminal.Cells = s.Terminal.Native.Cells
+	} else {
+		s.Terminal.Cells = slices.Clone(s.Terminal.Cells)
+	}
 	s.Child.OperatingSystem = process.Clone(s.Child.OperatingSystem)
 	s.Child.SessionProcesses = slices.Clone(s.Child.SessionProcesses)
 	for i := range s.Child.SessionProcesses {
@@ -117,4 +122,10 @@ func cloneSnapshot(s Snapshot) Snapshot {
 		s.Child.PTY.Settings = new(*s.Child.PTY.Settings)
 	}
 	return s
+}
+
+// sharesCellGrid reports whether Cells is the grid Native.Cells holds, as in
+// the session snapshot, so the grid is copied and weighed once.
+func sharesCellGrid(t TerminalSnapshot) bool {
+	return len(t.Cells) > 0 && len(t.Cells) == len(t.Native.Cells) && &t.Cells[0] == &t.Native.Cells[0]
 }
