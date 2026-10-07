@@ -184,7 +184,7 @@ type session[T any] struct {
 	paintedNativeCursor                                       ghostty.RenderStateCursor
 	paintedCursorColor                                        ghostty.ColorRGB
 	paintedCursorColorSet                                     bool
-	metadataDirty                                             bool
+	metadataDirty, scrollDirty                                bool
 	master                                                    *os.File
 	fd                                                        int
 	wakeRead, wakeWrite                                       *os.File
@@ -356,6 +356,7 @@ func (s *session[T]) captureState() error {
 	}
 	state := s.nextState
 	s.metadataDirty = s.metadataDirty || regionMetadataChanged(s.state, state)
+	s.scrollDirty = s.scrollDirty || scrollbackChanged(s.state, state)
 	s.nextState, s.state = s.state, state
 	s.statePending = false
 	s.snapshot.ObservedAt = time.Now()
@@ -397,12 +398,11 @@ func (s *session[T]) render(force bool) error {
 			return err
 		}
 	}
-	force = force || s.metadataDirty
-	if force || s.frame.regionsDirty() {
+	if s.sampleDue(force) {
 		s.collectMetadata()
 	}
 	s.frame.compose(&s.screen, s.geometry, s.snapshot, repaintDamage{
-		full: !s.composed, regions: force, rows: s.terminal.DirtyRows(),
+		full: !s.composed, regions: force || s.metadataDirty || s.scrollDirty, rows: s.terminal.DirtyRows(),
 	})
 	c := s.console
 	cursor := s.snapshot.Terminal.Cursor
@@ -432,7 +432,7 @@ func (s *session[T]) render(force bool) error {
 	if err := c.renderer.Flush(); err != nil {
 		return fmt.Errorf("render outer terminal: %w", err)
 	}
-	s.metadataDirty = false
+	s.metadataDirty, s.scrollDirty = false, false
 	s.composed = true
 	s.paintedCursor = cursor
 	s.paintedNativeCursor = native.Cursor

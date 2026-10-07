@@ -34,13 +34,32 @@ func (s *session[T]) collectPTY() {
 	s.snapshot.Child.PTY = PTYSnapshot{Window: window, Settings: settings, WindowError: windowErr, SettingsError: settingsErr, ObservedAt: time.Now(), ForegroundGroup: Observation[int]{Value: foreground, Available: foregroundErr == nil, Source: "TIOCGPGRP on owned PTY", Error: foregroundErr}}
 }
 
-func (f *Frame[T]) regionsDirty() bool {
+// sampleDue reports whether a render samples processes and the PTY. A
+// lifecycle render always samples, because Started and Resized carry its
+// snapshot. Any other render samples only for a reader, a configured region
+// or a selected event that carries a snapshot, and only when metadata changed,
+// a region was invalidated, or the scroll counters changed after the last
+// sample grew older than scrollSampleAge.
+func (s *session[T]) sampleDue(lifecycle bool) bool {
+	if lifecycle {
+		return true
+	}
+	configured, invalidated := s.frame.regionDemand()
+	if !configured && !s.events.wantsAny(snapshotEvents) {
+		return false
+	}
+	return s.metadataDirty || invalidated ||
+		s.scrollDirty && time.Since(s.snapshot.Child.PTY.ObservedAt) >= scrollSampleAge
+}
+
+// regionDemand reports whether any region is configured and whether one
+// awaits drawing after an invalidation.
+func (f *Frame[T]) regionDemand() (configured, invalidated bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, r := range f.regions {
-		if r.dirty {
-			return true
-		}
+		configured = configured || r.draw != nil
+		invalidated = invalidated || r.dirty
 	}
-	return false
+	return configured, invalidated
 }

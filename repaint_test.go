@@ -449,6 +449,118 @@ func TestChildTextDoesNotRedrawRegionsOrResampleProcesses(t *testing.T) {
 	}
 }
 
+// scrollPrimary scrolls the primary screen and refreshes the frame without
+// lifecycle forcing, failing unless the scrollback counters changed.
+func scrollPrimary(t *testing.T, s *session[string]) {
+	t.Helper()
+	total := s.state.TotalRows
+	if _, err := s.terminal.Write([]byte(strings.Repeat("line\r\n", 8))); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.refresh(false); err != nil {
+		t.Fatal(err)
+	}
+	if s.state.TotalRows == total {
+		t.Fatalf("output did not scroll the primary screen: total rows stayed %d", total)
+	}
+}
+
+// refreshWith writes text to the child terminal and refreshes the frame
+// without lifecycle forcing.
+func refreshWith(t *testing.T, s *session[string], text string) {
+	t.Helper()
+	if _, err := s.terminal.Write([]byte(text)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.refresh(false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestScrollOnlyRedrawReusesRecentProcessSample(t *testing.T) {
+	draws := 0
+	s, _, _ := newRepaintSession(t, ansi.ModeReset, func(DrawContext[string]) { draws++ })
+	observed := s.snapshot.Child.PTY.ObservedAt
+	scrollPrimary(t, s)
+	if draws != 2 {
+		t.Fatalf("scrollback change did not redraw regions: draws=%d", draws)
+	}
+	if !s.snapshot.Child.PTY.ObservedAt.Equal(observed) {
+		t.Fatal("scroll-only redraw resampled processes and the PTY within the sample age bound")
+	}
+
+	s.snapshot.Child.PTY.ObservedAt = time.Now().Add(-scrollSampleAge)
+	stale := s.snapshot.Child.PTY.ObservedAt
+	scrollPrimary(t, s)
+	if !s.snapshot.Child.PTY.ObservedAt.After(stale) {
+		t.Fatal("scroll-only redraw reused a sample older than the age bound")
+	}
+
+	observed = s.snapshot.Child.PTY.ObservedAt
+	refreshWith(t, s, "\x1b]2;scrolled title\x07")
+	if !s.snapshot.Child.PTY.ObservedAt.After(observed) {
+		t.Fatal("title change did not resample processes and the PTY")
+	}
+
+	observed = s.snapshot.Child.PTY.ObservedAt
+	if err := s.frame.InvalidateHeader("next"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.render(false); err != nil {
+		t.Fatal(err)
+	}
+	if !s.snapshot.Child.PTY.ObservedAt.After(observed) {
+		t.Fatal("region invalidation did not resample processes and the PTY")
+	}
+}
+
+func TestSessionWithoutSampleConsumersSamplesOnlyAtLifecycle(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		kinds    []EventKind
+		consumed bool
+	}{
+		{name: "no observer"},
+		{name: "transport observer", kinds: []EventKind{ChildOutput, OuterInput, Routed}},
+		{name: "state observer", kinds: []EventKind{StateChanged}, consumed: true},
+		{name: "exit observer", kinds: []EventKind{Exited}, consumed: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s, _, _ := newRepaintSession(t, ansi.ModeReset, nil)
+			if tt.kinds != nil {
+				mask, err := selectEvents(tt.kinds)
+				if err != nil {
+					t.Fatal(err)
+				}
+				s.events = newEventDispatcher(mask, sessionCancel(t), func(Event) {})
+				t.Cleanup(s.events.close)
+			}
+			observed := s.snapshot.Child.PTY.ObservedAt
+			if observed.IsZero() {
+				t.Fatal("initial lifecycle refresh did not sample")
+			}
+			s.snapshot.Child.PTY.ObservedAt = time.Now().Add(-scrollSampleAge)
+			stale := s.snapshot.Child.PTY.ObservedAt
+			scrollPrimary(t, s)
+			if got := s.snapshot.Child.PTY.ObservedAt.After(stale); got != tt.consumed {
+				t.Fatalf("stale scroll-only render resampled=%t, want %t", got, tt.consumed)
+			}
+			observed = s.snapshot.Child.PTY.ObservedAt
+			refreshWith(t, s, "\x1b]2;unread title\x07")
+			if got := s.snapshot.Child.PTY.ObservedAt.After(observed); got != tt.consumed {
+				t.Fatalf("title change resampled=%t, want %t", got, tt.consumed)
+			}
+			observed = s.snapshot.Child.PTY.ObservedAt
+			if err := s.applyGeometry(s.geometry); err != nil {
+				t.Fatal(err)
+			}
+			if !s.snapshot.Child.PTY.ObservedAt.After(observed) {
+				t.Fatal("geometry change did not sample processes and the PTY")
+			}
+		})
+	}
+}
+
 func TestOuterRepaintUsesNegotiatedSynchronizedOutput(t *testing.T) {
 	for _, tt := range []struct {
 		name string

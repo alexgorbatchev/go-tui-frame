@@ -79,8 +79,16 @@ func selectEvents(kinds []EventKind) (eventMask, error) {
 	return mask, nil
 }
 
+// snapshotEvents selects the events that carry a Snapshot.
+var snapshotEvents = eventBit(Started) | eventBit(Exited) | eventBit(Resized) | eventBit(StateChanged)
+
 func (d *eventDispatcher) wants(kind EventKind) bool {
-	return d != nil && d.kinds&eventBit(kind) != 0
+	return d.wantsAny(eventBit(kind))
+}
+
+// wantsAny reports whether any event in mask is selected.
+func (d *eventDispatcher) wantsAny(mask eventMask) bool {
+	return d != nil && d.kinds&mask != 0
 }
 
 type eventRecord struct {

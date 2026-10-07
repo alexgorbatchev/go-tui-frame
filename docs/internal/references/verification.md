@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 20:10
-last_modified: 2026-10-06 22:40
+last_modified: 2026-10-07 06:55
 status: current
 ---
 
@@ -239,6 +239,10 @@ PTY. They verify:
 - immediate protocol replies;
 - child text and cursor changes that neither redraw regions nor resample
   processes, and metadata changes that redraw regions;
+- scroll-only redraws that reuse a process and PTY sample younger than
+  250 ms, while title changes and region invalidation resample;
+- no process and PTY sample outside startup and resize without a configured
+  region or a selected snapshot-carrying observation;
 - negotiated outer synchronized output;
 - restoration of an observed entry hold;
 - palette colors on 256-color, 16-color and truecolor outer terminals.
