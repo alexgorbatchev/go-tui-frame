@@ -52,11 +52,21 @@ jobs:
           command -v pkg-config
 
       # The native build cache key covers every input of `just native` that
-      # the restored files depend on: the Zig binary, scripts/native.sh (the
-      # Ghostty revision, archive SHA-256, Zig version and build flags), the
-      # root, target, prefix and cache the justfile passes to it, and the
-      # target Zig resolves for this host. The macOS target is `native`, and
-      # Ghostty's build tools compile for the host on both systems.
+      # the restored files depend on:
+      # - matrix.zig_sha: the Zig binary that compiled them.
+      # - scripts/native.sh: the Ghostty revision, archive SHA-256, Zig
+      #   version and zig build flags.
+      # - the root, target, prefix and cache names the justfile passes to the
+      #   script: the root's absolute path is part of Zig's cache manifests.
+      # - the host target from `zig targets`: CPU model, features and OS
+      #   version. The archive does not depend on it (Ghostty replaces macOS
+      #   `native` with a generic macOS 13.0 target, and the Linux target is
+      #   explicit), but Ghostty's Unicode table generators compile for the
+      #   host, and Zig's cache digests include the target and the paths of
+      #   generated files. Without it, a cache restored on another host would
+      #   recompile the library on every run. With it, a runner image's new
+      #   kernel or macOS version, or another CPU model, costs one full build
+      #   and saves another entry.
       - name: Resolve native build cache inputs
         id: native
         shell: bash
