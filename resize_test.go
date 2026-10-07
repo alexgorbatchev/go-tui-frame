@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"github.com/alexgorbatchev/go-tui-frame/internal/emulator"
 	"github.com/alexgorbatchev/go-tui-frame/internal/input"
 	uv "github.com/charmbracelet/ultraviolet"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/creack/pty"
 	"golang.org/x/sys/unix"
 )
@@ -279,5 +281,102 @@ func TestRunAppliesResizeDuringStartup(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("Run did not finish", ctx.Err())
+	}
+}
+
+// stateFieldDiff names each field of got that is not deeply equal to want's.
+func stateFieldDiff(got, want emulator.State) []string {
+	g, w := reflect.ValueOf(got), reflect.ValueOf(want)
+	var diff []string
+	for i := range g.NumField() {
+		if !reflect.DeepEqual(g.Field(i).Interface(), w.Field(i).Interface()) {
+			diff = append(diff, fmt.Sprintf("%s = %v, want %v", g.Type().Field(i).Name, g.Field(i), w.Field(i)))
+		}
+	}
+	return diff
+}
+
+// Resize and the render-hold deadline change the child's native terminal
+// without child output, so no child read refreshes the routing state; the
+// refresh that follows them must leave exactly what InputState reports.
+func TestNativeMutationRefreshesRoutingState(t *testing.T) {
+	type modes = map[ansi.DECMode]ansi.ModeSetting
+	for _, tt := range []struct {
+		name    string
+		reports modes
+		child   string
+		mutate  func(t *testing.T, s *session[string])
+		// outer is routed after the mutation; the child must receive routed.
+		outer, routed string
+		held          bool
+	}{
+		{
+			// The outer terminal keeps pixel reports on and the child asks for
+			// cells, so the routed cell depends on the resized cell geometry.
+			name: "resize", reports: modes{1006: ansi.ModeReset, 1016: ansi.ModePermanentlySet},
+			child: "\x1b[?1000;1006h",
+			mutate: func(t *testing.T, s *session[string]) {
+				s.console.cellWidth, s.console.cellHeight = 12, 24
+				if err := s.applyGeometry(s.geometry); err != nil {
+					t.Fatal(err)
+				}
+			},
+			outer: "\x1b[<0;61;91M", routed: "\x1b[<0;6;4M",
+		},
+		{
+			name: "hold deadline", child: "\x1b[?1004h\x1b[?2026h",
+			mutate: func(t *testing.T, s *session[string]) {
+				s.holdDeadline = time.Now().Add(-time.Second)
+				if err := s.deadlines(); err != nil {
+					t.Fatal(err)
+				}
+			},
+			outer: "\x1b[I", routed: "\x1b[I",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s, _, slave := newRepaintSession(t, ansi.ModeReset, nil)
+			c := s.console
+			c.cellWidth, c.cellHeight = harnessCellWidth, harnessCellHeight
+			router, err := newInputRouter(s.terminal, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(router.close)
+			s.router = router
+			reportModes(t, c, tt.reports)
+			if err := s.applyGeometry(s.geometry); err != nil {
+				t.Fatal(err)
+			}
+			readRepaintChunk(t, s, slave, tt.child)
+			tt.mutate(t, s)
+			var want emulator.State
+			if err := s.terminal.InputState(&want); err != nil {
+				t.Fatal(err)
+			}
+			if diff := stateFieldDiff(s.inputState, want); len(diff) != 0 {
+				t.Errorf("routing state after %s differs from InputState:\n%s", tt.name, strings.Join(diff, "\n"))
+			}
+			if s.inputState.Held != tt.held {
+				t.Errorf("routing state held = %v, want %v", s.inputState.Held, tt.held)
+			}
+			queued := len(s.queue)
+			packets, err := input.New().Feed([]byte(tt.outer))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, p := range packets {
+				if err := s.route(p); err != nil {
+					t.Fatalf("routing %q failed: %v", tt.outer, err)
+				}
+			}
+			var routed []byte
+			for _, p := range s.queue[queued:] {
+				routed = append(routed, p.bytes[p.offset:]...)
+			}
+			if string(routed) != tt.routed {
+				t.Errorf("child received %q for outer %q, want %q", routed, tt.outer, tt.routed)
+			}
+		})
 	}
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -334,21 +333,13 @@ func (s *session[T]) refreshState() error {
 	if err := s.captureState(); err != nil {
 		return err
 	}
-	state := s.state
-	// Keep separate routing maps: per-read updates must not mutate the last
-	// metadata sample used to decide whether region callbacks need redrawing.
-	input := &s.inputState
-	if input.Modes == nil {
-		input.Modes = make(map[ghostty.Mode]bool, len(state.Modes))
-		input.ModeErrors = make(map[ghostty.Mode]error)
+	// The routing state keeps its own maps, because a child read updates it
+	// while s.state stays the metadata sample regionMetadataChanged compares.
+	// The capture just read the routing values, so InputState copies the
+	// emulator's sample without a native call and owns the field list.
+	if err := s.terminal.InputState(&s.inputState); err != nil {
+		return err
 	}
-	clear(input.Modes)
-	clear(input.ModeErrors)
-	maps.Copy(input.Modes, state.Modes)
-	maps.Copy(input.ModeErrors, state.ModeErrors)
-	input.Size, input.Held, input.Alternate = state.Size, state.Held, state.Alternate
-	input.KittyKeyboardFlags, input.ModifyOtherKeys2 = state.KittyKeyboardFlags, state.ModifyOtherKeys2
-	input.MouseTracking, input.MouseTrackingMode = state.MouseTracking, state.MouseTrackingMode
 	return s.syncInput()
 }
 
