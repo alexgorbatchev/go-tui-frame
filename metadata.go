@@ -1,6 +1,7 @@
 package frame
 
 import (
+	"slices"
 	"time"
 
 	"github.com/alexgorbatchev/go-tui-frame/v2/internal/process"
@@ -15,11 +16,22 @@ func (s *session[T]) collectMetadata() {
 		return
 	}
 	child := &s.snapshot.Child
-	if !s.waited {
-		child.OperatingSystem = process.Read(child.PID)
-	}
 	child.SessionProcesses, child.SessionError = process.List(child.PID)
+	if !s.waited {
+		child.OperatingSystem = leaderSample(child.PID, child.SessionProcesses)
+	}
 	s.collectPTY()
+}
+
+// leaderSample returns the launch leader's entry in members, the inventory of
+// the session it leads, so the leader is read once per sample. It reads the
+// leader itself when the inventory lacks it, as after a partial enumeration
+// failure or a race with the leader's exit.
+func leaderSample(pid int, members []process.Snapshot) process.Snapshot {
+	if i := slices.IndexFunc(members, func(p process.Snapshot) bool { return p.PID == pid }); i >= 0 {
+		return members[i]
+	}
+	return process.Read(pid)
 }
 
 // collectPTY samples the child PTY through its master. Once cleanup has closed
