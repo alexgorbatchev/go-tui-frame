@@ -359,12 +359,12 @@ in Go 1.27.1's `cmd/go/internal/work/exec.go`). The recipes add the prefix's
 include flags and the archive's SHA-256 to `CGO_CPPFLAGS`, so a cached
 libghostty package or link is reused only for the same native prefix and
 archive; see the [pinned native build](native-build.md). In
-[the CLI tests](../../../cmd/tui-frame/native_cache_test.go),
-`TestBuildCacheKeepsNativePrefixesApart` builds against two prefixes with one
-build cache and removes the first before building the second.
-`TestBuildCacheFollowsNativeArchiveContents` changes the archive in place and
-requires the rebuilt executable to get a new build ID. Both audited
-cross-builds used an empty `GOCACHE`, so each linked this checkout's archive.
+[the CLI tests](../../../cmd/tui-frame/native_cache_test.go), the
+`TestBuildCache` subtests share one build cache. `KeepsNativePrefixesApart`
+builds against two prefixes and removes the first before building the second.
+`FollowsNativeArchiveContents` changes the archive in place and requires the
+rebuilt executable to get a new build ID. Both audited cross-builds used an
+empty `GOCACHE`, so each linked this checkout's archive.
 
 These audits follow the [pinned native build](native-build.md). Source changes
 require rebuilding and reauditing the resulting binaries. Linux x86_64 tests
