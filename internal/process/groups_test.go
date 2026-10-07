@@ -192,3 +192,33 @@ func TestGroupsEnumeratesAllOwnedSessionGroups(t *testing.T) {
 		t.Fatal("enumeration included parent group outside child session")
 	}
 }
+
+// List and Groups enumerate the same session members: every group List
+// reports is one Groups returns, and each group Groups returns has a member in
+// List.
+func TestListAndGroupsAgreeOnSessionMembers(t *testing.T) {
+	leader, member := processFamily(t)
+	members, err := List(leader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	groups, err := Groups(leader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listed []int
+	for _, m := range members {
+		if !m.ProcessGroup.Available {
+			t.Fatalf("process group of member %d unavailable: %v", m.PID, m.ProcessGroup.Error)
+		}
+		if !slices.Contains(listed, m.ProcessGroup.Value) {
+			listed = append(listed, m.ProcessGroup.Value)
+		}
+	}
+	slices.Sort(listed)
+	want := []int{leader, member}
+	slices.Sort(want)
+	if !slices.Equal(listed, want) || !slices.Equal(groups, want) {
+		t.Fatalf("List groups = %v, Groups = %v, want both %v", listed, groups, want)
+	}
+}

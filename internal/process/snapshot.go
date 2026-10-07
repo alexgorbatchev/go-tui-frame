@@ -7,8 +7,6 @@ import (
 	"math/bits"
 	"slices"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 // Field distinguishes an unavailable observation from an observed zero value.
@@ -106,26 +104,11 @@ func missing(pid int, err error) Snapshot {
 
 // List returns currently observable members of exactly sessionID, ordered by PID.
 // A member that exits during sampling remains visible with per-field errors.
+// A failed enumeration returns the members found before it with the error.
 func List(sessionID int) ([]Snapshot, error) {
-	if sessionID <= 0 {
-		return nil, fmt.Errorf("enumerating session %d: invalid session ID", sessionID)
-	}
-	pids, err := processIDs()
-	if err != nil {
-		return nil, err
-	}
+	members, err := sessionMembers(sessionID)
 	var result []Snapshot
-	for _, pid := range pids {
-		sid, err := unix.Getsid(pid)
-		if errors.Is(err, unix.ESRCH) {
-			continue
-		}
-		if err != nil {
-			return result, fmt.Errorf("reading session for process %d: %w", pid, err)
-		}
-		if sid != sessionID {
-			continue
-		}
+	for _, pid := range members {
 		s := Read(pid)
 		if s.SessionID.Available && s.SessionID.Value != sessionID {
 			continue
@@ -133,7 +116,7 @@ func List(sessionID int) ([]Snapshot, error) {
 		result = append(result, s)
 	}
 	slices.SortFunc(result, func(a, b Snapshot) int { return a.PID - b.PID })
-	return result, nil
+	return result, err
 }
 
 // Clone separates all mutable observation storage.
