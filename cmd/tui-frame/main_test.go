@@ -80,18 +80,30 @@ func TestExecuteUsesNativeCobraAndChildExitStatuses(t *testing.T) {
 // its own.
 func TestExecuteCtrlQStopsItsRealChild(t *testing.T) {
 	for _, tt := range []struct {
-		name   string
-		script string
-		code   int
+		name string
+		// child is the framed command; it creates ready once it runs.
+		child func(ready string) []string
+		code  int
 	}{
 		// The frame's SIGTERM ends the child: the shell's 128+15.
-		{"terminated", `printf started > "$1"; exec sleep 30`, 143},
+		{"terminated", func(ready string) []string {
+			return []string{"sh", "-c", `printf started > "$1"; exec sleep 30`, "sh", ready}
+		}, 143},
 		// The child handles SIGTERM and exits with a status of its own.
-		{"handles SIGTERM", `trap 'exit 9' TERM; printf started > "$1"; while :; do sleep 1; done`, 9},
+		{"handles SIGTERM", func(ready string) []string {
+			return []string{os.Args[0], "-test.run=^TestCLISIGTERMChild$"}
+		}, 9},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ready := filepath.Join(projectTempDir(t), "child-started")
-			master, diagnostic := cliTTY(t, "--showcase", "--", "sh", "-c", tt.script, "sh", ready)
+			t.Setenv("FRAME_CLI_SIGTERM_READY", ready)
+			// A race-enabled child otherwise sleeps for the race detector's
+			// default atexit_sleep_ms of 1000 when it exits, which lasts until
+			// the frame's SIGKILL.
+			t.Setenv("GORACE", "atexit_sleep_ms=0")
+			// cliTTY replaces os.Args, which child reads.
+			child := tt.child(ready)
+			master, diagnostic := cliTTY(t, append([]string{"--showcase", "--"}, child...)...)
 			done, exited := startExecute(t, master)
 			awaitFile(t, ready, exited)
 			if _, err := master.Write([]byte{0x11}); err != nil {
@@ -111,6 +123,29 @@ func TestExecuteCtrlQStopsItsRealChild(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCLISIGTERMChild runs as the framed child of
+// TestExecuteCtrlQStopsItsRealChild's handles SIGTERM case. It handles SIGTERM
+// from before it reports that it started and exits 9 when the signal arrives.
+//
+// It is one process, so the frame's group SIGTERM always reaches its handler.
+// A shell that traps SIGTERM while it waits for a job can miss the trap: XNU's
+// killpg signals a group's members one at a time, so the job can die and the
+// shell exit before its own SIGTERM arrives, and a job still between fork and
+// exec loses the signal to the shell's inherited handler.
+func TestCLISIGTERMChild(t *testing.T) {
+	ready := os.Getenv("FRAME_CLI_SIGTERM_READY")
+	if ready == "" {
+		return
+	}
+	terminated := make(chan os.Signal, 1)
+	signal.Notify(terminated, syscall.SIGTERM)
+	if err := os.WriteFile(ready, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	<-terminated
+	os.Exit(9)
 }
 
 // frameInputQueue mirrors the library's inputQueueLimit: the most child input
