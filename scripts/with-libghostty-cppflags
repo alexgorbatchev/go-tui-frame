@@ -1,23 +1,48 @@
 #!/usr/bin/env bash
 # Runs a command, normally go, with libghostty-vt-static's pkg-config compiler
-# flags appended to CGO_CPPFLAGS. Set PKG_CONFIG_PATH to the native prefix's
-# share/pkgconfig directory first.
+# flags and the SHA-256 of its static archive appended to CGO_CPPFLAGS. Set
+# PKG_CONFIG_PATH to the native prefix's share/pkgconfig directory first.
 #
 # The Go binding gets its flags from a `#cgo pkg-config` directive. Go's build
 # cache key for a cgo package covers CGO_CPPFLAGS, CGO_CFLAGS, CGO_LDFLAGS, and
-# the package's `#cgo` directives, but not pkg-config's output, and the
-# binding's module-cache directory is the same in every checkout. Without this,
-# a binding built in one checkout is reused in another and links the first
-# checkout's archive. The include flags name the native prefix, so each prefix
-# gets its own cache entry. Go adds pkg-config's --cflags output to the C
-# preprocessor flags, so CGO_CPPFLAGS is the matching variable.
+# the package's `#cgo` directives, but not pkg-config's output or the files it
+# names, and the binding's module-cache directory is the same in every
+# checkout. Without this, a binding built in one checkout is reused in another
+# and links the first checkout's archive, and an archive rebuilt at the same
+# path reuses the previous link. Go adds pkg-config's --cflags output to the C
+# preprocessor flags, so CGO_CPPFLAGS is the matching variable:
+#
+# - The include flags name the native prefix, so each prefix gets its own
+#   cache entries.
+# - GO_TUI_FRAME_LIBGHOSTTY_VT_SHA256 identifies the archive's contents. No C
+#   code reads it. Go stamps CGO_CPPFLAGS into each executable's build info
+#   (not under -trimpath), so a changed archive also changes the link step's
+#   cache key and the cached test results.
 #
 # The --libs output is not exported through CGO_LDFLAGS: Go applies CGO_LDFLAGS
 # to every cgo package, so the archive would reach the final link once per cgo
-# package. It comes from the same pkg-config file as the include flags.
+# package.
 set -euo pipefail
-cflags=$(pkg-config --static --cflags libghostty-vt-static)
+package='libghostty-vt-static'
+cflags=$(pkg-config --static --cflags "$package")
+libs=$(pkg-config --static --libs "$package")
+# pkg-config separates flags with blanks, and Go splits its output the same way.
+set -f
+archives=()
+for word in $libs; do
+    case "$word" in
+        -*) ;;
+        *) archives+=("$word") ;;
+    esac
+done
+set +f
+if test "${#archives[@]}" -ne 1; then
+    printf 'pkg-config --static --libs %s must name exactly one archive: %s\n' "$package" "$libs" >&2
+    exit 1
+fi
+sha=$(shasum -a 256 "${archives[0]}")
+sha=${sha%% *}
 inherited=$(go env CGO_CPPFLAGS)
-CGO_CPPFLAGS="${inherited:+$inherited }$cflags"
+CGO_CPPFLAGS="${inherited:+$inherited }$cflags -DGO_TUI_FRAME_LIBGHOSTTY_VT_SHA256=$sha"
 export CGO_CPPFLAGS
 exec "$@"

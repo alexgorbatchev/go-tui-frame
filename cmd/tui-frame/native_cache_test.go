@@ -1,12 +1,14 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -30,14 +32,76 @@ func TestBuildCacheKeepsNativePrefixesApart(t *testing.T) {
 	first := copyNativePrefix(t, source)
 	second := copyNativePrefix(t, source)
 
-	buildAgainstPrefix(t, first, cache)
+	hostLinkAgainstPrefix(t, first, cache)
 	if err := os.RemoveAll(first); err != nil {
 		t.Fatal(err)
 	}
-	link := buildAgainstPrefix(t, second, cache)
+	link := hostLinkAgainstPrefix(t, second, cache)
 	want := filepath.Join(second, "lib", nativeArchive)
 	if !strings.Contains(link, want) {
 		t.Errorf("host link does not use %s:\n%s", want, link)
+	}
+}
+
+// Go's cache keys hash packages' contents, not the files their cgo flags name,
+// so an archive rebuilt at the same path does not change any key by itself.
+// This rebuilds an existing executable, as `just build` does with
+// bin/tui-frame, after the archive at the same prefix changes, and requires
+// the link step's cache key to change.
+func TestBuildCacheFollowsNativeArchiveContents(t *testing.T) {
+	prefix := copyNativePrefix(t, pkgConfigVariable(t, "prefix"))
+	cache := filepath.Join(projectTempDir(t), "gocache")
+	binary := filepath.Join(projectTempDir(t), "tui-frame")
+
+	buildAgainstPrefix(t, prefix, cache, binary, "")
+	before := goBuildID(t, binary)
+	rewriteLastMemberOwner(t, filepath.Join(prefix, "lib", nativeArchive))
+	buildAgainstPrefix(t, prefix, cache, binary, "")
+	if after := goBuildID(t, binary); after == before {
+		t.Errorf("go build reused %s after its native archive changed; build ID %s", binary, after)
+	}
+}
+
+// rewriteLastMemberOwner changes the owner ID in the header of the archive's
+// last member, as a rewrite of the archive by another tool can. Linkers ignore
+// the field, so the archive still links while its bytes differ.
+func rewriteLastMemberOwner(t *testing.T, archive string) {
+	t.Helper()
+	const (
+		magic      = "!<arch>\n"
+		headerSize = 60
+		ownerStart = 28
+		ownerEnd   = 34
+		sizeStart  = 48
+		sizeEnd    = 58
+	)
+	data, err := os.ReadFile(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(data), magic) {
+		t.Fatalf("%s is not an ar archive", archive)
+	}
+	last := -1
+	for offset := len(magic); offset+headerSize <= len(data); {
+		size, err := strconv.Atoi(strings.TrimSpace(string(data[offset+sizeStart : offset+sizeEnd])))
+		if err != nil {
+			t.Fatalf("%s: member header at %d: %v", archive, offset, err)
+		}
+		last = offset
+		offset += headerSize + size + size%2
+	}
+	if last < 0 {
+		t.Fatalf("%s has no members", archive)
+	}
+	owner := data[last+ownerStart : last+ownerEnd]
+	replacement := "1"
+	if strings.TrimSpace(string(owner)) == replacement {
+		replacement = "2"
+	}
+	copy(owner, fmt.Sprintf("%-*s", len(owner), replacement))
+	if err := os.WriteFile(archive, data, 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -107,20 +171,34 @@ func copyFile(t *testing.T, from, to string) {
 	}
 }
 
-// buildAgainstPrefix builds the executable with the given native prefix and
-// Go build cache and returns the external linker command that -ldflags=-v
+// hostLinkAgainstPrefix builds a new executable with the given native prefix
+// and Go build cache and returns the external linker command that -ldflags=-v
 // reports.
-func buildAgainstPrefix(t *testing.T, prefix, cache string) string {
+func hostLinkAgainstPrefix(t *testing.T, prefix, cache string) string {
 	t.Helper()
-	ldflags := "-v"
+	out := buildAgainstPrefix(t, prefix, cache, filepath.Join(projectTempDir(t), "tui-frame"), "-v")
+	for line := range strings.Lines(out) {
+		if strings.HasPrefix(line, "host link: ") {
+			return line
+		}
+	}
+	t.Fatalf("build against %s reported no host link:\n%s", prefix, out)
+	return ""
+}
+
+// buildAgainstPrefix builds the executable to binary through the justfile's Go
+// wrapper with the given native prefix, Go build cache, and linker flags, and
+// returns go build's output.
+func buildAgainstPrefix(t *testing.T, prefix, cache, binary, ldflags string) string {
+	t.Helper()
 	if os.Getenv("GOOS") == "linux" || runtime.GOOS == "linux" {
-		ldflags += " -linkmode=external -extldflags=-static"
+		ldflags = strings.TrimSpace(ldflags + " -linkmode=external -extldflags=-static")
 	}
 	wrapper, err := filepath.Abs("../../scripts/with-libghostty-cppflags")
 	if err != nil {
 		t.Fatal(err)
 	}
-	build := exec.Command(wrapper, "go", "build", "-ldflags="+ldflags, "-o", filepath.Join(projectTempDir(t), "tui-frame"), ".")
+	build := exec.Command(wrapper, "go", "build", "-ldflags="+ldflags, "-o", binary, ".")
 	// The test itself runs inside the wrapper, so drop the CGO_CPPFLAGS it
 	// inherited for this checkout's prefix.
 	build.Env = slices.DeleteFunc(os.Environ(), func(kv string) bool {
@@ -131,11 +209,16 @@ func buildAgainstPrefix(t *testing.T, prefix, cache string) string {
 	if err != nil {
 		t.Fatalf("build against %s: %v\n%s", prefix, err, out)
 	}
-	for line := range strings.Lines(string(out)) {
-		if strings.HasPrefix(line, "host link: ") {
-			return line
-		}
+	return string(out)
+}
+
+// goBuildID returns the Go build ID of an executable. Its first component is
+// the link step's cache key.
+func goBuildID(t *testing.T, binary string) string {
+	t.Helper()
+	out, err := exec.Command("go", "tool", "buildid", binary).Output()
+	if err != nil {
+		t.Fatalf("go tool buildid %s: %v", binary, err)
 	}
-	t.Fatalf("build against %s reported no host link:\n%s", prefix, out)
-	return ""
+	return strings.TrimSpace(string(out))
 }

@@ -11,8 +11,9 @@ native_prefix_name := if os() == 'linux' { 'linux-musl' / linux_host_arch / 'pre
 native_cache_name := if os() == 'linux' { if linux_host_arch == 'amd64' { 'linux-musl-cache' } else { 'linux-arm64-musl-cache' } } else { 'zig-cache' }
 native_prefix := native_root / native_prefix_name
 # Recipes run cgo builds through scripts/with-libghostty-cppflags, which adds
-# the binding's pkg-config include flags to CGO_CPPFLAGS, so Go's build cache
-# keys the binding by the native prefix it links.
+# the binding's pkg-config include flags and its archive's SHA-256 to
+# CGO_CPPFLAGS, so Go's build cache keys the binding and every link by the
+# native prefix and archive they use.
 export CGO_ENABLED := '1'
 export PKG_CONFIG_PATH := native_prefix / 'share/pkgconfig' + if env('PKG_CONFIG_PATH', '') == '' { '' } else { ':' + env('PKG_CONFIG_PATH') }
 export CC := if os() == 'linux' { 'zig cc -target ' + linux_host_target } else { env('CC', 'cc') }
