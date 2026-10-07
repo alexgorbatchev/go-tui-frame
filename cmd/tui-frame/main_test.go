@@ -92,22 +92,7 @@ func TestExecuteCtrlQStopsItsRealChild(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ready := filepath.Join(projectTempDir(t), "child-started")
 			master, diagnostic := cliTTY(t, "--showcase", "--", "sh", "-c", tt.script, "sh", ready)
-			done := make(chan int, 1)
-			exited := make(chan struct{})
-			go func() {
-				defer close(exited)
-				done <- execute()
-			}()
-			t.Cleanup(func() {
-				if err := master.Close(); err != nil {
-					t.Errorf("close CLI terminal: %v", err)
-				}
-				select {
-				case <-exited:
-				case <-time.After(sessionTimeout):
-					t.Error("CLI did not stop after terminal closure")
-				}
-			})
+			done, exited := startExecute(t, master)
 			awaitFile(t, ready, exited)
 			if _, err := master.Write([]byte{0x11}); err != nil {
 				t.Fatal(err)
@@ -148,22 +133,7 @@ func TestExecuteReturnsChildStatusWhenCtrlQFollowsItsExit(t *testing.T) {
 	script := `stty raw -echo; printf started > "$1"; while [ ! -e "$2" ]; do sleep 0.01; done; exit 7`
 	master, diagnostic := cliTTY(t, "--", "sh", "-c", script, "sh", started, exit)
 	outer := int(os.Stdin.Fd())
-	code := make(chan int, 1)
-	exited := make(chan struct{})
-	go func() {
-		defer close(exited)
-		code <- execute()
-	}()
-	t.Cleanup(func() {
-		if err := master.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
-			t.Errorf("close CLI terminal: %v", err)
-		}
-		select {
-		case <-exited:
-		case <-time.After(sessionTimeout):
-			t.Error("CLI did not stop after terminal closure")
-		}
-	})
+	code, exited := startExecute(t, master)
 	awaitFile(t, started, exited)
 	if err := master.SetWriteDeadline(time.Now().Add(sessionTimeout)); err != nil {
 		t.Fatal(err)
@@ -267,22 +237,7 @@ func TestExecuteCtrlQReportsShutdownFailures(t *testing.T) {
 	t.Setenv("FRAME_CLI_QUIT_DIR", dir)
 	t.Setenv("AGENT", "0")
 	master, diagnostic := cliTTY(t, "--", os.Args[0], "-test.run=^TestCLIQuitChild$")
-	var code int
-	exited := make(chan struct{})
-	go func() {
-		defer close(exited)
-		code = execute()
-	}()
-	t.Cleanup(func() {
-		if err := master.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
-			t.Errorf("close CLI terminal: %v", err)
-		}
-		select {
-		case <-exited:
-		case <-time.After(sessionTimeout):
-			t.Error("CLI did not stop after terminal closure")
-		}
-	})
+	status, exited := startExecute(t, master)
 	awaitFile(t, filepath.Join(dir, "started"), exited)
 	if _, err := master.Write([]byte{0x11}); err != nil {
 		t.Fatal(err)
@@ -294,8 +249,9 @@ func TestExecuteCtrlQReportsShutdownFailures(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "hung-up"), nil, 0600); err != nil {
 		t.Fatal(err)
 	}
+	var code int
 	select {
-	case <-exited:
+	case code = <-status:
 	case <-time.After(sessionTimeout):
 		t.Fatal("Ctrl+Q did not finish the CLI")
 	}
@@ -324,6 +280,31 @@ func TestExecuteCtrlQReportsShutdownFailures(t *testing.T) {
 	if strings.Contains(message, errDemoQuit.Error()) {
 		t.Errorf("stderr %q reports the quit request as a failure", message)
 	}
+}
+
+// startExecute runs execute on the terminal cliTTY set up, whose master side is
+// master. It returns a channel that delivers execute's status and one that
+// closes once execute returns. Cleanup closes master, hanging up the terminal
+// as closing its tab does, and waits for execute to return.
+func startExecute(t *testing.T, master *os.File) (<-chan int, <-chan struct{}) {
+	t.Helper()
+	status := make(chan int, 1)
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		status <- execute()
+	}()
+	t.Cleanup(func() {
+		if err := master.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+			t.Errorf("close CLI terminal: %v", err)
+		}
+		select {
+		case <-exited:
+		case <-time.After(sessionTimeout):
+			t.Error("CLI did not stop after terminal closure")
+		}
+	})
+	return status, exited
 }
 
 // awaitFile waits until path exists, failing if the CLI exits first. A nil
