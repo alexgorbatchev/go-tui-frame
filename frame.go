@@ -156,13 +156,16 @@ func (f *Frame[T]) InheritTerminal(enabled bool) *Frame[T] {
 // Ctrl+M as Enter, and Ctrl+[ as Escape. A child that enables Kitty
 // disambiguation or modifyOtherKeys mode 2 makes those keys distinct. While
 // the outer terminal reports key releases, the press determines how its
-// reported repeats and final release are routed: the handler still runs for
+// reported repeats and its release are routed: the handler still runs for
 // them, but its return value is ignored. Unless the child requests every key
-// as an escape code, the terminal sends a repeat of a key that types text as
-// that text, and a repeat of unmodified Enter, Tab or Backspace as its legacy
-// byte. Such a repeat arrives as a new press: the handler routes it, and its
-// answer also decides the release of a text key. The terminal reports no
-// release for Enter, Tab or Backspace in that case.
+// as an escape code, the terminal sends a key that types text as that text,
+// and unmodified Enter, Tab or Backspace as its legacy byte, so each repeat
+// arrives as a new press that the handler routes and that determines the
+// release. The terminal then reports no release for Enter, Tab or Backspace,
+// and reports a text key's release by its key rather than its text: when the
+// text is not the key's unshifted character in either case, as when Shift+1
+// types ! or a macOS Option key types a character, the release matches no
+// press, and the handler's answer for the release routes it.
 func (f *Frame[T]) Capture(handler func(Input) Disposition) *Frame[T] {
 	f.configure(func() { f.capture = handler })
 	return f
