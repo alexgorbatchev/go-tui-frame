@@ -244,6 +244,9 @@ PTY. They verify:
 
 - fragmented output coalesced under a fixed first repaint deadline;
 - flushing while idle and before exit;
+- region invalidations paced to one repaint per frame interval, and outer
+  reads and released held input that write routed mode changes at once
+  without painting pending child output;
 - immediate protocol replies;
 - child text and cursor changes that neither redraw regions nor resample
   processes, and metadata changes that redraw regions;

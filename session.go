@@ -205,6 +205,9 @@ type session[T any] struct {
 	framer                                                    *input.Framer
 	escapeDeadline, holdDeadline, killDeadline, drainDeadline time.Time
 	renderDeadline, reapDeadline                              time.Time
+	// renderedAt is when the last render ran. Wake-driven renders start at
+	// least renderInterval after it.
+	renderedAt time.Time
 	// winch receives the outer terminal's SIGWINCH from before Run reads the
 	// outer size until Run returns.
 	winch <-chan os.Signal
@@ -373,6 +376,12 @@ func (s *session[T]) refreshInput() error {
 	}
 	// Host protocol changes must reach the terminal before the next input
 	// packet is decoded using the updated profile. Viewport output stays queued.
+	return s.flushModes()
+}
+
+// flushModes writes queued outer mode and query changes now, without
+// capturing or painting pending child output.
+func (s *session[T]) flushModes() error {
 	if err := s.console.renderer.Flush(); err != nil {
 		return fmt.Errorf("synchronize outer input modes: %w", err)
 	}
@@ -439,7 +448,23 @@ func (s *session[T]) render(force bool) error {
 	s.paintedCursorColor, s.paintedCursorColorSet = native.Colors.Cursor, native.Colors.CursorHasValue
 	s.terminal.ClearDamage()
 	s.renderDeadline = time.Time{}
+	s.renderedAt = time.Now()
 	return nil
+}
+
+// scheduleRender renders now when the last render is at least renderInterval
+// old, and otherwise leaves the render to the deadline one interval after it.
+// A pending deadline stays, so continuous invalidation cannot postpone it.
+func (s *session[T]) scheduleRender() error {
+	if !s.renderDeadline.IsZero() {
+		return nil
+	}
+	due := s.renderedAt.Add(renderInterval)
+	if time.Now().Before(due) {
+		s.renderDeadline = due
+		return nil
+	}
+	return s.render(false)
 }
 
 // hold appends framed outer input behind any input already held and routes
@@ -1170,7 +1195,10 @@ func (s *session[T]) processReady(buf []byte, fds []unix.PollFd, resizes <-chan 
 		if err := s.readOuter(buf); err != nil {
 			return false, err
 		}
-		if err := s.render(false); err != nil {
+		// Mode and query writes from routed replies reach the terminal now.
+		// Pending child output keeps its deadline, and invalidations made while
+		// routing arrive through the wake pipe.
+		if err := s.flushModes(); err != nil {
 			return false, err
 		}
 	}
@@ -1193,7 +1221,7 @@ func (s *session[T]) processReady(buf []byte, fds []unix.PollFd, resizes <-chan 
 		// As after an outer read, mode changes from routed replies reach the
 		// terminal now rather than at the next repaint.
 		if routed {
-			if err := s.render(false); err != nil {
+			if err := s.flushModes(); err != nil {
 				return disconnected, err
 			}
 		}
@@ -1212,10 +1240,11 @@ func (s *session[T]) handleWake(buf []byte, resizes <-chan struct{}) error {
 		}
 	default:
 	}
+	// Geometry changes above render at once through applyGeometry.
 	if err := s.updateLayout(); err != nil {
 		return err
 	}
-	return s.render(false)
+	return s.scheduleRender()
 }
 
 // clearWake reads every pending wakeup so the next poll waits for a new one.

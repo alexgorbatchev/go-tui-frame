@@ -6,11 +6,13 @@ import (
 	"image/color"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/alexgorbatchev/go-tui-frame/internal/emulator"
+	"github.com/alexgorbatchev/go-tui-frame/internal/input"
 	"github.com/charmbracelet/colorprofile"
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
@@ -410,6 +412,170 @@ func TestChildRepliesDoNotWaitForRepaint(t *testing.T) {
 	}
 	if !bytes.Equal(repaintOutput(t, out), before) {
 		t.Fatal("query forced an intermediate repaint")
+	}
+}
+
+// repaintFrames counts the synchronized frames in output the harness painted.
+func repaintFrames(output []byte) int {
+	return bytes.Count(output, []byte(ansi.SetModeSynchronizedOutput))
+}
+
+// openRepaintWake gives a repaint session the wake pipe Run opens.
+func openRepaintWake(t *testing.T, s *session[string]) {
+	t.Helper()
+	if err := s.openWake(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := s.closeWake(); err != nil {
+			t.Error(err)
+		}
+	})
+}
+
+// wakeRepaint invalidates the header with data and runs the loop iteration
+// that its wakeup makes ready.
+func wakeRepaint(t *testing.T, s *session[string], data string) {
+	t.Helper()
+	if err := s.frame.InvalidateHeader(data); err != nil {
+		t.Fatal(err)
+	}
+	s.wakeLoop()
+	fds := []unix.PollFd{{Fd: int32(s.wakeReadFD), Events: unix.POLLIN}, {Fd: -1}, {Fd: -1}, {Fd: -1}}
+	if n, err := unix.Poll(fds, 1000); err != nil || n == 0 {
+		t.Fatalf("wake not readable: %d, %v", n, err)
+	}
+	if _, err := s.processReady(make([]byte, readBufferSize), fds, nil, true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// attachRepaintInput gives a repaint session the outer terminal input, framer
+// and router Run sets up, and returns the master the test types into.
+func attachRepaintInput(t *testing.T, s *session[string]) *os.File {
+	t.Helper()
+	outer, outerSlave := rawPTY(t)
+	router, err := newInputRouter(s.terminal, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(router.close)
+	s.console.input, s.console.fd, s.console.framer = outerSlave, int(outerSlave.Fd()), input.New()
+	s.framer, s.router = s.console.framer, router
+	return outer
+}
+
+// readRepaintInput types data into the outer terminal and runs the loop
+// iteration that its read makes ready.
+func readRepaintInput(t *testing.T, s *session[string], outer *os.File, data string) {
+	t.Helper()
+	if _, err := outer.WriteString(data); err != nil {
+		t.Fatal(err)
+	}
+	fds := []unix.PollFd{{Fd: -1}, {Fd: int32(s.console.fd), Events: unix.POLLIN}, {Fd: -1}, {Fd: -1}}
+	if n, err := unix.Poll(fds, 1000); err != nil || n == 0 {
+		t.Fatalf("outer input not readable: %d, %v", n, err)
+	}
+	if _, err := s.processReady(make([]byte, readBufferSize), fds, nil, true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInvalidationRepaintsFollowFramePacing(t *testing.T) {
+	draw := func(ctx DrawContext[string]) {
+		for i, r := range ctx.Data {
+			ctx.View.SetCell(i, 0, &uv.Cell{Content: string(r), Width: 1})
+		}
+	}
+	s, out, _ := newRepaintSession(t, ansi.ModeReset, draw)
+	openRepaintWake(t, s)
+	time.Sleep(2 * renderInterval)
+	before := repaintOutput(t, out)
+	start := time.Now()
+	wakeRepaint(t, s, "idle")
+	if got := repaintOutput(t, out)[len(before):]; !bytes.Contains(got, []byte("idle")) || repaintFrames(got) != 1 {
+		t.Fatalf("invalidation after a quiet period was not painted at once: %q", got)
+	}
+	before = repaintOutput(t, out)
+	const burst = 5
+	for i := range burst {
+		wakeRepaint(t, s, "burst"+strconv.Itoa(i))
+	}
+	got := repaintOutput(t, out)[len(before):]
+	// A render is due only a whole frame interval after the previous one.
+	if allowed := int(time.Since(start) / renderInterval); repaintFrames(got) > allowed {
+		t.Fatalf("%d invalidations painted %d frames where pacing allows %d: %q", burst, repaintFrames(got), allowed, got)
+	}
+	time.Sleep(2 * renderInterval)
+	if err := s.deadlines(); err != nil {
+		t.Fatal(err)
+	}
+	last := "burst" + strconv.Itoa(burst-1)
+	if got := repaintOutput(t, out)[len(before):]; !bytes.Contains(got, []byte(last)) {
+		t.Fatalf("paced invalidation never painted the latest region data: %q", got)
+	}
+	if timeout := s.pollTimeout(); timeout != -1 {
+		t.Fatalf("painted invalidation left a rendering timer: %d", timeout)
+	}
+}
+
+func TestOuterInputSynchronizesModesWithoutPaintingPendingOutput(t *testing.T) {
+	s, out, slave := newRepaintSession(t, ansi.ModeReset, nil)
+	outer := attachRepaintInput(t, s)
+	// The child enables cursor keys before the outer terminal has reported
+	// whether it can switch them, so the mode waits for that report.
+	s.console.pending = map[ansi.DECMode]bool{1: true}
+	before := repaintOutput(t, out)
+	start := time.Now()
+	readRepaintChunk(t, s, slave, "\x1b[?1hPEND")
+	readRepaintInput(t, s, outer, "\x1b[?1;2$y")
+	got := repaintOutput(t, out)[len(before):]
+	if !bytes.Contains(got, []byte(ansi.SetMode(ansi.ModeCursorKeys))) {
+		t.Fatalf("mode write from the routed reply waited for a repaint: %q", got)
+	}
+	for range 3 {
+		readRepaintChunk(t, s, slave, "Q")
+		readRepaintInput(t, s, outer, "k")
+	}
+	got = repaintOutput(t, out)[len(before):]
+	// Child output waits for the deadline its first chunk set.
+	if allowed := int(time.Since(start) / renderInterval); repaintFrames(got) > allowed {
+		t.Fatalf("outer reads painted %d frames of pending child output where pacing allows %d: %q", repaintFrames(got), allowed, got)
+	}
+	time.Sleep(2 * renderInterval)
+	if err := s.deadlines(); err != nil {
+		t.Fatal(err)
+	}
+	if got := repaintOutput(t, out)[len(before):]; !bytes.Contains(got, []byte("PENDQQQ")) || repaintFrames(got) != 1 {
+		t.Fatalf("pending child output did not paint as one frame at its deadline: %q", got)
+	}
+}
+
+func TestReleasedInputDoesNotPaintPendingOutput(t *testing.T) {
+	s, out, slave := newRepaintSession(t, ansi.ModeReset, nil)
+	outer := attachRepaintInput(t, s)
+	// A full child input queue holds the next outer key until the child drains.
+	if err := s.enqueue(bytes.Repeat([]byte("x"), inputQueueLimit), "user-input"); err != nil {
+		t.Fatal(err)
+	}
+	readRepaintInput(t, s, outer, "k")
+	if !s.inputPaused() {
+		t.Fatal("outer key was routed into a full child input queue")
+	}
+	before := repaintOutput(t, out)
+	readRepaintChunk(t, s, slave, "PEND")
+	fds := []unix.PollFd{{Fd: -1}, {Fd: -1}, {Fd: int32(s.fd), Events: unix.POLLOUT}, {Fd: -1}}
+	if n, err := unix.Poll(fds, 1000); err != nil || n == 0 {
+		t.Fatalf("child input not writable: %d, %v", n, err)
+	}
+	if _, err := s.processReady(make([]byte, readBufferSize), fds, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	if s.inputPaused() {
+		t.Fatal("drained child input queue did not release the held key")
+	}
+	if got := repaintOutput(t, out)[len(before):]; repaintFrames(got) != 0 {
+		t.Fatalf("released input painted pending child output before its deadline: %q", got)
 	}
 }
 
