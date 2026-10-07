@@ -52,6 +52,7 @@ func TestSessionChild(t *testing.T) {
 		os.Exit(0)
 	}
 	if mode := os.Getenv("FRAME_TEST_MODE"); mode == "detached" || mode == "detached-on-input" {
+		sendTerminal()
 		// The sleeper keeps the slave open from its own session, as a daemon
 		// the framed program starts with setsid would; cleanup never signals it.
 		startSleeper(&syscall.SysProcAttr{Setsid: true})
@@ -100,6 +101,22 @@ func startSleeper(attrs *syscall.SysProcAttr) *exec.Cmd {
 		os.Exit(98)
 	}
 	return cmd
+}
+
+// terminalSocket is the descriptor of the socket startDetached passes the
+// child as its first extra file.
+const terminalSocket = 3
+
+// sendTerminal passes this process's terminal to the test over terminalSocket,
+// so the test can query the child PTY from its own process, and closes the
+// socket before any descendant could inherit it.
+func sendTerminal() {
+	if err := unix.Sendmsg(terminalSocket, []byte{0}, unix.UnixRights(int(os.Stdout.Fd())), nil, 0); err != nil {
+		os.Exit(89)
+	}
+	if err := unix.Close(terminalSocket); err != nil {
+		os.Exit(90)
+	}
 }
 
 // awaitFloodInput writes one short output and waits for a byte of input, so a
@@ -1050,7 +1067,8 @@ func TestCancellationReleasesStoppedChildOutput(t *testing.T) {
 	switch runtime.GOOS {
 	case "darwin":
 		// A session leader's exit drains its controlling terminal (ttywait in
-		// XNU's proc_exit) for as long as the master is open, so the loop
+		// XNU's proc_exit) for as long as the master is open and output is
+		// queued, which stopOutput established before the cancel, so the loop
 		// returns at the reap deadline and cleanup reaps the leader only after
 		// closing the child PTY. Cleanup must take Exited's sample before the
 		// close. The loop's last sample predates the reap deadline.
@@ -1256,14 +1274,16 @@ func passOnlyStop(in Input) Disposition {
 // detachedRun is a session whose detached child writes output continuously
 // while a sleeper in another session holds the child PTY's slave. A
 // "detached" child floods from the start; a "detached-on-input" child first
-// writes "ready" and floods once it reads a byte.
+// writes "ready" and floods once it reads a byte. childPTY is a descriptor of
+// the child PTY's slave, which the launch leader passed to the test.
 type detachedRun struct {
-	h       *terminalHarness
-	before  string
-	holder  int
-	done    <-chan runOutcome
-	cancel  context.CancelFunc
-	release func()
+	h        *terminalHarness
+	before   string
+	holder   int
+	childPTY *os.File
+	done     <-chan runOutcome
+	cancel   context.CancelFunc
+	release  func()
 }
 
 // startDetached starts a detachedRun whose child runs in mode, with capture,
@@ -1275,6 +1295,7 @@ func startDetached(t *testing.T, mode string, capture func(Input) Disposition, k
 	h := newHarness(t)
 	before := termiosState(t, h)
 	cmd, file := descendantCommand(t, mode)
+	socket := shareTerminal(t, cmd)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	t.Cleanup(cancel)
 	leaders, hold := make(chan int, 1), make(chan struct{})
@@ -1304,12 +1325,101 @@ func startDetached(t *testing.T, mode string, capture func(Input) Disposition, k
 	if sid, err := unix.Getsid(holder); err != nil || sid != holder {
 		t.Fatalf("holder session = %d, %v; want its own session %d", sid, err, holder)
 	}
-	return &detachedRun{h: h, before: before, holder: holder, done: done, cancel: cancel, release: release}
+	// The leader sent its terminal before it started the holder, so the
+	// message is queued by now.
+	childPTY := receiveTerminal(t, socket)
+	return &detachedRun{h: h, before: before, holder: holder, childPTY: childPTY, done: done, cancel: cancel, release: release}
+}
+
+// shareTerminal gives cmd one end of a socket pair as terminalSocket and
+// returns the other end, over which a detached child sends its terminal.
+func shareTerminal(t *testing.T, cmd *exec.Cmd) int {
+	t.Helper()
+	// Hold ForkLock, as the net package does, so no concurrent fork inherits
+	// the pair before it is close-on-exec.
+	syscall.ForkLock.RLock()
+	pair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM, 0)
+	if err == nil {
+		unix.CloseOnExec(pair[0])
+		unix.CloseOnExec(pair[1])
+	}
+	syscall.ForkLock.RUnlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := os.NewFile(uintptr(pair[1]), "terminal socket")
+	t.Cleanup(func() {
+		if err := child.Close(); err != nil {
+			t.Error(err)
+		}
+		if err := unix.Close(pair[0]); err != nil {
+			t.Error(err)
+		}
+	})
+	cmd.ExtraFiles = []*os.File{child}
+	return pair[0]
+}
+
+// receiveTerminal returns the terminal descriptor sendTerminal queued on
+// socket, which the test closes in cleanup.
+func receiveTerminal(t *testing.T, socket int) *os.File {
+	t.Helper()
+	oob := make([]byte, unix.CmsgSpace(4))
+	// Darwin has no MSG_CMSG_CLOEXEC; ForkLock keeps the received descriptor
+	// from a concurrent fork until it is close-on-exec.
+	syscall.ForkLock.RLock()
+	_, oobn, _, _, err := unix.Recvmsg(socket, make([]byte, 1), oob, unix.MSG_DONTWAIT)
+	var fds []int
+	if err == nil {
+		fds, err = receivedDescriptors(oob[:oobn])
+	}
+	for _, fd := range fds {
+		unix.CloseOnExec(fd)
+	}
+	syscall.ForkLock.RUnlock()
+	if err != nil || len(fds) != 1 {
+		for _, fd := range fds {
+			_ = unix.Close(fd) // best-effort; the test fails below
+		}
+		t.Fatalf("passed descriptors = %v, %v; want the child's terminal", fds, err)
+	}
+	terminal := os.NewFile(uintptr(fds[0]), "child PTY")
+	t.Cleanup(func() {
+		if err := terminal.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	return terminal
+}
+
+// receivedDescriptors returns the descriptors that oob's SCM_RIGHTS messages
+// carry.
+func receivedDescriptors(oob []byte) ([]int, error) {
+	messages, err := unix.ParseSocketControlMessage(oob)
+	if err != nil {
+		return nil, err
+	}
+	var fds []int
+	for i := range messages {
+		rights, err := unix.ParseUnixRights(&messages[i])
+		if err != nil {
+			return fds, err
+		}
+		fds = append(fds, rights...)
+	}
+	return fds, nil
 }
 
 // stopOutput types ^S on the outer terminal and waits until stopped reports
 // that the frame wrote it to the child, which stops the child's output. The
 // session's capture must be passOnlyStop.
+//
+// On Darwin it then waits until output is queued behind the stop. The frame
+// may have read the queue empty just before the stop, and a killed leader that
+// has not written since leaves nothing for its exit to drain. XNU's master
+// returns no stopped output (ptcread), so once the queue holds bytes it holds
+// them until the child PTY closes. Linux keeps no such queue: pty_write
+// accepts nothing while output is stopped, and TIOCOUTQ reports 0.
 func (d *detachedRun) stopOutput(t *testing.T, stopped <-chan struct{}) {
 	t.Helper()
 	if _, err := unix.Write(d.h.fd, stopInput); err != nil {
@@ -1319,6 +1429,22 @@ func (d *detachedRun) stopOutput(t *testing.T, stopped <-chan struct{}) {
 	case <-stopped:
 	case <-time.After(5 * time.Second):
 		t.Fatal("^S did not reach the child")
+	}
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	for deadline := time.Now().Add(5 * time.Second); ; {
+		queued, err := unix.IoctlGetInt(int(d.childPTY.Fd()), unix.TIOCOUTQ)
+		if err != nil {
+			t.Fatalf("read the child PTY's output queue: %v", err)
+		}
+		if queued > 0 {
+			return
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatal("the child queued no output behind ^S")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
