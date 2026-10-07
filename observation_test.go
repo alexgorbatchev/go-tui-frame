@@ -83,6 +83,9 @@ func TestObservationBudgetBoundsBacklogRatherThanLoneRecords(t *testing.T) {
 		{"idle dispatcher admits oversized snapshot", nil, oversized, nil},
 		{"executing callback rejects oversized snapshot", &Event{Kind: Started}, oversized, ErrObservationOverflow},
 		{"executing oversized snapshot rejects small record", &oversized, Event{Kind: ChildOutput, Bytes: []byte("data")}, ErrObservationOverflow},
+		// An observed error is retained with its record, so its text weighs
+		// against the budget like the record's bytes do.
+		{"executing callback rejects record whose error fills the budget", &Event{Kind: Started}, Event{Kind: Routed, Error: errors.New(strings.Repeat("x", observationByteLimit))}, ErrObservationOverflow},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var got []Event

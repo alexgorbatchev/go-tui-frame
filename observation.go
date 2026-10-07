@@ -277,6 +277,9 @@ func (d *eventDispatcher) close() {
 
 func eventWeight(ev Event) int {
 	w := int(unsafe.Sizeof(ev)) + len(ev.Bytes) + len(ev.Origin)
+	if ev.Error != nil {
+		w += len(ev.Error.Error())
+	}
 	if ev.Input != nil {
 		w += int(unsafe.Sizeof(*ev.Input)) + len(ev.Input.Raw)
 		if ev.Input.Key != nil {
