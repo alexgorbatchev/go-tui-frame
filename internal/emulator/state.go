@@ -14,21 +14,29 @@ import (
 )
 
 // NativeCell preserves copied native information beyond UV's rendering fields.
-// In particular, Style retains overline and Raw retains semantic content.
+// Raw retains semantic content. StyleIndex selects the cell's full native
+// style, which retains details such as overline, in the NativeStyles table of
+// the State that holds the cell. An index is meaningful only with that
+// State's own table: another snapshot's table can hold a different style at
+// the same index.
 type NativeCell struct {
-	Raw      ghostty.Cell
-	Style    ghostty.Style
-	Wide     ghostty.CellWide
-	Selected bool
+	Raw        ghostty.Cell
+	Wide       ghostty.CellWide
+	StyleIndex uint32
+	Selected   bool
 }
 
 // State owns all display cells, maps and copied native values. While Held is
 // true, Cells/Cursor/Colors describe the preserved complete frame; the remaining
 // fields report the current native terminal state.
 type State struct {
-	Size               Size
-	Cells              []uv.Cell
-	NativeCells        []NativeCell
+	Size        Size
+	Cells       []uv.Cell
+	NativeCells []NativeCell
+	// NativeStyles is this snapshot's style table: each style once, indexed
+	// by NativeCell.StyleIndex. Index 0 is the default style. The table can
+	// also hold styles no cell references.
+	NativeStyles       []ghostty.Style
 	Cursor             ghostty.RenderStateCursor
 	Colors             ghostty.RenderStateColors
 	Title, Directory   string
@@ -74,12 +82,14 @@ func (t *Terminal) State() (State, error) {
 	// only the visual arrays borrow terminal storage.
 	s.Cells = slices.Clone(s.Cells)
 	s.NativeCells = slices.Clone(s.NativeCells)
+	s.NativeStyles = slices.Clone(s.NativeStyles)
 	return s, nil
 }
 
-// UpdateState borrows the terminal's display storage and reuses dst's maps.
-// The owner must serialize use and clone the result before publishing it.
-// Display cells remain valid only until the next capture, resize or close.
+// UpdateState borrows the terminal's display storage and style table, and
+// reuses dst's maps. The owner must serialize use and clone the result before
+// publishing it. Display cells and styles remain valid only until the next
+// capture, resize or close.
 func (t *Terminal) UpdateState(s *State) error {
 	if t == nil || t.native == nil {
 		return ErrClosed
@@ -97,7 +107,7 @@ func (t *Terminal) UpdateState(s *State) error {
 		}
 		t.holdPending = false
 	}
-	s.Cells, s.NativeCells = t.visual.cells, t.visual.nativeCells
+	s.Cells, s.NativeCells, s.NativeStyles = t.visual.cells, t.visual.nativeCells, t.styles
 	s.Cursor, s.Colors = t.visual.cursor, t.visual.colors
 	if err := t.InputState(s); err != nil {
 		return err
@@ -248,14 +258,21 @@ func (t *Terminal) updateRender() error {
 	if err != nil {
 		return fmt.Errorf("reading native render colors: %w", err)
 	}
-	if len(t.visual.cells) != t.size.Cols*t.size.Rows || t.visual.colors != *colors {
+	count := t.size.Cols * t.size.Rows
+	// A resize recaptures every row, so it also compacts the style table.
+	compact := len(t.visual.cells) != count || len(t.styles) > maxStylesPerCell*count
+	if compact || t.visual.colors != *colors {
 		// Colors are resolved into each UV cell; palette/default-color changes
 		// therefore invalidate cached styles even without any text damage.
+		// Compacting the style table invalidates every captured index.
 		// Invalidate here rather than at conversion, so a deferred conversion's
 		// rows are known when the update preserves a held frame.
 		if err := t.render.SetDirty(ghostty.RenderStateDirtyFull); err != nil {
 			return fmt.Errorf("invalidating native render styles: %w", err)
 		}
+	}
+	if compact {
+		t.resetStyles()
 	}
 	t.renderColors = *colors
 	return nil
@@ -425,7 +442,7 @@ func (t *Terminal) copyCell(x, y int, cell *uv.Cell, native *NativeCell, colors 
 			return err
 		}
 	}
-	native.Style, native.Wide = style.native, data.wide
+	native.StyleIndex, native.Wide = style.index, data.wide
 	return nil
 }
 
@@ -504,7 +521,7 @@ func (t *Terminal) internColors(colors *ghostty.RenderStateColors) {
 	t.foreground = defaultColor(t.hostForeground, colors.Foreground)
 	t.background = defaultColor(t.hostBackground, colors.Background)
 	t.internedColors, t.colorsInterned = *colors, true
-	t.plainStyle = capturedStyle{native: *t.defaultStyle, visual: t.uvStyle(t.defaultStyle, colors)}
+	t.plainStyle = capturedStyle{index: defaultStyleIndex, visual: t.uvStyle(t.defaultStyle, colors)}
 }
 
 // defaultColor keeps a host-matching default as default rendition (nil) to

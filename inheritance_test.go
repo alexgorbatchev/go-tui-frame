@@ -131,7 +131,7 @@ func TestSessionPaletteEncodingFollowsOuterColorProfile(t *testing.T) {
 				t.Fatal(err)
 			}
 			x := slices.IndexFunc(outer.Cells, func(cell uv.Cell) bool { return cell.Content == "p" })
-			if got := outer.NativeCells[x].Style.FgColor(); got != tt.want {
+			if got := outer.NativeStyles[outer.NativeCells[x].StyleIndex].FgColor(); got != tt.want {
 				t.Errorf("outer foreground for child SGR 31 = %+v; want %+v", got, tt.want)
 			}
 			if _, err := unix.Write(h.fd, []byte("\r")); err != nil {

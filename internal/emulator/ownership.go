@@ -12,10 +12,13 @@ import (
 // palette entries that Options.OuterColorProfile keeps as indexes are
 // ansi.BasicColor or ansi.IndexedColor values whose RGB is Colors.Palette at
 // that index, not the xterm default their RGBA method reports. Native
-// Cell/Style/Colors are copied value snapshots.
+// Cell/Style/Colors are copied value snapshots. The clone owns a copy of the
+// style table, so its cells' style indices keep resolving after the source's
+// table changes.
 func CloneState(state State) State {
 	state.Cells = slices.Clone(state.Cells)
 	state.NativeCells = slices.Clone(state.NativeCells)
+	state.NativeStyles = slices.Clone(state.NativeStyles)
 	state.Modes = maps.Clone(state.Modes)
 	state.ModeErrors = maps.Clone(state.ModeErrors)
 	for mode, err := range state.ModeErrors {

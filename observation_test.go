@@ -15,6 +15,7 @@ import (
 
 	"github.com/alexgorbatchev/go-tui-frame/v2/internal/emulator"
 	uv "github.com/charmbracelet/ultraviolet"
+	ghostty "go.mitchellh.com/libghostty"
 	"golang.org/x/sys/unix"
 )
 
@@ -187,6 +188,17 @@ func TestEventWeightCountsSharedCellGridOnce(t *testing.T) {
 				t.Fatalf("eventWeight = %d, want %d", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestEventWeightCountsNativeStyleTable(t *testing.T) {
+	const styles = 5
+	plain := sharedCellSnapshot(4)
+	styled := plain
+	styled.Terminal.Native.NativeStyles = make([]ghostty.Style, styles)
+	want := eventWeight(Event{Kind: StateChanged, Snapshot: &plain}) + styles*int(unsafe.Sizeof(ghostty.Style{}))
+	if got := eventWeight(Event{Kind: StateChanged, Snapshot: &styled}); got != want {
+		t.Fatalf("eventWeight with a %d-style table = %d, want %d", styles, got, want)
 	}
 }
 

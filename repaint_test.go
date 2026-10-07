@@ -272,7 +272,7 @@ func (p *outerPainting) paint(t *testing.T, sequence string, x int) (ghostty.Sty
 	if err != nil {
 		t.Fatal(err)
 	}
-	return painted.NativeCells[x].Style.FgColor(), frame
+	return painted.NativeStyles[painted.NativeCells[x].StyleIndex].FgColor(), frame
 }
 
 func paletteForeground(i uint8) ghostty.StyleColor {

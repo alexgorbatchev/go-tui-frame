@@ -276,7 +276,7 @@ func TestCapturePreservesRowSelectionAndFullStyles(t *testing.T) {
 				t.Fatal(err)
 			}
 			cell := state.NativeCells[y*state.Size.Cols+x]
-			if cell.Selected != selected || cell.Style != *style {
+			if cell.Selected != selected || state.NativeStyles[cell.StyleIndex] != *style {
 				t.Fatalf("cell %d,%d differs from native selection/style", x, y)
 			}
 		}

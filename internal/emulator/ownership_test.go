@@ -12,11 +12,19 @@ func TestCloneStateSeparatesStorage(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer em.Close()
-	writeTerminal(t, em, "x\x1b[?2004h")
+	writeTerminal(t, em, "\x1b[1mx\x1b[0m\x1b[?2004h")
 	original := terminalState(t, em)
+	bold := original.NativeStyles[original.NativeCells[0].StyleIndex]
+	if !bold.Bold() {
+		t.Fatal("the first cell's style is not bold")
+	}
 	cloned := CloneState(original)
 	cloned.Cells[0].Content = "changed"
 	cloned.NativeCells[0] = NativeCell{}
+	cloned.NativeStyles[original.NativeCells[0].StyleIndex] = *ghostty.DefaultStyle()
+	if style := original.NativeStyles[original.NativeCells[0].StyleIndex]; style != bold {
+		t.Fatal("clone shares the native style table")
+	}
 	cloned.Modes[ghostty.ModeBracketedPaste] = false
 	cloned.ModeErrors[ghostty.ModeBracketedPaste] = ghostty.ErrInvalidValue
 	*cloned.ScrollbackMaxLines = 1

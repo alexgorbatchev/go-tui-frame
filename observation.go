@@ -13,6 +13,7 @@ import (
 	"github.com/alexgorbatchev/go-tui-frame/v2/internal/emulator"
 	"github.com/alexgorbatchev/go-tui-frame/v2/internal/process"
 	uv "github.com/charmbracelet/ultraviolet"
+	ghostty "go.mitchellh.com/libghostty"
 )
 
 const (
@@ -333,6 +334,7 @@ func eventWeight(ev Event) int {
 func nativeStateWeight(s emulator.State) int {
 	w := len(s.Title) + len(s.Directory) + len(s.Modes)*(int(unsafe.Sizeof(0))+int(unsafe.Sizeof(false))) + len(s.ModeErrors)*(int(unsafe.Sizeof(0))+int(unsafe.Sizeof(error(nil))))
 	w += len(s.NativeCells) * int(unsafe.Sizeof(emulator.NativeCell{}))
+	w += len(s.NativeStyles) * int(unsafe.Sizeof(ghostty.Style{}))
 	return w + cellsWeight(s.Cells)
 }
 

@@ -1,13 +1,56 @@
 package emulator
 
 import (
+	"fmt"
+	"math"
+
 	uv "github.com/charmbracelet/ultraviolet"
 	ghostty "go.mitchellh.com/libghostty"
 )
 
+// capturedStyle is a native style's index in the terminal's style table and
+// its conversion to UV.
 type capturedStyle struct {
-	native ghostty.Style
+	index  uint32
 	visual uv.Style
+}
+
+// defaultStyleIndex is the default style's index in every style table, so a
+// zero NativeCell resolves to the default style.
+const defaultStyleIndex = 0
+
+// maxStylesPerCell bounds the style table relative to the viewport. Cells
+// reference at most one style each, so a table holding more than twice as
+// many styles as cells holds more unreferenced styles than referenced ones.
+const maxStylesPerCell = 2
+
+// resetStyles empties the style table down to the default style. Indices of
+// captured cells become invalid, so the caller must have marked every row
+// dirty for the next conversion. The storage is kept for reuse.
+func (t *Terminal) resetStyles() {
+	t.styles = append(t.styles[:0], *t.defaultStyle)
+	if t.styleIndex == nil {
+		t.styleIndex = make(map[ghostty.Style]uint32)
+	}
+	clear(t.styleIndex)
+	t.styleIndex[*t.defaultStyle] = defaultStyleIndex
+}
+
+// internStyle returns style's index in the style table, appending it on first
+// use. The table persists across captures because clean rows keep the indices
+// an earlier capture assigned; native style IDs cannot serve as indices,
+// because they belong to the source page and may be reused.
+func (t *Terminal) internStyle(style *ghostty.Style) (uint32, error) {
+	if i, ok := t.styleIndex[*style]; ok {
+		return i, nil
+	}
+	if uint64(len(t.styles)) > math.MaxUint32 {
+		return 0, fmt.Errorf("native style table exceeds %d styles", uint64(math.MaxUint32)+1)
+	}
+	i := uint32(len(t.styles))
+	t.styles = append(t.styles, *style)
+	t.styleIndex[*style] = i
+	return i, nil
 }
 
 // rowStyleScanLimit is how many of a row's styles rowStyle scans. Rows with
@@ -55,7 +98,11 @@ func (t *Terminal) rowStyle(x, id uint16, colors *ghostty.RenderStateColors) (*c
 	if err != nil {
 		return nil, err
 	}
-	t.rowStyles = append(t.rowStyles, rowStyleEntry{id: id, style: capturedStyle{native: *style, visual: t.uvStyle(style, colors)}})
+	index, err := t.internStyle(style)
+	if err != nil {
+		return nil, err
+	}
+	t.rowStyles = append(t.rowStyles, rowStyleEntry{id: id, style: capturedStyle{index: index, visual: t.uvStyle(style, colors)}})
 	t.lastRowStyle = len(t.rowStyles) - 1
 	t.indexRowStyles()
 	return &t.rowStyles[t.lastRowStyle].style, nil

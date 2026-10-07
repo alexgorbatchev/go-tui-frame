@@ -55,7 +55,7 @@ func TestFragmentedOutputAndOwnedCells(t *testing.T) {
 	if cell.Style.Fg != (color.RGBA{R: 10, G: 20, B: 30, A: 255}) || cell.Style.UnderlineColor != (color.RGBA{R: 40, G: 50, B: 60, A: 255}) {
 		t.Fatalf("colors = %#v", cell.Style)
 	}
-	if !s.NativeCells[idx].Style.Overline() {
+	if !s.NativeStyles[s.NativeCells[idx].StyleIndex].Overline() {
 		t.Fatal("native overline state was lost")
 	}
 	s.Cells[idx].Content = "changed by observer"
@@ -64,7 +64,7 @@ func TestFragmentedOutputAndOwnedCells(t *testing.T) {
 	if next.Cells[idx].Content != "é" || next.Cells[0].Content != "X" {
 		t.Fatalf("owned snapshots = %#v, %#v", s.Cells[idx], next.Cells[idx])
 	}
-	if !s.NativeCells[idx].Style.Overline() {
+	if !s.NativeStyles[s.NativeCells[idx].StyleIndex].Overline() {
 		t.Fatal("copied native style changed after write")
 	}
 }

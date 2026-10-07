@@ -350,7 +350,7 @@ func TestCaptureMatchesNativeCellData(t *testing.T) {
 					if bg != nil && cell.Style.Bg != rgbColor(*bg) {
 						t.Fatalf("cell %d,%d background = %#v; native = %#v", x, y, cell.Style.Bg, *bg)
 					}
-					if native.Raw != *raw || native.Wide != wide || native.Style != *style || cell.Content != content {
+					if native.Raw != *raw || native.Wide != wide || state.NativeStyles[native.StyleIndex] != *style || cell.Content != content {
 						t.Fatalf("cell %d,%d differs from native text, width, raw value or full style", x, y)
 					}
 					linked, err := raw.HasHyperlink()

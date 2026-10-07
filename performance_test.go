@@ -13,7 +13,6 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/alexgorbatchev/go-tui-frame/v2/internal/emulator"
 	"github.com/alexgorbatchev/go-tui-frame/v2/internal/input"
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
@@ -99,19 +98,24 @@ func allocatedBytes(runs int, f func()) uint64 {
 	return (after.TotalAlloc - before.TotalAlloc) / uint64(runs)
 }
 
-func TestCloneSnapshotCopiesSharedCellGridOnce(t *testing.T) {
-	const cells = 120 * 40
+func TestCloneSnapshotCopiesSharedCellGridAndStyleTableOnce(t *testing.T) {
+	const cells, styles = 120 * 40, 16
+	// A native cell holds its packed value, width, style index and selection
+	// flag; its style lives once in the snapshot's style table.
+	const nativeCellBytes = 24
 	snap := sharedCellSnapshot(cells)
+	snap.Terminal.Native.NativeStyles = make([]ghostty.Style, styles)
 	clone := func() { cloneSink = cloneSnapshot(snap) }
-	if allocs := testing.AllocsPerRun(20, clone); allocs != 2 {
-		t.Fatalf("cloneSnapshot allocated %.0f times, want 2: one uv.Cell grid and one native cell grid", allocs)
+	if allocs := testing.AllocsPerRun(20, clone); allocs != 3 {
+		t.Fatalf("cloneSnapshot allocated %.0f times, want 3: one uv.Cell grid, one native cell grid and one style table", allocs)
 	}
-	grid := uint64(cells * unsafe.Sizeof(uv.Cell{}))
-	owned := grid + uint64(cells*unsafe.Sizeof(emulator.NativeCell{}))
-	// A second uv.Cell grid would add grid bytes; half of it bounds the
-	// allocator's size-class rounding of the two owned grids.
-	if got := allocatedBytes(20, clone); got >= owned+grid/2 {
-		t.Fatalf("cloneSnapshot allocated %d bytes per call, want about %d for one shared cell grid", got, owned)
+	owned := uint64(cells*unsafe.Sizeof(uv.Cell{})) + cells*nativeCellBytes + uint64(styles*unsafe.Sizeof(ghostty.Style{}))
+	// The allocator rounds an allocation past 32 KiB up to whole 8 KiB pages
+	// and a smaller one to a size class, so each of the three allocations
+	// adds less than a page.
+	const page = 8 << 10
+	if got := allocatedBytes(20, clone); got >= owned+3*page {
+		t.Fatalf("cloneSnapshot allocated %d bytes per call, want about %d for one shared cell grid, %d-byte native cells and the style table", got, owned, nativeCellBytes)
 	}
 }
 

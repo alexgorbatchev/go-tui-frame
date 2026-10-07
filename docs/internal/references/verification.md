@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 20:10
-last_modified: 2026-10-07 12:44
+last_modified: 2026-10-07 13:07
 status: current
 ---
 
@@ -163,7 +163,8 @@ only the text alternates. Few styles writes three runs on each row: bold
 palette, plain and underlined RGB. Style per cell gives every cell its own
 direct RGB color, as gradients and image-to-ANSI output do. A row finds its
 styles by scanning up to 16 of them and through an ID index past that, so a
-row of distinct styles costs time linear in its width:
+row of distinct styles costs time linear in its width. Each style a row reads
+is then looked up by value in the terminal's style table:
 
 ```sh
 scripts/with-libghostty-cppflags go test -run '^$' -bench 'BenchmarkStyledCapture' -benchmem -count=3 ./internal/emulator
@@ -171,18 +172,20 @@ scripts/with-libghostty-cppflags go test -run '^$' -bench 'BenchmarkStyledCaptur
 
 | Viewport | Time/op (indicative) | Bytes/op | Allocations/op |
 | :--- | ---: | ---: | ---: |
-| Few styles, 120×40 | 144.6 µs | 17,648 | 479 |
-| Style per cell, 40×24 | 189.3 µs | 161,393 | 3,103 |
-| Style per cell, 200×24 | 898.1 µs | 791,159 | 14,623 |
-| Style per cell, 400×2 | 153.6 µs | 133,920 | 2,491 |
-| Style per cell, 1000×1 | 191.8 µs | 166,664 | 3,085 |
+| Few styles, 120×40 | 133.2 µs | 17,648 | 479 |
+| Style per cell, 40×24 | 226.0 µs | 161,393 | 3,103 |
+| Style per cell, 200×24 | 1,025.2 µs | 791,157 | 14,623 |
+| Style per cell, 400×2 | 170.4 µs | 133,920 | 2,491 |
+| Style per cell, 1000×1 | 212.8 µs | 166,664 | 3,085 |
 
-These figures were measured on 2026-10-07 with load averages of 6.4–7.7 over
-1 minute, directly after the same benchmark on the previous capture code
-under the same load. That code converted the default style again on every
-row and kept the row's styles in a map it cleared on every row; its medians
-were 233.5, 212.3, 1,017.6, 182.5 and 228.5 µs in the order above, with the
-same bytes and allocations.
+These figures are medians of three runs measured on 2026-10-07 with load
+averages of 4.2–6.3 over 1 minute, directly before the same benchmark on the
+capture code that stored a full style in every native cell, under similar
+load. That code's medians were 133.4, 190.2, 887.7, 152.5 and 192.8 µs in the
+order above, with the same bytes and allocations. The style-table lookup
+costs about 20–40 ns per distinct style in a row. In exchange, a snapshot copy
+of a 200×24 viewport copies 345,600 fewer bytes of native cells and adds 72
+bytes for each style in the table, which a viewport of few styles keeps small.
 
 ### Synchronized-update captures
 
@@ -385,7 +388,22 @@ graphemes, nondefault styles and hyperlink URIs use native getters.
 [Style capture](../../../internal/emulator/cell_style.go) reads each style once
 per captured row and keeps its map storage between rows. Style IDs are
 page-local and can be reused after mutations, so cached entries are cleared for
-each row.
+each row. A native cell stores a 32-bit index into the terminal's style table
+rather than the 72-byte style, so it is 24 bytes. The table holds each style
+once and persists across captures, because clean rows keep the indices an
+earlier capture assigned. On a resize, or once the table holds more than twice
+as many styles as the viewport has cells, capture empties the table to the
+default style at index 0 and marks every row dirty, so the conversion that
+follows assigns every cell an index into the rebuilt table. `UpdateState`
+lends the table with the cells; `State` and `CloneState` copy it, so each
+snapshot resolves its indices against its own table.
+
+[Cell style tests](../../../internal/emulator/cell_style_test.go) resolve every
+cell's index through its snapshot's table and compare the style with
+libghostty's getter after captures that intern new styles beside clean rows,
+after a compaction and its full recapture, and after a resize. An earlier
+snapshot and a clone keep resolving to the styles they captured, and the
+native cell is at most 24 bytes.
 
 [Row tests](../../../internal/emulator/row_test.go) compare captured content,
 packed metadata, full styles, erased-cell backgrounds and hyperlinks with
@@ -450,7 +468,8 @@ PTY. They verify:
 - immediate outer input-mode writes;
 - reusable cleared region canvases;
 - independent retained drawing snapshots;
-- one shared cell grid per snapshot copy;
+- one shared cell grid, 24-byte native cells and one style table per snapshot
+  copy;
 - zero allocations for unchanged rendering and warmed input delivery;
 - partial-write compaction and input origins;
 - composition limited to damaged rows;
@@ -460,8 +479,9 @@ PTY. They verify:
 
 Each drawing callback receives its own copy of the snapshot. The copy holds
 one cell grid, which `Terminal.Cells` and `Terminal.Native.Cells` share, and
-the observation budget weighs that grid once. Capture also allocates when the
-geometry changes, for new graphemes and styles, for the first use of each color
+the observation budget weighs that grid once. The copy also holds the native
+cells and the snapshot's style table, which the budget weighs at their sizes.
+Capture also allocates when the geometry changes, for new graphemes and styles, for the first use of each color
 after the render colors change, and in native getter calls.
 
 ### Default foreground and background colors

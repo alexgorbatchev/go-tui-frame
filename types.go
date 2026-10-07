@@ -102,6 +102,11 @@ type TerminalSnapshot struct {
 }
 
 // NativeState owns the complete terminal observations exposed by libghostty.
+// Each NativeCells entry holds an index into NativeStyles, this snapshot's
+// style table: resolve a cell's full native style as
+// NativeStyles[cell.StyleIndex], and only with the table of the snapshot that
+// holds the cell, because another snapshot's table can hold a different style
+// at the same index.
 // ModeErrors preserve unavailable getters rather than substituting false.
 // ModifyOtherKeys2 and MouseTrackingMode come from libghostty's key and mouse
 // encoders, because its getters do not expose them. MouseTrackingMode is the
