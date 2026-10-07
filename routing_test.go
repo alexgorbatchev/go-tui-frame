@@ -249,6 +249,29 @@ func TestRoutingLocalizesMouseWithNativeEncoders(t *testing.T) {
 	}
 }
 
+// The child's encoder reports in its single active tracking mode, so the
+// router delivers mouse events only while that mode is set, whatever mode bits
+// remain set after a reset.
+func TestRoutingFollowsActiveMouseTrackingMode(t *testing.T) {
+	for _, tt := range []struct {
+		name, controls, want, origin string
+	}{
+		{"normal", "\x1b[?1000h", "\x1b[M #\"", "mouse-protocol"},
+		{"reset after upgrade", "\x1b[?1000h\x1b[?1002h\x1b[?1002l", "", "mouse-disabled"},
+		{"set and reset", "\x1b[?1000h\x1b[?1000l", "", "mouse-disabled"},
+		{"later mode replaces earlier", "\x1b[?1003h\x1b[?1000h", "\x1b[M #\"", "mouse-protocol"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r, em := newRouterTest(t, nil)
+			s := routerState(t, em, tt.controls)
+			got, err := r.route(routerPackets(t, "\x1b[<0;5;5M")[0], s)
+			if err != nil || string(got.Bytes) != tt.want || got.Origin != tt.origin {
+				t.Fatalf("press routed %q as %q, %v; want %q as %q", got.Bytes, got.Origin, err, tt.want, tt.origin)
+			}
+		})
+	}
+}
+
 func TestRoutingMouseGestureAndOutsideCoordinates(t *testing.T) {
 	r, em := newRouterTest(t, nil)
 	s := routerState(t, em, "\x1b[?1002;1006h")

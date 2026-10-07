@@ -97,6 +97,44 @@ func TestClipboardHandlersCannotMutateObservations(t *testing.T) {
 	}
 }
 
+// Ghostty keeps one active tracking mode: setting 9, 1000, 1002 or 1003 makes
+// it active and resetting any of them turns tracking off. MouseTracking keeps
+// the native getter's value, which is set while any of the four bits is.
+func TestMouseTrackingModeObservationUsesNativeState(t *testing.T) {
+	for _, tt := range []struct {
+		name, controls string
+		want           ghostty.MouseTrackingMode
+		anyBit         bool
+	}{
+		{"default", "", ghostty.MouseTrackingNone, false},
+		{"X10", "\x1b[?9h", ghostty.MouseTrackingX10, true},
+		{"normal", "\x1b[?1000h", ghostty.MouseTrackingNormal, true},
+		{"button", "\x1b[?1002h", ghostty.MouseTrackingButton, true},
+		{"any", "\x1b[?1003h", ghostty.MouseTrackingAny, true},
+		{"reset after upgrade", "\x1b[?1000h\x1b[?1002h\x1b[?1002l", ghostty.MouseTrackingNone, true},
+		{"set and reset", "\x1b[?1000h\x1b[?1000l", ghostty.MouseTrackingNone, false},
+		{"later mode replaces earlier", "\x1b[?1003h\x1b[?1000h", ghostty.MouseTrackingNormal, true},
+		{"reset of an inactive mode", "\x1b[?1003h\x1b[?1000h\x1b[?1003l", ghostty.MouseTrackingNone, true},
+		{"pixel format without geometry", "\x1b[?1016h\x1b[?1002h", ghostty.MouseTrackingButton, true},
+		{"restored mode", "\x1b[?1002s\x1b[?1000h\x1b[?1002h\x1b[?1002r", ghostty.MouseTrackingNone, true},
+		{"full reset", "\x1b[?1003h\x1bc", ghostty.MouseTrackingNone, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			em := newTerminal(t, 8, 2)
+			writeTerminal(t, em, tt.controls)
+			// A full reset emits its own effects; only the observation must not.
+			em.Effects()
+			s := terminalState(t, em)
+			if s.MouseTrackingMode != tt.want || s.MouseTracking != tt.anyBit {
+				t.Fatalf("mouse tracking mode = %v (any bit %v), want %v (any bit %v)", s.MouseTrackingMode, s.MouseTracking, tt.want, tt.anyBit)
+			}
+			if len(em.Effects()) != 0 {
+				t.Fatal("state observation generated PTY effects")
+			}
+		})
+	}
+}
+
 func TestModifyOtherKeysObservationUsesNativeState(t *testing.T) {
 	em := newTerminal(t, 8, 2)
 	for _, tt := range []struct {

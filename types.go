@@ -101,6 +101,10 @@ type TerminalSnapshot struct {
 
 // NativeState owns the complete terminal observations exposed by libghostty.
 // ModeErrors preserve unavailable getters rather than substituting false.
+// ModifyOtherKeys2 and MouseTrackingMode come from libghostty's key and mouse
+// encoders, because its getters do not expose them. MouseTrackingMode is the
+// child's active mouse tracking mode; MouseTracking is the getter's value,
+// true while any tracking mode bit is set, even when no mode is active.
 type NativeState = emulator.State
 
 // ProtocolEffect owns an ordered native terminal request or generated reply.

@@ -416,6 +416,120 @@ func TestChildStateSyncsOuterAlternateScroll(t *testing.T) {
 	}
 }
 
+// The outer terminal reports the mouse in the child's single active tracking
+// mode. Mouse tracking modes are mutually exclusive in xterm and Ghostty, so
+// the console resets the previous mode before it sets the next one. Both the
+// child read and a full state refresh carry the active mode.
+func TestConsoleMirrorsActiveMouseTrackingMode(t *testing.T) {
+	trackingModes := []ghostty.Mode{ghostty.ModeX10Mouse, ghostty.ModeNormalMouse, ghostty.ModeButtonMouse, ghostty.ModeAnyMouse}
+	for _, update := range []struct {
+		name string
+		run  func(t *testing.T, s *session[string], slave *os.File, chunk string)
+	}{
+		{"child read", func(t *testing.T, s *session[string], slave *os.File, chunk string) {
+			readRepaintChunk(t, s, slave, chunk)
+		}},
+		{"state refresh", func(t *testing.T, s *session[string], _ *os.File, chunk string) {
+			if _, err := s.terminal.Write([]byte(chunk)); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.refresh(false); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		for _, tt := range []struct {
+			name   string
+			chunks []string
+			want   ghostty.MouseTrackingMode
+			// active is the outer tracking mode bit expected on with want.
+			active ghostty.Mode
+			// written and absent check the output of the last chunk.
+			written, absent []string
+		}{
+			{
+				name: "normal", chunks: []string{"\x1b[?1000h"}, want: ghostty.MouseTrackingNormal, active: ghostty.ModeNormalMouse,
+				written: []string{"\x1b[?1000h", "\x1b[?1006h"},
+			},
+			{
+				name: "reset after upgrade", chunks: []string{"\x1b[?1000h\x1b[?1002h\x1b[?1002l"}, want: ghostty.MouseTrackingNone,
+				absent: []string{"\x1b[?1000h", "\x1b[?1002h", "\x1b[?1006h"},
+			},
+			{
+				name: "reset after upgrade while tracking", chunks: []string{"\x1b[?1000h", "\x1b[?1002h\x1b[?1002l"}, want: ghostty.MouseTrackingNone,
+				written: []string{"\x1b[?1000l", "\x1b[?1006l"}, absent: []string{"\x1b[?1002h"},
+			},
+			{
+				name: "set and reset", chunks: []string{"\x1b[?1000h\x1b[?1000l"}, want: ghostty.MouseTrackingNone,
+				absent: []string{"\x1b[?1000h", "\x1b[?1006h"},
+			},
+			{
+				name: "later mode replaces earlier", chunks: []string{"\x1b[?1003h\x1b[?1000h"}, want: ghostty.MouseTrackingNormal, active: ghostty.ModeNormalMouse,
+				written: []string{"\x1b[?1000h"}, absent: []string{"\x1b[?1003h"},
+			},
+			{
+				name: "switch modes across reads", chunks: []string{"\x1b[?1003h", "\x1b[?1000h"}, want: ghostty.MouseTrackingNormal, active: ghostty.ModeNormalMouse,
+				written: []string{"\x1b[?1003l", "\x1b[?1000h"},
+			},
+			{
+				// Ghostty turns wheel steps into cursor keys while no tracking
+				// mode is active, whatever mode bits remain set.
+				name: "alternate scroll without active tracking", want: ghostty.MouseTrackingNone,
+				chunks:  []string{"\x1b[?1049h\x1b[?1007h\x1b[?1000h\x1b[?1002h\x1b[?1002l"},
+				written: []string{ansi.SetMode(alternateScrollMode)},
+			},
+		} {
+			t.Run(update.name+"/"+tt.name, func(t *testing.T) {
+				s, out, slave := newRepaintSession(t, ansi.ModeReset, nil)
+				reportModes(t, s.console, map[ansi.DECMode]ansi.ModeSetting{
+					9: ansi.ModeReset, 1000: ansi.ModeReset, 1002: ansi.ModeReset, 1003: ansi.ModeReset,
+					1006: ansi.ModeReset, alternateScrollMode: ansi.ModeReset,
+				})
+				outer, err := emulator.New(emulator.Options{Size: emulator.Size{Cols: 20, Rows: 6}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(outer.Close)
+				var last string
+				fed := 0
+				for _, chunk := range tt.chunks {
+					update.run(t, s, slave, chunk)
+					written := repaintOutput(t, out)
+					if _, err := outer.Write(written[fed:]); err != nil {
+						t.Fatal(err)
+					}
+					last, fed = string(written[fed:]), len(written)
+				}
+				for _, seq := range tt.written {
+					if !strings.Contains(last, seq) {
+						t.Errorf("outer terminal did not receive %q: %q", seq, last)
+					}
+				}
+				for _, seq := range tt.absent {
+					if strings.Contains(last, seq) {
+						t.Errorf("outer terminal received %q: %q", seq, last)
+					}
+				}
+				state, err := outer.State()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if state.MouseTrackingMode != tt.want {
+					t.Errorf("outer tracking mode = %v, want %v", state.MouseTrackingMode, tt.want)
+				}
+				for _, m := range trackingModes {
+					if got := state.Modes[m]; got != (tt.want != ghostty.MouseTrackingNone && m == tt.active) {
+						t.Errorf("outer mode %d = %v with tracking mode %v", m, got, tt.want)
+					}
+				}
+				if got := state.Modes[ghostty.ModeSGRMouse]; got != (tt.want != ghostty.MouseTrackingNone) {
+					t.Errorf("outer SGR mouse = %v with tracking mode %v", got, tt.want)
+				}
+			})
+		}
+	}
+}
+
 func TestConsolePreservesOnlySolicitedReplies(t *testing.T) {
 	c := &console{pending: map[ansi.DECMode]bool{1049: true}, entry: make(map[ansi.DECMode]ansi.ModeSetting), applied: make(map[ansi.DECMode]bool)}
 	packets, err := input.New().Feed([]byte("\x1b[?25;1$y\x1b[?1049;2$y\x1b[?1049;1$y"))

@@ -363,6 +363,43 @@ func (c *console) setMode(m ansi.DECMode, on bool) error {
 	return nil
 }
 
+// mouseProtocolModes are the outer terminal's mouse protocol modes, which
+// xterm's ctlseqs ("Mouse Tracking") defines as mutually exclusive. Ghostty
+// makes the mode it sets active and turns tracking off on any reset.
+// Highlight tracking (1001) is unsupported and stays reset.
+var mouseProtocolModes = []ansi.DECMode{9, 1000, 1001, 1002, 1003}
+
+// mouseTrackingHostModes maps the child's active tracking mode to the outer
+// mode that reports the same events.
+var mouseTrackingHostModes = map[ghostty.MouseTrackingMode]ansi.DECMode{
+	ghostty.MouseTrackingX10: 9, ghostty.MouseTrackingNormal: 1000,
+	ghostty.MouseTrackingButton: 1002, ghostty.MouseTrackingAny: 1003,
+}
+
+// setMouseTracking leaves the outer terminal in the child's tracking mode, or
+// none while reports cannot be localized. Every other protocol mode is reset
+// first: a reset written after the set would turn tracking off again.
+func (c *console) setMouseTracking(mode ghostty.MouseTrackingMode, localizable bool) error {
+	active, tracking := mouseTrackingHostModes[mode]
+	tracking = tracking && localizable
+	for _, m := range mouseProtocolModes {
+		if tracking && m == active || !c.applied[m] || !c.switchable(m) {
+			continue
+		}
+		if err := c.setMode(m, false); err != nil {
+			return err
+		}
+		if tracking && c.switchable(active) {
+			// The reset also ended tracking in the active mode, if it was on.
+			c.applied[active] = false
+		}
+	}
+	if !tracking {
+		return nil
+	}
+	return c.setMode(active, true)
+}
+
 func (c *console) syncInput(s emulator.State) error {
 	measured := c.cellWidth > 0 && c.cellHeight > 0
 	// A terminal that keeps SGR pixel reports (1016) permanently on sends
@@ -371,38 +408,40 @@ func (c *console) syncInput(s emulator.State) error {
 	// runs applyGeometry, which synchronizes these modes again.
 	localizable := measured || c.entry[1016] != ansi.ModePermanentlySet
 	mirror := []struct {
-		host     ansi.DECMode
-		child    ghostty.Mode
-		tracking bool
+		host  ansi.DECMode
+		child ghostty.Mode
 	}{
-		{1, ghostty.ModeDECCKM, false}, {66, ghostty.ModeKeypadKeys, false}, {67, ghostty.ModeBackarrowKeyMode, false},
-		{1035, ghostty.ModeNumlockKeypad, false}, {1036, ghostty.ModeAltEscPrefix, false}, {1039, ghostty.ModeAltSendsEsc, false},
-		{9, ghostty.ModeX10Mouse, true}, {1000, ghostty.ModeNormalMouse, true}, {1002, ghostty.ModeButtonMouse, true}, {1003, ghostty.ModeAnyMouse, true},
-		{1004, ghostty.ModeFocusEvent, false},
+		{1, ghostty.ModeDECCKM}, {66, ghostty.ModeKeypadKeys}, {67, ghostty.ModeBackarrowKeyMode},
+		{1035, ghostty.ModeNumlockKeypad}, {1036, ghostty.ModeAltEscPrefix}, {1039, ghostty.ModeAltSendsEsc},
+		{1004, ghostty.ModeFocusEvent},
 	}
 	for _, m := range mirror {
-		if err := c.setMode(m.host, s.Modes[m.child] && (localizable || !m.tracking)); err != nil {
+		if err := c.setMode(m.host, s.Modes[m.child]); err != nil {
 			return err
 		}
 	}
+	tracking := s.MouseTrackingMode != ghostty.MouseTrackingNone
+	if err := c.setMouseTracking(s.MouseTrackingMode, localizable); err != nil {
+		return err
+	}
 	pixels := s.Modes[ghostty.ModeSGRPixelsMouse] && measured && c.switchable(1016)
-	for _, m := range []ansi.DECMode{1001, 1005, 1015} {
+	for _, m := range []ansi.DECMode{1005, 1015} {
 		if err := c.setMode(m, false); err != nil {
 			return err
 		}
 	}
-	if err := c.setMode(1006, s.MouseTracking && !pixels); err != nil {
+	if err := c.setMode(1006, tracking && !pixels); err != nil {
 		return err
 	}
-	if err := c.setMode(1016, pixels && s.MouseTracking); err != nil {
+	if err := c.setMode(1016, pixels && tracking); err != nil {
 		return err
 	}
 	// The outer screen is always alternate during a session, so the outer
 	// terminal would turn wheel steps into cursor keys for any child without
 	// mouse tracking. Convert only where the child itself would: on its
-	// alternate screen with alternate scroll set and no mouse tracking. Child
-	// tracking turns conversion off even while outer tracking is withheld.
-	if err := c.setMode(alternateScrollMode, s.Alternate && s.Modes[ghostty.ModeAltScroll] && !s.MouseTracking); err != nil {
+	// alternate screen with alternate scroll set and no active tracking mode.
+	// Child tracking turns conversion off even while outer tracking is withheld.
+	if err := c.setMode(alternateScrollMode, s.Alternate && s.Modes[ghostty.ModeAltScroll] && !tracking); err != nil {
 		return err
 	}
 	// A Kitty reply that missed the probe deadline reports support after enter.

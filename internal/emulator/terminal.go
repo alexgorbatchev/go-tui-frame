@@ -77,6 +77,7 @@ type Terminal struct {
 	keys                           *ghostty.KeyEncoder
 	probe                          *ghostty.KeyEvent
 	mouse                          *ghostty.MouseEncoder
+	mouseProbe                     *ghostty.MouseEvent
 	size                           Size
 	visual                         visualState
 	held                           bool
@@ -246,6 +247,10 @@ func (t *Terminal) Close() {
 	if t.mouse != nil {
 		t.mouse.Close()
 		t.mouse = nil
+	}
+	if t.mouseProbe != nil {
+		t.mouseProbe.Close()
+		t.mouseProbe = nil
 	}
 	if t.cells != nil {
 		t.cells.Close()

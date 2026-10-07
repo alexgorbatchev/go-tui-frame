@@ -20,7 +20,7 @@ func regionMetadataChanged(a, b emulator.State) bool {
 	return a.Title != b.Title || a.Directory != b.Directory || a.Size != b.Size ||
 		a.Alternate != b.Alternate || regionModesChanged(a.Modes, b.Modes) ||
 		a.KittyKeyboardFlags != b.KittyKeyboardFlags || a.ModifyOtherKeys2 != b.ModifyOtherKeys2 ||
-		a.MouseTracking != b.MouseTracking || a.MouseShape != b.MouseShape ||
+		a.MouseTracking != b.MouseTracking || a.MouseTrackingMode != b.MouseTrackingMode || a.MouseShape != b.MouseShape ||
 		a.Scrollbar != b.Scrollbar || a.ScrollbackRows != b.ScrollbackRows || a.TotalRows != b.TotalRows ||
 		!equalLimit(a.ScrollbackMaxBytes, b.ScrollbackMaxBytes) || !equalLimit(a.ScrollbackMaxLines, b.ScrollbackMaxLines)
 }

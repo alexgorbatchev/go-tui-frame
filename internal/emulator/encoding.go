@@ -55,6 +55,77 @@ func (t *Terminal) modifyOtherKeys2() (bool, error) {
 	}
 }
 
+// mouseTrackingProbes classify the child's tracking mode by the first event
+// the native encoder does not report (mouse_encode.zig shouldReport). Each
+// mode reports every event of the modes before it.
+var mouseTrackingProbes = []struct {
+	action ghostty.MouseAction
+	held   bool
+	// unreported is the active mode when the encoder drops this event.
+	unreported ghostty.MouseTrackingMode
+}{
+	{ghostty.MouseActionPress, true, ghostty.MouseTrackingNone},     // every mode reports a left press
+	{ghostty.MouseActionRelease, true, ghostty.MouseTrackingX10},    // X10 reports presses only
+	{ghostty.MouseActionMotion, true, ghostty.MouseTrackingNormal},  // normal mode reports no motion
+	{ghostty.MouseActionMotion, false, ghostty.MouseTrackingButton}, // button mode needs a held button
+}
+
+// mouseTrackingMode reads the child's active mouse tracking mode by encoding
+// probe events with the native mouse encoder. Ghostty keeps that mode apart
+// from the DEC mode bits, and the pinned getter API reports only whether any
+// of the bits is set. Nothing is written to the PTY.
+func (t *Terminal) mouseTrackingMode() (ghostty.MouseTrackingMode, error) {
+	encoder, err := t.mouseEncoder()
+	if err != nil {
+		return ghostty.MouseTrackingNone, err
+	}
+	if t.mouseProbe == nil {
+		t.mouseProbe, err = ghostty.NewMouseEvent()
+		if err != nil {
+			return ghostty.MouseTrackingNone, fmt.Errorf("creating native mouse-state probe: %w", err)
+		}
+	}
+	// Only the tracking mode decides whether these events are reported. SGR
+	// encodes every probe, and a one-cell surface keeps the probe inside the
+	// viewport whatever the child's format and measured geometry.
+	encoder.SetOptFromTerminal(t.native)
+	encoder.SetOptFormat(ghostty.MouseFormatSGR)
+	encoder.SetOptSize(ghostty.MouseEncoderSize{ScreenWidth: 1, ScreenHeight: 1, CellWidth: 1, CellHeight: 1})
+	encoder.SetOptAnyButtonPressed(true)
+	for _, probe := range mouseTrackingProbes {
+		t.mouseProbe.SetAction(probe.action)
+		if probe.held {
+			t.mouseProbe.SetButton(ghostty.MouseButtonLeft)
+		} else {
+			t.mouseProbe.ClearButton()
+		}
+		encoded, err := encoder.Encode(t.mouseProbe)
+		if err != nil {
+			return ghostty.MouseTrackingNone, fmt.Errorf("observing native mouse tracking mode: %w", err)
+		}
+		if len(encoded) == 0 {
+			return probe.unreported, nil
+		}
+	}
+	return ghostty.MouseTrackingAny, nil
+}
+
+// mouseEncoder returns the terminal's native mouse encoder. Every caller
+// configures it from the terminal before encoding.
+func (t *Terminal) mouseEncoder() (*ghostty.MouseEncoder, error) {
+	if t.mouse == nil {
+		var err error
+		t.mouse, err = ghostty.NewMouseEncoder()
+		if err != nil {
+			return nil, fmt.Errorf("creating native mouse encoder: %w", err)
+		}
+		// Preserve every routed motion packet; native tracking mode still
+		// decides whether the child requested that class of event.
+		t.mouse.SetOptTrackLastCell(false)
+	}
+	return t.mouse, nil
+}
+
 // EncodeMouse borrows a live event with child-local surface coordinates. With
 // measured pixels those coordinates are pixels; otherwise they are unit cells.
 // Unit geometry is never substituted for SGR pixel reporting. The router owns
@@ -73,19 +144,14 @@ func (t *Terminal) EncodeMouse(event *ghostty.MouseEvent, anyButtonPressed bool)
 	if err != nil {
 		return nil, err
 	}
-	if t.mouse == nil {
-		t.mouse, err = ghostty.NewMouseEncoder()
-		if err != nil {
-			return nil, fmt.Errorf("creating native mouse encoder: %w", err)
-		}
-		// Preserve every routed motion packet; native tracking mode still
-		// decides whether the child requested that class of event.
-		t.mouse.SetOptTrackLastCell(false)
+	encoder, err := t.mouseEncoder()
+	if err != nil {
+		return nil, err
 	}
-	t.mouse.SetOptFromTerminal(t.native)
-	t.mouse.SetOptSize(geometry)
-	t.mouse.SetOptAnyButtonPressed(anyButtonPressed)
-	result, err := t.mouse.Encode(event)
+	encoder.SetOptFromTerminal(t.native)
+	encoder.SetOptSize(geometry)
+	encoder.SetOptAnyButtonPressed(anyButtonPressed)
+	result, err := encoder.Encode(event)
 	if err != nil {
 		return nil, fmt.Errorf("encoding native mouse: %w", err)
 	}

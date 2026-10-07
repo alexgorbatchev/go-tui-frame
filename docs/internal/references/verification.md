@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 20:10
-last_modified: 2026-10-06 19:36
+last_modified: 2026-10-06 20:14
 status: current
 ---
 
@@ -52,7 +52,9 @@ capture a 120×40 native viewport with plain ASCII text. Owned captures
 (`State`) copy storage for a durable caller. Internal captures (`UpdateState`)
 reuse the viewport and its maps. A one-row capture first writes
 `\x1b[Hupdated`. Input modes only reads the terminal modes, keyboard protocol
-flags and mouse tracking (`InputState`), without the display.
+flags and mouse tracking (`InputState`), without the display. It includes the
+key- and mouse-encoder probes that derive `ModifyOtherKeys2` and
+`MouseTrackingMode`.
 
 ```sh
 scripts/with-libghostty-cppflags go test -run '^$' -bench 'BenchmarkBorrowedState|BenchmarkStateCapture' -benchmem -count=3 ./internal/emulator
@@ -60,11 +62,14 @@ scripts/with-libghostty-cppflags go test -run '^$' -bench 'BenchmarkBorrowedStat
 
 | Capture | Time/op (indicative) | Bytes/op | Allocations/op |
 | :--- | ---: | ---: | ---: |
-| Owned, unchanged | 156.0 µs | about 1,010,490 | 84 |
-| Owned, one row | 132.9 µs | about 1,010,560 | 91 |
-| Internal, unchanged | 3.521 µs | 2,408 | 74 |
-| Internal, one row | 14.14 µs | 2,472 | 83 |
-| Input modes only | 2.327 µs | 328 | 50 |
+| Owned, unchanged | 163.6 µs | about 1,010,680 | 89 |
+| Owned, one row | 125.7 µs | about 1,010,755 | 96 |
+| Internal, unchanged | 3.933 µs | 2,600 | 79 |
+| Internal, one row | 15.27 µs | 2,664 | 88 |
+| Input modes only | 2.647 µs | 520 | 55 |
+
+These capture figures were re-measured on 2026-10-06 on the same machine after
+`InputState` gained the mouse-encoder probe for `MouseTrackingMode`.
 
 The owned one-row median is below the owned unchanged median. An owned capture
 allocates about 1 MB more than an internal one because `State` clones the
@@ -72,8 +77,9 @@ viewport's cell storage.
 
 The allocation profile of an internal one-row capture attributes 99.9% of
 allocated objects to libghostty binding calls. These are terminal getters
-(`Terminal.Mode` alone is 34%), render-state cursor, color and row reads, and
-the key-encoder call that derives `ModifyOtherKeys2`:
+(`Terminal.Mode` alone is 32%), render-state cursor, color and row reads, the
+key-encoder call that derives `ModifyOtherKeys2`, and the mouse-encoder calls
+that derive `MouseTrackingMode`:
 
 ```sh
 scripts/with-libghostty-cppflags go test -run '^$' -bench 'BenchmarkBorrowedState/one_row' -benchmem -memprofile .tmp/borrowed.mem -memprofilerate=1 -o .tmp/emulator.test ./internal/emulator

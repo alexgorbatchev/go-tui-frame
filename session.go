@@ -345,7 +345,7 @@ func (s *session[T]) refreshState() error {
 	maps.Copy(input.ModeErrors, state.ModeErrors)
 	input.Size, input.Held, input.Alternate = state.Size, state.Held, state.Alternate
 	input.KittyKeyboardFlags, input.ModifyOtherKeys2 = state.KittyKeyboardFlags, state.ModifyOtherKeys2
-	input.MouseTracking = state.MouseTracking
+	input.MouseTracking, input.MouseTrackingMode = state.MouseTracking, state.MouseTrackingMode
 	return s.syncInput()
 }
 

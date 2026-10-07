@@ -213,7 +213,7 @@ func (r *inputRouter) routeMouse(event uv.MouseEvent, state emulator.State) (rou
 		result.Origin = "unowned-mouse-gesture"
 		return result, nil
 	}
-	if !state.MouseTracking {
+	if state.MouseTrackingMode == ghostty.MouseTrackingNone {
 		result.Origin = "mouse-disabled"
 		return result, nil
 	}

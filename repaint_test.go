@@ -431,7 +431,11 @@ func TestChildTextDoesNotRedrawRegionsOrResampleProcesses(t *testing.T) {
 	if draws != 1 || !s.snapshot.Child.PTY.ObservedAt.Equal(observed) {
 		t.Fatalf("text/cursor updates redrew chrome or resampled processes: draws=%d", draws)
 	}
-	for _, text := range []string{"\x1b]2;updated title\x07", "\x1b]7;file://host/new\x07", "\x1b[?2004h", "\x1b[?1049h"} {
+	for _, text := range []string{
+		"\x1b]2;updated title\x07", "\x1b]7;file://host/new\x07", "\x1b[?2004h", "\x1b[?1049h",
+		// Setting 1000 again changes only the active tracking mode.
+		"\x1b[?1000h\x1b[?1002h\x1b[?1002l", "\x1b[?1000h",
+	} {
 		previous := draws
 		if _, err := s.terminal.Write([]byte(text)); err != nil {
 			t.Fatal(err)

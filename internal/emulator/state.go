@@ -38,8 +38,16 @@ type State struct {
 	KittyKeyboardFlags ghostty.KittyKeyFlags
 	// ModifyOtherKeys2 is derived by the native encoder because the pinned
 	// terminal getter API does not expose its internal modify_other_keys_2 bit.
-	ModifyOtherKeys2                            bool
-	MouseTracking                               bool
+	ModifyOtherKeys2 bool
+	// MouseTracking is the native getter's value: whether any of the DEC
+	// tracking mode bits 9, 1000, 1002 or 1003 is set.
+	MouseTracking bool
+	// MouseTrackingMode is the single tracking mode the child's mouse encoder
+	// applies. Setting 9, 1000, 1002 or 1003 makes that mode active, and
+	// resetting any of them turns tracking off, so it can be none while
+	// MouseTracking is true. It is derived by the native mouse encoder because
+	// the pinned terminal getter API does not expose it.
+	MouseTrackingMode                           ghostty.MouseTrackingMode
 	MouseShape                                  ghostty.MouseShape
 	Scrollbar                                   ghostty.Scrollbar
 	ScrollbackRows, TotalRows                   uint
@@ -108,6 +116,10 @@ func (t *Terminal) InputState(s *State) error {
 	clear(s.ModeErrors)
 	var err error
 	s.ModifyOtherKeys2, err = t.modifyOtherKeys2()
+	if err != nil {
+		return err
+	}
+	s.MouseTrackingMode, err = t.mouseTrackingMode()
 	if err != nil {
 		return err
 	}
