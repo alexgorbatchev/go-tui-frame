@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 20:10
-last_modified: 2026-10-07 11:18
+last_modified: 2026-10-07 11:29
 status: current
 ---
 
@@ -238,25 +238,47 @@ change to any part of the key misses the cache and runs a full native build:
 | Root, target, prefix and cache names that the justfile passes to the script | Choose the build's target and paths. Zig's cache manifests record absolute file paths, so another root rebuilds. |
 | Host target that `zig targets` reports: CPU model, features and OS version | Ghostty's Unicode table generators compile for the host, and Zig's cache digests include the target and the paths of generated files. |
 
-The archive does not depend on the host. On macOS, Ghostty's build replaces
-`native` with a generic macOS 13.0 target (`genericMacOSTarget` in
-`src/build/Config.zig`); building with `-Dtarget=aarch64-macos` produced a
+The archive's code and data do not depend on the host. On macOS, Ghostty's
+build replaces `native` with a generic macOS 13.0 target (`genericMacOSTarget`
+in `src/build/Config.zig`); building with `-Dtarget=aarch64-macos` produced a
 byte-identical `libghostty-vt.a`, and its objects record `minos 13.0`. The
-Linux target is an explicit musl target with a baseline CPU. The host target
-is still in the key because a cache restored on another host would recompile
-the library on every run: the host tools, their generated tables, and the
-library compile would all get new cache digests. The cost is that a runner
-image with a new kernel or macOS version, or a job on another CPU model, runs
-one full build and saves another entry; GitHub evicts entries unused for a
-week. The workflow sets no `restore-keys`, because a
-restored source tree from another revision fails the script's revision check.
-`actions/cache` saves an entry only after a successful job and never replaces
-an existing one. On a hit, Zig re-hashes the restored files, whose inodes
-changed, and reuses its cached outputs when their contents match. Locally, a
-`.tmp/native` restored from a tar of those four directories, without the
-archive, rebuilt in under two seconds with no download and produced the same
-`libghostty-vt.a`. No CI run has checked the cache yet: a hit with no archive
-download on a second run, and a miss after a build input changes.
+Linux target is an explicit musl target with a baseline CPU, but there the
+archive is identical only after `objcopy --strip-debug`. Its DWARF strings
+name the Zig cache directory that holds the generated Unicode tables, and
+that directory differs between cold builds even on one host. In a
+`debian:bookworm` container, three cold `x86_64-linux-musl` builds, two on one
+host and one under `setarch --uname-2.6`, gave three different archive
+digests. Only `libghostty-vt-static_zcu.o` differed, in 29 or 60 bytes of cache
+paths, and the three stripped objects were identical.
+
+The host target stays in the key because the build cannot pin it. Zig 0.16.0's
+build runner always sets `b.graph.host` from native detection
+(`lib/compiler/build_runner.zig`), `zig build` has no host-target option, and
+Ghostty compiles its Unicode table generators for `b.graph.host`
+(`src/build/UnicodeTables.zig`). Zig's cache hashes each input file's path as
+well as its contents (`addFileInner` in `std/Build/Cache.zig`), so a host
+change gives the generators new cache digests, their identical tables a new
+directory, and the library a new compile digest. In the same container, a
+cache restored onto another host rebuilt in 42.3 s with 33 new cache objects,
+against 46.3 s for a cold build with the Zig packages already fetched and
+0.6 s for a rebuild on the same host. Each `ubuntu-latest` CPU model, and each
+runner image with a new kernel or macOS version, therefore costs one full
+native build and saves one entry of about 160 MiB. After every host a job
+lands on has saved its entry, runs hit, as long as each entry is used within
+the week after which GitHub evicts unused entries. The step that resolves the
+key prints the host block, so a miss shows which host field changed.
+
+The workflow sets no `restore-keys`: a restored entry from another host would
+rebuild the library anyway, and a restored source tree from another revision
+fails the script's revision check. `actions/cache` saves an entry only after
+a successful job and never replaces an existing one. On a hit, Zig re-hashes
+the restored files, whose inodes changed, and reuses its cached outputs when
+their contents match. Locally, a `.tmp/native` restored from a tar of those
+four directories, without the archive, rebuilt in under two seconds with no
+download and produced the same `libghostty-vt.a`. On CI, the macOS job hit
+the cache on its second run (CI run 37665156959) and did not download the
+archive. The Linux job missed on that run because its host digest changed, so
+its hit rate is still to be confirmed on real CI.
 
 The same gate passes locally. The race suite's package results follow; the
 elapsed times are indicative, with load averages of 4.9–5.7 over 1 minute

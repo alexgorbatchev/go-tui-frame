@@ -59,14 +59,16 @@ jobs:
       # - the root, target, prefix and cache names the justfile passes to the
       #   script: the root's absolute path is part of Zig's cache manifests.
       # - the host target from `zig targets`: CPU model, features and OS
-      #   version. The archive does not depend on it (Ghostty replaces macOS
-      #   `native` with a generic macOS 13.0 target, and the Linux target is
-      #   explicit), but Ghostty's Unicode table generators compile for the
-      #   host, and Zig's cache digests include the target and the paths of
-      #   generated files. Without it, a cache restored on another host would
-      #   recompile the library on every run. With it, a runner image's new
-      #   kernel or macOS version, or another CPU model, costs one full build
-      #   and saves another entry.
+      #   version. The archive's code does not depend on it (Ghostty replaces
+      #   macOS `native` with a generic macOS 13.0 target, and the Linux
+      #   target is explicit), but Ghostty's Unicode table generators compile
+      #   for the host, and Zig 0.16.0's `zig build` has no option that pins
+      #   the host. Zig's cache digests include the target and the paths of
+      #   generated files, so a cache restored on another host rebuilds the
+      #   library. With the host in the key, each new runner image kernel or
+      #   macOS version, and each CPU model, costs one full build and saves
+      #   one entry. The step prints the host block so a miss can be traced
+      #   to the field that changed.
       - name: Resolve native build cache inputs
         id: native
         shell: bash
@@ -78,6 +80,7 @@ jobs:
           cache=$(just --evaluate native_cache_name)
           host=$(zig targets | sed -n '/^    \.native = \.{$/,$p')
           test -n "$host" || { printf 'zig targets printed no native target.\n' >&2; exit 1; }
+          printf 'Host target in the cache key:\n%s\n' "$host"
           digest=$(printf '%s\n' "$root" "$target" "$prefix" "$cache" "$host" | shasum -a 256)
           {
             printf 'prefix=%s\n' "$prefix"
