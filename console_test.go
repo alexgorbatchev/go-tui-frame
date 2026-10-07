@@ -687,6 +687,85 @@ func TestConsoleKeepsEntryMouseModesActive(t *testing.T) {
 	}
 }
 
+// The native outer terminal answers Primary Device Attributes (DA1) but not the
+// modifyOtherKeys query. A terminal answers its queries in order, so the DA1
+// reply the probe asks for last ends the probe long before its deadline, and
+// the query the terminal ignores stays pending for a reply that may still come.
+func TestProbeEndsAtPrimaryDeviceAttributesReply(t *testing.T) {
+	h := newHarness(t)
+	fd, device, _, err := inspectConsole(h.slave, h.slave)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := acquireConsole(h.slave, h.slave, fd, device)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := c.restore(); err != nil {
+			t.Error(err)
+		}
+	})
+	// A deadline far past the fallback makes a probe that waits for the
+	// unanswered query fail by a wide margin.
+	const timeout = 10 * capabilityTimeout
+	ctx, cancel := context.WithTimeout(context.Background(), 2*timeout)
+	defer cancel()
+	start := time.Now()
+	if _, err := c.probe(ctx, nil, timeout); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed >= capabilityTimeout {
+		t.Fatalf("probe took %v with an unanswered query, want it to end at the DA1 reply before %v", elapsed, capabilityTimeout)
+	}
+	if c.daPending {
+		t.Fatal("probe ended without the outer terminal's DA1 reply")
+	}
+	if !c.modifyPending {
+		t.Fatal("the unanswered modifyOtherKeys query was settled, so its late reply would reach the child")
+	}
+}
+
+// Only the DA1 reply to the probe's own query is a reply. Once it arrived, a
+// later report answers nothing the frame asked and stays input.
+func TestConsoleConsumesOnlyPendingPrimaryDeviceAttributes(t *testing.T) {
+	const reply = "\x1b[?62;22c"
+	c := &console{daPending: true}
+	if !c.consumeReply(decodePacket(t, reply)) {
+		t.Fatalf("pending DA1 reply %q was not consumed", reply)
+	}
+	if c.daPending {
+		t.Fatal("DA1 reply left its query pending")
+	}
+	if c.consumeReply(decodePacket(t, reply)) {
+		t.Fatalf("DA1 report %q without a pending query was consumed", reply)
+	}
+}
+
+// A terminal that answers DA1 only after the probe's deadline still answers
+// the frame's query, so the reply never reaches the child as typed input.
+func TestLatePrimaryDeviceAttributesReplyStaysWithFrame(t *testing.T) {
+	h := newHarness(t)
+	h.withholdPrimaryDeviceAttributes()
+	s := newProbedSession(t, h)
+	if !s.console.daPending {
+		t.Fatal("probe settled the DA1 query the outer terminal did not answer")
+	}
+	if err := s.route(decodePacket(t, "\x1b[?62;22c")); err != nil {
+		t.Fatal(err)
+	}
+	var routed []byte
+	for _, p := range s.queue {
+		routed = append(routed, p.bytes[p.offset:]...)
+	}
+	if len(routed) != 0 {
+		t.Errorf("child received %q, want the late DA1 reply consumed", routed)
+	}
+	if s.console.daPending {
+		t.Error("late DA1 reply left its query pending")
+	}
+}
+
 func TestConsolePreservesOnlySolicitedReplies(t *testing.T) {
 	c := &console{pending: map[ansi.DECMode]bool{1049: true}, entry: make(map[ansi.DECMode]ansi.ModeSetting), applied: make(map[ansi.DECMode]bool)}
 	packets, err := input.New().Feed([]byte("\x1b[?25;1$y\x1b[?1049;2$y\x1b[?1049;1$y"))

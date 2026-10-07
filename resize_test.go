@@ -207,12 +207,13 @@ func readOuterReplies(t *testing.T, s *session[struct{}], reply string, n int) [
 // reach the session: the first loop iteration applies the new size.
 func TestRunAppliesResizeDuringStartup(t *testing.T) {
 	h := newHarness(t)
+	// The harness answers neither DA1 nor the modifyOtherKeys query, so the
+	// probe runs to this deadline and the resize below lands during startup.
+	// The test checks that the signal was sent before the child's start, which
+	// precedes the loop, instead of relying on that.
+	h.withholdPrimaryDeviceAttributes()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	// The harness leaves at least one probe query unanswered, so the probe runs
-	// to this deadline and the resize below lands during startup. The test
-	// checks that the signal was sent before the child's start, which precedes
-	// the loop, instead of relying on that.
 	const probeTimeout = time.Second
 	want := Size{Cols: 32, Rows: 10}
 	var resize sync.Once

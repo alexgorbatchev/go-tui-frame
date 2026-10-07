@@ -53,7 +53,7 @@ type console struct {
 	kittyFlags                                           ghostty.KittyKeyFlags
 	modifyPending, modifySupported                       bool
 	modifyEntry, modifyLevel                             int
-	cellPending                                          bool
+	cellPending, daPending                               bool
 	cellWidth, cellHeight                                uint32
 	renderer                                             *uv.TerminalRenderer
 	colorProfile                                         colorprofile.Profile
@@ -133,6 +133,11 @@ func (c *console) probe(ctx context.Context, events *eventDispatcher, timeout ti
 	c.modifyPending, c.cellPending = true, true
 	query += ansi.RequestKittyKeyboard + ansi.QueryModifyOtherKeys + ansi.WindowOp(16)
 	query += c.preferenceQueries()
+	// Every terminal answers Primary Device Attributes (DA1) and terminals
+	// answer queries in order, so its reply follows every other reply still to
+	// come. Queries unanswered by then are ones the terminal ignores.
+	c.daPending = true
+	query += ansi.RequestPrimaryDeviceAttributes
 	// Query replies can fill the input queue before all queries are written.
 	// Poll both directions so neither endpoint waits on the other to drain.
 	ofd := int(c.output.Fd())
@@ -153,7 +158,11 @@ func (c *console) probe(ctx context.Context, events *eventDispatcher, timeout ti
 	deadline := time.Now().Add(timeout)
 	c.framer = input.New()
 	buf := make([]byte, 4096)
-	for time.Now().Before(deadline) && (len(writes) > 0 || len(c.pending) > 0 || c.kittyPending || c.modifyPending || c.cellPending || c.preferences.pending()) {
+	// The probe ends at the DA1 reply, or once every other query is answered,
+	// with the timeout as the limit for a terminal that answers neither. The
+	// markers of unanswered queries stay set, so a reply that comes later is
+	// consumed as one instead of reaching the child as typed input.
+	for time.Now().Before(deadline) && (len(writes) > 0 || c.daPending && c.awaitingReplies()) {
 		if ctx.Err() != nil {
 			return nil, context.Cause(ctx)
 		}
@@ -219,6 +228,12 @@ func (c *console) probe(ctx context.Context, events *eventDispatcher, timeout ti
 	return saved, nil
 }
 
+// awaitingReplies reports whether a capability or preference query other than
+// DA1 is still unanswered.
+func (c *console) awaitingReplies() bool {
+	return len(c.pending) > 0 || c.kittyPending || c.modifyPending || c.cellPending || c.preferences.pending()
+}
+
 func (c *console) consumeReply(p input.Packet) bool {
 	// Bracketed-paste payload is user input, even where it holds text shaped
 	// like the reply to a pending query, such as copied terminal output.
@@ -272,6 +287,14 @@ func (c *console) consumeReply(p input.Packet) bool {
 			level := ev.Mode
 			c.preferences.profile.ModifyOtherKeys = &level
 		}
+		return true
+	case uv.PrimaryDeviceAttributesEvent:
+		// Only the probe's own query is answered by the outer terminal: the
+		// child's native terminal answers the child's DA1 queries.
+		if !c.daPending {
+			return false
+		}
+		c.daPending = false
 		return true
 	}
 	return preference

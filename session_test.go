@@ -393,6 +393,13 @@ func (h *terminalHarness) withholdKittyKeyboard() {
 	h.replace(regexp.MustCompile(`\x1b\[\?\d+u`), "")
 }
 
+// withholdPrimaryDeviceAttributes makes the terminal leave every Primary Device
+// Attributes query (CSI c) unanswered, as a terminal that answers only after
+// the probe's deadline does.
+func (h *terminalHarness) withholdPrimaryDeviceAttributes() {
+	h.replace(regexp.MustCompile(`\x1b\[\?[0-9;]*c`), "")
+}
+
 // replace makes the terminal send reply in place of each native reply that
 // native matches.
 func (h *terminalHarness) replace(native *regexp.Regexp, reply string) {
