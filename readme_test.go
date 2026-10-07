@@ -92,11 +92,15 @@ func runReadmeCapture(t *testing.T, binary string) {
 			stderr: regexp.MustCompile(`^signal: terminated\n$`),
 		},
 		{
-			// sh runs a trap only after its foreground command ends, which a
-			// sleep forked as the SIGTERM arrives can delay past the frame's
-			// SIGKILL. The wait builtin returns for a trapped signal at once.
+			// A SIGTERM that reaches sh just before it enters wait leaves the
+			// trap pending until the waited-for job ends, and a job still
+			// between fork and exec has the shell's handler and survives the
+			// group SIGTERM; together they hold the trap past the frame's
+			// SIGKILL. This job prints started itself after its exec, with
+			// SIGTERM's default action, so the SIGTERM that follows Ctrl+Q
+			// always ends it, wait returns, and the trap runs.
 			name:   "Ctrl+Q to a child that exits 0 on SIGTERM",
-			child:  "trap 'exit 0' TERM; printf started; sleep 30 & wait",
+			child:  "trap 'exit 0' TERM; sh -c 'printf started; exec sleep 30' & wait",
 			quit:   quitWhenStarted,
 			stderr: regexp.MustCompile(`^$`),
 		},
