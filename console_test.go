@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -541,6 +542,148 @@ func TestConsoleMirrorsActiveMouseTrackingMode(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// pressReport is the report em sends for a left press at pixel (25, 45), which
+// lies in cell (3, 3) of a terminal with harness-sized cells. The native
+// encoder applies em's effective tracking mode and report format.
+func pressReport(t *testing.T, em *emulator.Terminal) string {
+	t.Helper()
+	event, err := ghostty.NewMouseEvent()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer event.Close()
+	event.SetButton(ghostty.MouseButtonLeft)
+	event.SetAction(ghostty.MouseActionPress)
+	event.SetPosition(ghostty.MousePosition{X: 25, Y: 45})
+	report, err := em.EncodeMouse(event, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(report)
+}
+
+// A reset of any report format (1005, 1006, 1015, 1016) selects X10 on the
+// outer terminal, so a child leaving pixel reports must keep the outer
+// terminal on SGR cell reports, as the console records.
+func TestConsoleKeepsOuterSGRAfterChildLeavesPixelMouse(t *testing.T) {
+	s, out, slave := newRepaintSession(t, ansi.ModeReset, nil)
+	c := s.console
+	c.cellWidth, c.cellHeight = harnessCellWidth, harnessCellHeight
+	reportModes(t, c, map[ansi.DECMode]ansi.ModeSetting{
+		1000: ansi.ModeReset, 1005: ansi.ModeReset, 1006: ansi.ModeReset, 1015: ansi.ModeReset, 1016: ansi.ModeReset,
+	})
+	outer, err := emulator.New(emulator.Options{Size: emulator.Size{Cols: 20, Rows: 6, CellWidthPx: harnessCellWidth, CellHeightPx: harnessCellHeight}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(outer.Close)
+	fed := 0
+	for _, step := range []struct {
+		chunk, report string
+		applied       map[ansi.DECMode]bool
+	}{
+		{"\x1b[?1000;1016h", "\x1b[<0;25;45M", map[ansi.DECMode]bool{1005: false, 1006: false, 1015: false, 1016: true}},
+		{"\x1b[?1016l", "\x1b[<0;3;3M", map[ansi.DECMode]bool{1005: false, 1006: true, 1015: false, 1016: false}},
+	} {
+		readRepaintChunk(t, s, slave, step.chunk)
+		written := repaintOutput(t, out)
+		if _, err := outer.Write(written[fed:]); err != nil {
+			t.Fatal(err)
+		}
+		last := string(written[fed:])
+		fed = len(written)
+		if got := pressReport(t, outer); got != step.report {
+			t.Errorf("after child %q (outer received %q), outer press report = %q, want %q", step.chunk, last, got, step.report)
+		}
+		for m, want := range step.applied {
+			if c.applied[m] != want {
+				t.Errorf("after child %q, applied[%d] = %v, want %v", step.chunk, m, c.applied[m], want)
+			}
+		}
+	}
+}
+
+// Tracking (9, 1000-1003) and report format (1005, 1006, 1015, 1016) modes
+// each form a group in which a reset after the set mode turns it off on the
+// outer terminal. The entry tracking mode and format must stay active while the
+// session enters and after it restores the terminal. Ghostty keeps the bits of
+// modes a later set replaced and reports them set, so the last mode of each
+// group reported set is the one left active.
+func TestConsoleKeepsEntryMouseModesActive(t *testing.T) {
+	for _, tt := range []struct {
+		name, entry, report string
+		tracking            ghostty.MouseTrackingMode
+		// active are the modes applied as the effective tracking mode and format.
+		active []ansi.DECMode
+	}{
+		{"one mode per group", "\x1b[?1000;1006h", "\x1b[<0;3;3M", ghostty.MouseTrackingNormal, []ansi.DECMode{1000, 1006}},
+		{"replaced modes still reported", "\x1b[?1000;1002;1006;1016h", "\x1b[<0;25;45M", ghostty.MouseTrackingButton, []ansi.DECMode{1002, 1016}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.mu.Lock()
+			if _, err := h.em.Write([]byte(tt.entry)); err != nil {
+				h.mu.Unlock()
+				t.Fatal(err)
+			}
+			h.mu.Unlock()
+			fd, device, _, err := inspectConsole(h.slave, h.slave)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c, err := acquireConsole(h.slave, h.slave, fd, device)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if _, err := c.probe(ctx, nil, capabilityTimeout); err != nil {
+				t.Fatal(err)
+			}
+			// check waits for a marker written after the console's output, then
+			// compares the outer terminal's effective mouse modes with the entry.
+			check := func(stage string, alternate bool) {
+				t.Helper()
+				if _, err := h.slave.WriteString(ansi.SetWindowTitle(stage)); err != nil {
+					t.Fatal(err)
+				}
+				awaitOuter(t, h, "the marker written after "+stage, func(s emulator.State) bool {
+					return s.Title == stage
+				})
+				h.mu.Lock()
+				state, err := h.em.State()
+				report := pressReport(t, h.em)
+				h.mu.Unlock()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if state.Alternate != alternate {
+					t.Errorf("after %s, outer alternate screen = %v, want %v", stage, state.Alternate, alternate)
+				}
+				if state.MouseTrackingMode != tt.tracking {
+					t.Errorf("after %s, outer tracking mode = %v, want %v", stage, state.MouseTrackingMode, tt.tracking)
+				}
+				if report != tt.report {
+					t.Errorf("after %s, outer press report = %q, want %q", stage, report, tt.report)
+				}
+				for _, m := range []ansi.DECMode{9, 1000, 1001, 1002, 1003, 1005, 1006, 1015, 1016} {
+					if want := slices.Contains(tt.active, m); c.applied[m] != want {
+						t.Errorf("after %s, applied[%d] = %v, want %v", stage, m, c.applied[m], want)
+					}
+				}
+			}
+			if err := c.enter(); err != nil {
+				t.Fatal(err)
+			}
+			check("enter", true)
+			if err := c.restore(); err != nil {
+				t.Fatal(err)
+			}
+			check("restore", false)
+		})
 	}
 }
 

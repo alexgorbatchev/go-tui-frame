@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"sync"
 	"time"
 
@@ -369,6 +370,15 @@ func (c *console) setMode(m ansi.DECMode, on bool) error {
 // Highlight tracking (1001) is unsupported and stays reset.
 var mouseProtocolModes = []ansi.DECMode{9, 1000, 1001, 1002, 1003}
 
+// mouseFormatModes are the outer terminal's mouse report formats, the other
+// mutually exclusive group in xterm's ctlseqs ("Mouse Tracking"). Ghostty
+// selects the format it sets and falls back to X10 on any reset.
+var mouseFormatModes = []ansi.DECMode{1005, 1006, 1015, 1016}
+
+// exclusiveModeGroups are the mode groups in which the outer terminal keeps
+// only the last mode set active and a reset of any member turns that mode off.
+var exclusiveModeGroups = [][]ansi.DECMode{mouseProtocolModes, mouseFormatModes}
+
 // mouseTrackingHostModes maps the child's active tracking mode to the outer
 // mode that reports the same events.
 var mouseTrackingHostModes = map[ghostty.MouseTrackingMode]ansi.DECMode{
@@ -377,24 +387,29 @@ var mouseTrackingHostModes = map[ghostty.MouseTrackingMode]ansi.DECMode{
 }
 
 // setMouseTracking leaves the outer terminal in the child's tracking mode, or
-// none while reports cannot be localized. Every other protocol mode is reset
-// first: a reset written after the set would turn tracking off again.
+// none while reports cannot be localized.
 func (c *console) setMouseTracking(mode ghostty.MouseTrackingMode, localizable bool) error {
 	active, tracking := mouseTrackingHostModes[mode]
-	tracking = tracking && localizable
-	for _, m := range mouseProtocolModes {
-		if tracking && m == active || !c.applied[m] || !c.switchable(m) {
+	return c.setExclusive(mouseProtocolModes, active, tracking && localizable)
+}
+
+// setExclusive leaves active as the only set mode of the mutually exclusive
+// group, or no mode set when on is false. Every other set mode is reset first:
+// a reset written after the set would turn the active mode off again.
+func (c *console) setExclusive(group []ansi.DECMode, active ansi.DECMode, on bool) error {
+	for _, m := range group {
+		if on && m == active || !c.applied[m] || !c.switchable(m) {
 			continue
 		}
 		if err := c.setMode(m, false); err != nil {
 			return err
 		}
-		if tracking && c.switchable(active) {
-			// The reset also ended tracking in the active mode, if it was on.
+		if on && c.switchable(active) {
+			// The reset also turned the active mode off, if it was on.
 			c.applied[active] = false
 		}
 	}
-	if !tracking {
+	if !on {
 		return nil
 	}
 	return c.setMode(active, true)
@@ -424,16 +439,11 @@ func (c *console) syncInput(s emulator.State) error {
 	if err := c.setMouseTracking(s.MouseTrackingMode, localizable); err != nil {
 		return err
 	}
-	pixels := s.Modes[ghostty.ModeSGRPixelsMouse] && measured && c.switchable(1016)
-	for _, m := range []ansi.DECMode{1005, 1015} {
-		if err := c.setMode(m, false); err != nil {
-			return err
-		}
+	format := ansi.DECMode(1006)
+	if s.Modes[ghostty.ModeSGRPixelsMouse] && measured && c.switchable(1016) {
+		format = 1016
 	}
-	if err := c.setMode(1006, tracking && !pixels); err != nil {
-		return err
-	}
-	if err := c.setMode(1016, pixels && tracking); err != nil {
+	if err := c.setExclusive(mouseFormatModes, format, tracking); err != nil {
 		return err
 	}
 	// The outer screen is always alternate during a session, so the outer
@@ -483,21 +493,52 @@ func (c *console) setModify(level int) error {
 	return nil
 }
 
+// writeEntryModes writes every switchable mode as the terminal reported it at
+// entry. A mutually exclusive group is written resets first, then its set
+// modes in group order: on a terminal that keeps stale bits, such as Ghostty,
+// several may be reported set, and the last one written is the active mode.
 func (c *console) writeEntryModes() error {
 	for _, m := range consoleModes {
 		if m == ansi.ModeAltScreenSaveCursor || !c.switchable(m) {
 			continue
 		}
 		on := c.entry[m] == ansi.ModeSet
-		text := ansi.ResetMode(m)
-		if on {
-			text = ansi.SetMode(m)
+		if on && slices.ContainsFunc(exclusiveModeGroups, func(group []ansi.DECMode) bool { return slices.Contains(group, m) }) {
+			continue
 		}
-		if _, err := c.renderer.WriteString(text); err != nil {
+		if err := c.writeMode(m, on); err != nil {
 			return err
 		}
-		c.applied[m] = on
 	}
+	for _, group := range exclusiveModeGroups {
+		var previous ansi.DECMode
+		for _, m := range group {
+			if !c.switchable(m) || c.entry[m] != ansi.ModeSet {
+				continue
+			}
+			if err := c.writeMode(m, true); err != nil {
+				return err
+			}
+			if previous != 0 {
+				// The set replaced the previous mode as the active one.
+				c.applied[previous] = false
+			}
+			previous = m
+		}
+	}
+	return nil
+}
+
+// writeMode writes m unconditionally and records it as applied.
+func (c *console) writeMode(m ansi.DECMode, on bool) error {
+	text := ansi.ResetMode(m)
+	if on {
+		text = ansi.SetMode(m)
+	}
+	if _, err := c.renderer.WriteString(text); err != nil {
+		return err
+	}
+	c.applied[m] = on
 	return nil
 }
 

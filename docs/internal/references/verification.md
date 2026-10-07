@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 20:10
-last_modified: 2026-10-06 20:54
+last_modified: 2026-10-06 22:33
 status: current
 ---
 
@@ -336,6 +336,7 @@ that Lip Gloss is absent; the CLI demo uses it.
 | [Native process ownership](../../../internal/process/snapshot_test.go), [groups](../../../internal/process/groups_test.go), [Darwin groups](../../../internal/process/groups_darwin_test.go), [Darwin argv](../../../internal/process/args_darwin_test.go) | Current native fields, runtime cwd and owned copies. Same-session inventory survives a reaped launch leader. Darwin group exit follows member states, and Darwin empty argv0 and environment alignment have dedicated native tests. |
 | [Live border](../../../border_test.go) | Updates before and during Run, closed-session rejection, and the applied native grid and actual PTY size. Measured cell pixels are preserved when the outer winsize has only cells. |
 | [Keyboard mode mirroring](../../../console_test.go) | With capture set, a native outer terminal runs the child's Kitty flags where it reported Kitty support and none otherwise, and the child's modifyOtherKeys mode where it reported one; restoration returns its entry modes. A child's Kitty keyboard query gets no reply until the terminal reports Kitty support, also after the probe, while DA1 and DECRQM replies in the same output arrive. A Kitty reply after the probe leaves the flags the session found in place. |
+| [Mouse mode mirroring](../../../console_test.go) | A native outer terminal runs the child's active tracking mode and an SGR or SGR-pixel report format, and still reports SGR after the child sets and then resets SGR-pixel reports. The tracking mode and report format the terminal had at startup stay active after the session enters and after it restores the terminal, also when the terminal reports modes that a later set replaced. |
 | [Example CLI](../../../cmd/tui-frame/session_test.go) | Real-PTY Ctrl+B prefix with 1 for layout, 2 for independent backgrounds and 3 for the child border with actual PTY resize, in legacy and Kitty-with-release-events form: releases and repeats between the keys, a forwarded second Ctrl+B, a discarded other key, Ctrl+Q after the prefix, ordinary digits and unmatched keys, and termios restoration. Other CLI tests cover Ctrl+Q, shutdown failures after Ctrl+Q, complete argv, exit and signal outcomes, the embedded guide and help, and [`--showcase`](../../../cmd/tui-frame/showcase_test.go) sessions surviving a child output burst while observation delivery is held. |
 
 Other root-package tests cover capture dispositions (`capture_test.go`),
