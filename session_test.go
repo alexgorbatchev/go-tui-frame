@@ -476,9 +476,10 @@ func childCommand(t *testing.T) *exec.Cmd {
 
 // The child talks to the virtual endpoint, so it must not see the outer
 // terminal's TERM and COLORTERM, the variables programs read to pick
-// protocols or escape sequences the endpoint does not provide, or the outer
-// size. Socket and window handles, variables with no such reader, and every
-// unrelated variable reach it unchanged and in order.
+// protocols or escape sequences the endpoint does not provide, their version
+// and feature companions, or the outer size. Socket and window handles,
+// variables with no such reader, and every unrelated variable reach it
+// unchanged and in order.
 func TestChildEnvironmentDescribesTheVirtualEndpoint(t *testing.T) {
 	tests := []struct {
 		entry string
@@ -491,9 +492,7 @@ func TestChildEnvironmentDescribesTheVirtualEndpoint(t *testing.T) {
 		// Terminal identity that selects Kitty graphics, Sixel, or iTerm2
 		// inline images.
 		{"TERM_PROGRAM=iTerm.app", false},
-		{"TERM_PROGRAM_VERSION=3.6.4", false},
 		{"LC_TERMINAL=iTerm2", false},
-		{"TERM_FEATURES=T3LrMSc7UUw9Ts3BFGsGoSyHNoSxPrSo", false},
 		{"KONSOLE_VERSION=250401", false},
 		{"KITTY_WINDOW_ID=3", false},
 		{"KITTY_PID=4242", false},
@@ -520,6 +519,11 @@ func TestChildEnvironmentDescribesTheVirtualEndpoint(t *testing.T) {
 		{"WT_SESSION=9b2a4c1e-7d3f-4a8b-b6e2-5c0d9f1a3e47", false},
 		{"ITERM_PROFILE=Default", false},
 		{"CURSOR_TRACE_ID=7f3e2d1c0b9a", false},
+		// The version or feature report of a removed identity describes the
+		// same outer terminal.
+		{"TERM_PROGRAM_VERSION=3.6.4", false},
+		{"LC_TERMINAL_VERSION=3.6.4", false},
+		{"TERM_FEATURES=T3LrMSc7UUw9Ts3BFGsGoSyHNoSxPrSo", false},
 		// The outer size, which ncurses prefers over the viewport's PTY size.
 		{"COLUMNS=212", false},
 		{"LINES=58", false},
@@ -530,12 +534,13 @@ func TestChildEnvironmentDescribesTheVirtualEndpoint(t *testing.T) {
 		{"WEZTERM_UNIX_SOCKET=/Users/frame/.local/share/wezterm/gui-sock-4242", true},
 		{"KITTY_LISTEN_ON=unix:/tmp/kitty-4242", true},
 		{"ALACRITTY_SOCKET=/tmp/Alacritty-4242.sock", true},
-		{"VSCODE_GIT_ASKPASS_MAIN=/Applications/Visual Studio Code.app/Contents/Resources/app/extensions/git/dist/askpass-main.js", true},
 		{"WINDOWID=4242", true},
 		{"COLORFGBG=15;0", true},
+		// VS Code's git askpass helper runs this path, although grok-build
+		// also reads it to trust OSC 52 clipboard writes.
+		{"VSCODE_GIT_ASKPASS_MAIN=/Applications/Visual Studio Code.app/Contents/Resources/app/extensions/git/dist/askpass-main.js", true},
 		// Outer-terminal variables that no known program reads to pick
 		// something the endpoint lacks.
-		{"LC_TERMINAL_VERSION=3.6.4", true},
 		{"TERMINAL_EMULATOR=JetBrains-JediTerm", true},
 		{"KONSOLE_PROFILE_NAME=Profile 1", true},
 		{"KONSOLE_DBUS_SESSION=/Sessions/1", true},

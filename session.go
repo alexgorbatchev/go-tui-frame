@@ -201,18 +201,21 @@ type session[T any] struct {
 	renderDeadline, reapDeadline                              time.Time
 }
 
-// endpointConflictVariables names the outer-terminal variables the child must
-// not inherit. The child talks to the virtual endpoint, and programs read
-// these to pick protocols or escape sequences the endpoint does not provide,
-// or to size themselves to the outer terminal. A variable stays here only
-// while a known program reads it that way; one that merely names the outer
-// terminal passes through. Names match exactly: multiplexer and
-// remote-control handles such as TMUX, TMUX_PANE, WEZTERM_UNIX_SOCKET,
+// endpointConflictVariables names outer-terminal variables the child must not
+// inherit. The child talks to the virtual endpoint, and each identity here is
+// read by at least one known program to pick protocols or escape sequences the
+// endpoint does not provide, or to size itself to the outer terminal. The list
+// is not exhaustive: other inherited variables can still steer programs. A
+// variable that only names the outer terminal passes through, and so does
+// VSCODE_GIT_ASKPASS_MAIN, which grok-build reads to trust OSC 52 writes but
+// which VS Code's git askpass helper runs. Names match exactly: multiplexer
+// and remote-control handles such as TMUX, TMUX_PANE, WEZTERM_UNIX_SOCKET,
 // KITTY_LISTEN_ON, and ALACRITTY_SOCKET pass through, so tools in the child
 // can still address the outer multiplexer or terminal. KITTY_WINDOW_ID,
-// KITTY_PID, WEZTERM_PANE, and ITERM_SESSION_ID also act as default targets
-// for remote control, but image tools read them to emit graphics into the
-// child's display, so they are removed and such tools need an explicit target.
+// WEZTERM_PANE, and ITERM_SESSION_ID also act as default targets for remote
+// control, but image tools read them to emit graphics into the child's
+// display, so they are removed and remote-control commands in the child need
+// an explicit target.
 var endpointConflictVariables = map[string]bool{
 	// The endpoint's own TERM and COLORTERM replace the outer ones.
 	"TERM":      true,
@@ -222,9 +225,7 @@ var endpointConflictVariables = map[string]bool{
 	// images. The endpoint disables Kitty graphics and implements neither
 	// Sixel nor iTerm2's OSC 1337 File.
 	"TERM_PROGRAM":                true,
-	"TERM_PROGRAM_VERSION":        true,
 	"LC_TERMINAL":                 true,
-	"TERM_FEATURES":               true,
 	"KONSOLE_VERSION":             true,
 	"KITTY_WINDOW_ID":             true,
 	"KITTY_PID":                   true,
@@ -254,6 +255,14 @@ var endpointConflictVariables = map[string]bool{
 	"WT_SESSION":      true,
 	"ITERM_PROFILE":   true,
 	"CURSOR_TRACE_ID": true,
+	// Companions: the version or feature report of a removed identity
+	// describes the same outer terminal, so it goes with that identity.
+	// TERM_PROGRAM_VERSION versions TERM_PROGRAM, LC_TERMINAL_VERSION versions
+	// LC_TERMINAL, and TERM_FEATURES is the feature report of iTerm2, the
+	// terminal TERM_PROGRAM, LC_TERMINAL, and ITERM_SESSION_ID identify.
+	"TERM_PROGRAM_VERSION": true,
+	"LC_TERMINAL_VERSION":  true,
+	"TERM_FEATURES":        true,
 	// The outer size. ncurses prefers exported COLUMNS and LINES to the PTY
 	// window size and then ignores SIGWINCH, so the child would size itself to
 	// the outer terminal for the whole session.
