@@ -902,19 +902,28 @@ func signalChild(pgid int, sig syscall.Signal) error {
 	return fmt.Errorf("signal child process group: %w", err)
 }
 
-func (s *session[T]) signalGroups(sig syscall.Signal) error {
-	groups, err := process.Groups(s.frame.cmd.Process.Pid)
-	var errs []error
-	if err != nil {
-		errs = append(errs, err)
-		if !s.waited {
-			groups = append(groups, s.frame.cmd.Process.Pid)
+// signalGroups inventories the owned session's process groups once and sends
+// each of sigs, in order, to every group. An incomplete inventory is still
+// signalled, with the launch leader's group added until Wait reports it.
+func (s *session[T]) signalGroups(sigs ...syscall.Signal) error {
+	leader := s.frame.cmd.Process.Pid
+	groups, err := process.Groups(leader)
+	errs := []error{err}
+	if err != nil && !s.waited && !slices.Contains(groups, leader) {
+		groups = append(groups, leader)
+	}
+	for _, sig := range sigs {
+		for _, pgid := range groups {
+			errs = append(errs, signalChild(pgid, sig))
 		}
 	}
-	for _, pgid := range groups {
-		errs = append(errs, signalChild(pgid, sig))
-	}
 	return errors.Join(errs...)
+}
+
+// terminate asks every process group of the owned session to exit: SIGTERM,
+// then SIGCONT, so a stopped group runs to act on the SIGTERM.
+func (s *session[T]) terminate() error {
+	return s.signalGroups(syscall.SIGTERM, syscall.SIGCONT)
 }
 
 // kill sends SIGKILL to the owned session's process groups. The first kill
@@ -1114,7 +1123,7 @@ func (s *session[T]) loop(ctx context.Context) error {
 		if failure != nil && !s.terminationStarted {
 			s.frame.close()
 			s.terminationStarted = true
-			failure = errors.Join(failure, s.signalGroups(syscall.SIGTERM), s.signalGroups(syscall.SIGCONT))
+			failure = errors.Join(failure, s.terminate())
 			s.killDeadline = time.Now().Add(terminationTimeout)
 		}
 		if err := s.deadlines(); err != nil {

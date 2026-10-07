@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/alexgorbatchev/go-tui-frame/internal/emulator"
+	"github.com/alexgorbatchev/go-tui-frame/internal/process"
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/term"
@@ -736,6 +737,80 @@ func TestCancellationTerminatesAllOwnedSessionGroups(t *testing.T) {
 		t.Fatal("canceled session did not complete")
 	}
 	awaitGone(t, pid, "owned descendant in separate process group survived cancellation")
+}
+
+// Termination walks the host process table once and sends SIGTERM and SIGCONT
+// to every group it found. A stopped group exits only when it receives both:
+// the SIGTERM stays pending until the SIGCONT resumes it. Both groups are
+// stopped, so each must receive both.
+func TestTerminationSignalsEveryGroupFromOneScan(t *testing.T) {
+	cmd, file := descendantCommand(t, "groups")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waited := false
+	t.Cleanup(func() {
+		if !waited {
+			if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+				t.Error(err)
+			}
+			_ = cmd.Wait() // Reaps the leader the failed test left; its kill is the cause.
+		}
+	})
+	pid := awaitDescendantGroup(t, file, cmd.Process.Pid)
+	// The stopped leader keeps the descendant's group from being orphaned,
+	// which would make the kernel send that group SIGHUP and SIGCONT.
+	for _, member := range []int{pid, cmd.Process.Pid} {
+		if err := unix.Kill(-member, syscall.SIGSTOP); err != nil {
+			t.Fatal(err)
+		}
+		awaitStopped(t, member)
+	}
+	s := &session[struct{}]{frame: &Frame[struct{}]{cmd: cmd}}
+	before := process.SessionScans()
+	err := s.terminate()
+	scans := process.SessionScans() - before
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scans != 1 {
+		t.Fatalf("termination walked the host process table %d times, want 1", scans)
+	}
+	awaitGone(t, -pid, "stopped group survived termination")
+	err = cmd.Wait()
+	waited = true
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) {
+		t.Fatalf("launch leader wait = %v, want its SIGTERM exit", err)
+	}
+	if status, ok := exit.Sys().(syscall.WaitStatus); !ok || !status.Signaled() || status.Signal() != syscall.SIGTERM {
+		t.Fatalf("launch leader exit = %v, want SIGTERM", exit)
+	}
+}
+
+// awaitStopped waits until the native process state of pid reports it stopped
+// by a signal.
+func awaitStopped(t *testing.T, pid int) {
+	t.Helper()
+	var stopped string
+	switch runtime.GOOS {
+	case "darwin":
+		stopped = "4" // SSTOP in <sys/proc.h>, reported as pbi_status.
+	case "linux":
+		stopped = "T" // The state field of /proc/<pid>/stat.
+	default:
+		t.Fatalf("no stopped state for %s", runtime.GOOS)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		state := process.Read(pid).State
+		if state.Available && state.Value == stopped {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("process %d did not stop", pid)
 }
 
 // observerFault is a way for an observer callback to fail, with the error Run
