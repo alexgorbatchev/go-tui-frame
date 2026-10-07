@@ -97,10 +97,6 @@ func TestExecuteCtrlQStopsItsRealChild(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ready := filepath.Join(projectTempDir(t), "child-started")
 			t.Setenv("FRAME_CLI_SIGTERM_READY", ready)
-			// A race-enabled child otherwise sleeps for the race detector's
-			// default atexit_sleep_ms of 1000 when it exits, which lasts until
-			// the frame's SIGKILL.
-			t.Setenv("GORACE", "atexit_sleep_ms=0")
 			// cliTTY replaces os.Args, which child reads.
 			child := tt.child(ready)
 			master, diagnostic := cliTTY(t, append([]string{"--showcase", "--"}, child...)...)

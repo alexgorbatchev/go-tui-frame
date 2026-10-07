@@ -174,7 +174,8 @@ func runReadmeCapture(t *testing.T, binary string) {
 // readmeSIGTERMChild returns the nvim script that execs this test binary as
 // TestReadmeSIGTERMChild in mode. A race-enabled binary otherwise sleeps for
 // the race detector's default atexit_sleep_ms of 1000 when it exits, which
-// lasts until the frame's SIGKILL.
+// lasts until the frame's SIGKILL. The sleep applies only to exit status 0,
+// which "exit" mode uses.
 func readmeSIGTERMChild(mode string) string {
 	return `exec env GORACE=atexit_sleep_ms=0 FRAME_README_SIGTERM_CHILD=` + mode +
 		` "$FRAME_README_TEST_BINARY" -test.run='^TestReadmeSIGTERMChild$'`
