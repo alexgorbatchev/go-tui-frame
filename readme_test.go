@@ -118,7 +118,7 @@ func runReadmeCapture(t *testing.T, binary string) {
 			// (DECCOLM), which the viewport cannot fit, so a session error
 			// follows the quit.
 			name:   "Ctrl+Q with a later session error",
-			child:  `trap 'printf "\033[?40h\033[?3h"' TERM; printf started; while :; do sleep 1; done`,
+			child:  `trap 'printf "\033[?40h\033[?3h"' TERM; printf started; while :; do sleep 1 & wait $!; done`,
 			quit:   quitWhenStarted,
 			code:   1,
 			stderr: regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(ErrGeometry.Error()) + `: `),
