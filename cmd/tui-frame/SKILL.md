@@ -9,7 +9,7 @@ description: >-
 author: alexgorbatchev
 metadata:
   created_on: 2026-10-01 13:23
-  last_modified: 2026-10-06 17:10
+  last_modified: 2026-10-06 17:24
   status: current
 ---
 
@@ -158,9 +158,11 @@ protocol endpoints; their stdout contains completion candidates and a final
 | `LINES` | Removed from the child environment; the child's size comes from its PTY window |
 | `PATH` | Standard executable search for a child name without a path separator |
 | `TERM`, `COLORTERM` | Child receives `xterm-256color` and `truecolor` to describe its virtual endpoint |
-| `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `LC_TERMINAL`, `TERM_FEATURES`, `KONSOLE_VERSION`, `VTE_VERSION`, `KITTY_WINDOW_ID`, `KITTY_PID`, `GHOSTTY_RESOURCES_DIR`, `GHOSTTY_BIN_DIR`, `GHOSTTY_SHELL_FEATURES`, `WEZTERM_EXECUTABLE`, `WEZTERM_PANE`, `ITERM_SESSION_ID`, `ITERM_PROFILE`, `TERM_SESSION_ID`, `XTERM_VERSION`, `MLTERM`, `TERMINAL_NAME`, `EAT_SHELL_INTEGRATION_DIR`, `WARP_HONOR_PS1`, `WARP_SESSION_ID`, `WARP_TERMINAL_SESSION_UUID`, `WARP_IS_LOCAL_SHELL_SESSION`, `VSCODE_INJECTION`, `TABBY_CONFIG_DIRECTORY`, `CURSOR_TRACE_ID`, `WT_SESSION` | Removed from the child environment because programs read them to choose something the virtual endpoint does not provide, such as Kitty graphics, Sixel, iTerm2 inline images, VTE's shell-integration sequences, Ghostty's terminfo on ssh hosts, or OSC 52 clipboard writes; without `WEZTERM_PANE`, `KITTY_WINDOW_ID`, `KITTY_PID`, and `ITERM_SESSION_ID`, remote-control commands in the child need an explicit target, such as `wezterm cli --pane-id` |
+| `TERM_PROGRAM`, `LC_TERMINAL`, `KONSOLE_VERSION`, `VTE_VERSION`, `KITTY_WINDOW_ID`, `KITTY_PID`, `GHOSTTY_RESOURCES_DIR`, `GHOSTTY_BIN_DIR`, `GHOSTTY_SHELL_FEATURES`, `WEZTERM_EXECUTABLE`, `WEZTERM_PANE`, `ITERM_SESSION_ID`, `ITERM_PROFILE`, `TERM_SESSION_ID`, `XTERM_VERSION`, `MLTERM`, `TERMINAL_NAME`, `EAT_SHELL_INTEGRATION_DIR`, `WARP_HONOR_PS1`, `WARP_SESSION_ID`, `WARP_TERMINAL_SESSION_UUID`, `WARP_IS_LOCAL_SHELL_SESSION`, `VSCODE_INJECTION`, `TABBY_CONFIG_DIRECTORY`, `CURSOR_TRACE_ID`, `WT_SESSION` | Removed from the child environment; each is read by at least one known program to choose something the virtual endpoint does not provide, such as Kitty graphics, Sixel, iTerm2 inline images, VTE's shell-integration sequences, Ghostty's terminfo on ssh hosts, or OSC 52 clipboard writes; without `WEZTERM_PANE`, `KITTY_WINDOW_ID`, and `ITERM_SESSION_ID`, remote-control commands in the child need an explicit target, such as `wezterm cli --pane-id` |
+| `TERM_PROGRAM_VERSION`, `LC_TERMINAL_VERSION`, `TERM_FEATURES` | Removed with the identity they describe: the versions of `TERM_PROGRAM` and `LC_TERMINAL`, and iTerm2's feature report |
 | `TMUX`, `TMUX_PANE`, `WEZTERM_UNIX_SOCKET`, `KITTY_LISTEN_ON`, `ALACRITTY_SOCKET`, and similar socket handles | Inherited by the child, so `tmux`, `wezterm cli`, `kitten @`, and `alacritty msg` can reach the outer multiplexer or terminal; programs can also read them to choose tmux- or Alacritty-specific output |
-| Other variables, including ones that only name the outer terminal, such as `TERMINAL_EMULATOR` | Inherited by the child process |
+| `VSCODE_GIT_ASKPASS_MAIN` | Inherited by the child because VS Code's git askpass helper runs it, although some programs read it to trust OSC 52 clipboard writes |
+| Other variables, including ones that only name the outer terminal, such as `TERMINAL_EMULATOR` | Inherited by the child process; the removed list is not exhaustive, and inherited variables can still steer programs |
 
 Human help uses a command tree and hides generated completion commands from
 that tree. Agent help describes the full public interface and starts with
