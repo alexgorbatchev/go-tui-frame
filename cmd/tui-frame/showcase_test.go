@@ -75,18 +75,22 @@ func TestShowcaseUpdatesIdleChildFrame(t *testing.T) {
 	}
 }
 
-// showcaseBells is a protocol burst longer than the library's 64-record
-// observation queue (observationQueueLimit). The child writes it at once, so
-// one PTY read carries it and the session emits a Protocol event for every bell
-// before it next parks.
+// showcaseBells is a protocol burst more than three times the library's
+// 64-record observation queue (observationQueueLimit). The child writes it at
+// once, so one PTY read carries it and the session emits a Protocol event for
+// every bell before it next parks.
 const showcaseBells = 200
 
 // The showcase waits only for Started. A burst of child output must not reach
 // the observation queue on its behalf, or a dispatcher that falls behind ends
 // the session with ErrObservationOverflow. A single scheduler P holds the
-// dispatcher goroutine deterministically: it cannot run until the session
-// goroutine parks, so every Protocol event of one read would queue up behind
-// the session if the showcase selected it.
+// dispatcher goroutine: it runs only when the session goroutine parks or the
+// runtime preempts it after 10ms of running. The bell loop never parks, so
+// every Protocol event of one read would queue up behind the session if the
+// showcase selected it. Because the burst is over three times the queue, the
+// session goroutine would have to be preempted repeatedly within that one read
+// to mask an all-kinds subscription; scheduling can never fail the fixed code,
+// which emits no burst events at all.
 func TestShowcaseSurvivesChildOutputBurstWithHeldObserver(t *testing.T) {
 	procs := runtime.GOMAXPROCS(1)
 	t.Cleanup(func() { runtime.GOMAXPROCS(procs) })
