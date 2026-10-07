@@ -47,8 +47,33 @@ _native target prefix cache:
     test "$(zig version)" = '0.16.0' || { printf 'Zig 0.16.0 is required.\n' >&2; exit 1; }
     command -v pkg-config >/dev/null
     mkdir -p "$root"
-    if test -e "$source"; then
+    check_source() {
         test -f "$source/.frame-source-revision" && test "$(cat "$source/.frame-source-revision")" = "$revision" || { printf 'Existing native source is unmarked or uses another revision: %s\n' "$source" >&2; exit 1; }
+    }
+    # stop runs the cleanup function $1 for a signal trap and re-raises the
+    # signal ($2). When the whole group gets SIGTERM, just forwards a second
+    # one, which can kill bash before its EXIT trap runs. This happens with
+    # macOS's /bin/bash 3.2, and with bash 5.2 during the archive check, so
+    # SIGTERM gets a trap like Ctrl+C and Ctrl+\. bash, except macOS's
+    # /bin/bash 3.2, ignores SIGQUIT again once the trap is reset, so the
+    # shell then exits with $3, the status bash gives a command that the
+    # signal ends: 128 plus its POSIX number (INT 2, QUIT 3, TERM 15).
+    stop() {
+        "$1"
+        trap - EXIT "$2"
+        kill -s "$2" "$$"
+        exit "$3"
+    }
+    # trap_cleanup runs the cleanup function $1 when the shell exits or
+    # gets SIGINT, SIGQUIT, or SIGTERM.
+    trap_cleanup() {
+        trap "$1" EXIT
+        trap "stop $1 INT 130" INT
+        trap "stop $1 QUIT 131" QUIT
+        trap "stop $1 TERM 143" TERM
+    }
+    if test -e "$source"; then
+        check_source
     else
         command -v shasum >/dev/null || { printf 'shasum is required.\n' >&2; exit 1; }
         archive="$root/ghostty-$revision.tar.gz"
@@ -65,10 +90,12 @@ _native target prefix cache:
                 *) exit "$status" ;;
             esac
         }
-        # curl runs as a job so that remove_download, the EXIT trap below,
+        # curl runs as a job so that remove_download, the cleanup trap below,
         # can stop and reap it before removing its file. A signal sent only
         # to this shell would otherwise leave curl running, and curl would
-        # create the file again. curl_pid is cleared once wait reaps curl.
+        # create the file again. Ctrl+C and Ctrl+\ reach curl too, but a job
+        # started without job control ignores SIGINT and SIGQUIT, so the
+        # trap stops it. curl_pid is cleared once wait reaps curl.
         curl_pid=''
         remove_download() {
             if test -n "$curl_pid"; then
@@ -76,22 +103,6 @@ _native target prefix cache:
                 wait "$curl_pid" 2>/dev/null || true
             fi
             rm -f "$download"
-        }
-        # Ctrl+C and Ctrl+\ reach curl too, but a job started without job
-        # control ignores SIGINT and SIGQUIT, so this trap stops curl,
-        # removes the file, and re-raises the signal ($1). SIGTERM takes the
-        # same path: when the whole group gets it, just forwards a second
-        # one, which can kill bash before its EXIT trap runs. This happens
-        # with macOS's /bin/bash 3.2, and with bash 5.2 during the check.
-        # bash, except macOS's /bin/bash 3.2, ignores SIGQUIT again once the
-        # trap is reset, so the shell then exits with $2, the status bash
-        # gives a command that the signal ends: 128 plus its POSIX number
-        # (INT 2, QUIT 3, TERM 15).
-        stop_download() {
-            remove_download
-            trap - EXIT "$1"
-            kill -s "$1" "$$"
-            exit "$2"
         }
         # Only a verified download is renamed to $archive. A cached archive
         # that fails the check, such as a partial file from an older recipe,
@@ -102,10 +113,7 @@ _native target prefix cache:
         fi
         if ! test -f "$archive"; then
             download=$(mktemp "$archive.XXXXXX")
-            trap remove_download EXIT
-            trap 'stop_download INT 130' INT
-            trap 'stop_download QUIT 131' QUIT
-            trap 'stop_download TERM 143' TERM
+            trap_cleanup remove_download
             curl --fail --location --retry 3 "$url" --output "$download" &
             curl_pid=$!
             curl_status=0
@@ -119,12 +127,50 @@ _native target prefix cache:
             mv "$download" "$archive"
             trap - EXIT INT QUIT TERM
         fi
+        # Runs that share $root, such as `just native` and `just native-linux`,
+        # can both find $source missing and extract the archive. mv(1)
+        # moves a directory into an existing target directory instead of
+        # failing, so a run checks $source again and renames its tree only
+        # while it holds $lock. With set -C (noclobber), bash creates the
+        # lock with open(2)'s O_CREAT and O_EXCL flags, which check for the
+        # file and create it in one atomic step. The lock holds this shell's
+        # PID, and remove_extraction removes it only while it holds that
+        # PID. The lock is held only for the check and the rename, so a run
+        # waits for it at most 30 seconds: a run ended by SIGKILL leaves it
+        # behind.
+        lock="$source.lock"
+        lock_source() {
+            local status=0
+            set -C
+            printf '%s\n' "$$" 2>/dev/null > "$lock" || status=$?
+            set +C
+            return "$status"
+        }
+        remove_extraction() {
+            if test "$(cat "$lock" 2>/dev/null)" = "$$"; then
+                rm -f "$lock"
+            fi
+            rm -rf "$extracted"
+        }
         extracted=$(mktemp -d "$root/source.XXXXXX")
-        trap 'rm -rf "$extracted"' EXIT
+        trap_cleanup remove_extraction
         tar -xzf "$archive" --strip-components=1 -C "$extracted"
         printf '%s\n' "$revision" > "$extracted/.frame-source-revision"
-        mv "$extracted" "$source"
-        trap - EXIT
+        deadline=$((SECONDS + 30))
+        until lock_source; do
+            test "$SECONDS" -lt "$deadline" || {
+                printf 'Could not create %s within 30 seconds. Remove it if no native build is running.\n' "$lock" >&2
+                exit 1
+            }
+            sleep 0.1
+        done
+        if test -e "$source"; then
+            check_source
+        else
+            mv "$extracted" "$source"
+        fi
+        remove_extraction
+        trap - EXIT INT QUIT TERM
     fi
     cd "$source"
     # Ghostty's build runs git in its source directory to detect a version.

@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 16:06
-last_modified: 2026-10-06 16:39
+last_modified: 2026-10-06 19:39
 status: current
 ---
 
@@ -63,6 +63,23 @@ with its status and leaves the cached archive in place. The native recipe needs
 `shasum` only while `.tmp/native/ghostty` does not exist; without it, the recipe
 stops before it checks or downloads the archive. Recipes that run Go always need
 `shasum`; see below.
+
+The recipe extracts the archive into a temporary directory under
+`.tmp/native` and renames it to `.tmp/native/ghostty`. `just native` and
+`just native-linux` share that directory, so runs that start together can both
+extract. `mv` moves a directory into an existing target directory instead of
+failing, so each run renames its tree only while it holds the lock file
+`.tmp/native/ghostty.lock`, and checks for `.tmp/native/ghostty` again first.
+When another run has already renamed its tree, the run checks that tree's
+revision marker and removes its own extraction. The lock is created with the
+shell's [noclobber option](https://pubs.opengroup.org/onlinepubs/9799919799/utilities/V3_chap02.html#tag_19_07_02),
+which creates a file atomically, as
+[`open()`](https://pubs.opengroup.org/onlinepubs/9799919799/functions/open.html)
+does with `O_CREAT` and `O_EXCL`. It holds the run's process ID and is removed
+when the run exits, including on SIGINT, SIGQUIT, or SIGTERM, which also remove
+the temporary directory. A run ended by SIGKILL can leave the lock behind, so
+a run waits at most 30 seconds for it and then stops with the lock's path.
+Remove that file when no native build is running.
 
 Ghostty's build runs `git` in its source directory to detect its version. The
 extracted archive is not a git repository, so the recipe runs `zig build`
