@@ -162,10 +162,12 @@ func (f *Frame[T]) InheritTerminal(enabled bool) *Frame[T] {
 // and unmodified Enter, Tab or Backspace as its legacy byte, so each repeat
 // arrives as a new press that the handler routes and that determines the
 // release. The terminal then reports no release for Enter, Tab or Backspace,
-// and reports a text key's release by its key rather than its text: when the
-// text is not the key's unshifted character in either case, as when Shift+1
-// types ! or a macOS Option key types a character, the release matches no
-// press, and the handler's answer for the release routes it.
+// and reports a text key's release by its key rather than its text. The
+// release matches the press only when the text is the key's unshifted
+// character or, for an ASCII letter, its capital. Otherwise, as when Shift+1
+// types !, Shift+й types Й, a keypad key types a digit or a macOS Option key
+// types a character, the release matches no press, and the handler's answer
+// for the release routes it.
 func (f *Frame[T]) Capture(handler func(Input) Disposition) *Frame[T] {
 	f.configure(func() { f.capture = handler })
 	return f
