@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Usage: scripts/with-cpu-load [-c cpus] [-t timeout] [--] [command...]
+# Runs a command under artificial CPU load using a single-process Go burner.
+# Ensures deterministic cleanup on exit, interrupt, timeout, or error.
+set -euo pipefail
+
+cpus=""
+timeout="60s"
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+		-c|--cpus)
+			cpus="$2"
+			shift 2
+			;;
+		-t|--timeout)
+			timeout="$2"
+			shift 2
+			;;
+		--)
+			shift
+			break
+			;;
+		-*)
+			echo "Unknown flag: $1" >&2
+			exit 2
+			;;
+		*)
+			break
+			;;
+	esac
+done
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/.." && pwd)"
+
+args=("-timeout" "$timeout")
+if [ -n "$cpus" ]; then
+	args+=("-cpus" "$cpus")
+fi
+
+mkdir -p "$repo_root/.tmp"
+burner_bin="$repo_root/.tmp/cpuburn"
+if [ ! -x "$burner_bin" ] || [ "$repo_root/scripts/cpuburn/main.go" -nt "$burner_bin" ]; then
+	go build -o "$burner_bin" "$repo_root/scripts/cpuburn/main.go"
+fi
+
+"$burner_bin" "${args[@]}" &
+burner_pid=$!
+
+cleanup() {
+	if [ -n "${burner_pid:-}" ]; then
+		kill "$burner_pid" 2>/dev/null || true
+		wait "$burner_pid" 2>/dev/null || true
+	fi
+}
+trap cleanup EXIT INT TERM HUP
+
+if [ $# -eq 0 ]; then
+	wait "$burner_pid" || true
+	exit 0
+fi
+
+"$@"

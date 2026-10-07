@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 13:56
-last_modified: 2026-10-06 17:18
+last_modified: 2026-10-07 15:45
 status: current
 ---
 
@@ -78,6 +78,13 @@ Demo painting can also be checked independently with
 - Whenever a code change affects execution results, change a corresponding
   behavioral test file and require 90% code coverage; `scripts/` is excluded.
   Use real canvases, files, binaries, and terminals rather than runtime stubs.
+- When testing or verifying under artificial CPU load, never spawn unmanaged
+  background processes or subshell background jobs `(cmd &)` or `(yes > /dev/null &)`
+  (which detach and reparent directly to PID 1 / launchd). Never use global
+  process killers (`pkill`, `killall`). Use the repository's single-process
+  burner `scripts/with-cpu-load` or manage background processes directly in the
+  controlling shell with exact PIDs tracked, an immediate `trap '...' EXIT INT TERM HUP`
+  cleanup handler, and a bounded duration.
 - Record new user instructions in the appropriate `AGENTS.md` upon receipt;
   check with the user before changing conflicting instructions.
 - Inherit reported terminal preferences and original PTY settings by default;
