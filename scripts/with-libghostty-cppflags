@@ -23,10 +23,19 @@
 # to every cgo package, so the archive would reach the final link once per cgo
 # package.
 set -euo pipefail
+if test "$#" -eq 0; then
+    printf 'usage: %s command [args...]\n' "$0" >&2
+    exit 2
+fi
 package='libghostty-vt-static'
 cflags=$(pkg-config --static --cflags "$package")
 libs=$(pkg-config --static --libs "$package")
-# pkg-config separates flags with blanks, and Go splits its output the same way.
+# Go parses pkg-config output with shell quoting and backslash escapes
+# (splitPkgConfigOutput in cmd/go/internal/work/exec.go). This script splits
+# --libs on blanks only and refuses output that does not name exactly one
+# archive, so a quoted or escaped path fails here instead of hashing another
+# file. The --cflags output goes into CGO_CPPFLAGS as printed, and Go splits
+# that variable on blanks and quotes, without backslash escapes.
 set -f
 archives=()
 for word in $libs; do

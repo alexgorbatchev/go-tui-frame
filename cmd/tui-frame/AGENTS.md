@@ -33,7 +33,7 @@ From the repository root:
   be instrumented with Go's native `-cover` and `GOCOVERDIR` support.
 
 Demo painting can also be checked independently with
-`go test -race cmd/tui-frame/demo.go cmd/tui-frame/demo_test.go`.
+`scripts/with-libghostty-cppflags go test -race cmd/tui-frame/demo.go cmd/tui-frame/demo_test.go`.
 
 ## Contracts and boundaries
 

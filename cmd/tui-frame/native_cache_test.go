@@ -19,47 +19,78 @@ const (
 )
 
 // The Ghostty binding gets its flags from a #cgo pkg-config directive. Go's
-// build cache key for a cgo package covers the CGO_*FLAGS environment and the
-// package's #cgo directives, but not pkg-config output, and the binding's
-// module-cache directory is the same in every checkout. Two checkouts with
-// their own native prefixes therefore share one cached binding unless the
-// build environment names the prefix. This builds the executable through the
-// justfile's Go wrapper against two prefixes that share one build cache,
-// removes the first, and requires the second build to link its own archive.
-func TestBuildCacheKeepsNativePrefixesApart(t *testing.T) {
+// build cache keys hash the CGO_*FLAGS environment, the package's #cgo
+// directives, and packages' contents, but not pkg-config output or the files
+// it names, and the binding's module-cache directory is the same in every
+// checkout. These subtests build the executable through the justfile's Go
+// wrapper against copies of the native prefix, with one build cache. A first
+// build against this checkout's prefix fills that cache, so the parallel
+// subtests compile only the packages whose keys name their prefix copy. Go
+// does not share work between builds that start together on an empty cache.
+func TestBuildCache(t *testing.T) {
+	t.Parallel()
 	source := pkgConfigVariable(t, "prefix")
-	cache := filepath.Join(projectTempDir(t), "gocache")
-	first := copyNativePrefix(t, source)
-	second := copyNativePrefix(t, source)
+	cache := repositoryTempDir(t)
+	buildAgainstPrefix(t, source, cache, filepath.Join(repositoryTempDir(t), "tui-frame"), "")
 
-	hostLinkAgainstPrefix(t, first, cache)
-	if err := os.RemoveAll(first); err != nil {
-		t.Fatal(err)
-	}
-	link := hostLinkAgainstPrefix(t, second, cache)
-	want := filepath.Join(second, "lib", nativeArchive)
-	if !strings.Contains(link, want) {
-		t.Errorf("host link does not use %s:\n%s", want, link)
-	}
+	// Two checkouts with their own prefixes share one cached binding unless
+	// the build environment names the prefix. This builds against two
+	// prefixes, removes the first, and requires the second build to link its
+	// own archive.
+	t.Run("KeepsNativePrefixesApart", func(t *testing.T) {
+		t.Parallel()
+		first := copyNativePrefix(t, source)
+		second := copyNativePrefix(t, source)
+
+		hostLinkAgainstPrefix(t, first, cache)
+		if err := os.RemoveAll(first); err != nil {
+			t.Fatal(err)
+		}
+		link := hostLinkAgainstPrefix(t, second, cache)
+		want := filepath.Join(second, "lib", nativeArchive)
+		if !strings.Contains(link, want) {
+			t.Errorf("host link does not use %s:\n%s", want, link)
+		}
+	})
+
+	// An archive rebuilt at the same path changes no key by itself. This
+	// rebuilds an existing executable, as `just build` does with
+	// bin/tui-frame, after the archive at the same prefix changes, and
+	// requires the link step's cache key to change.
+	t.Run("FollowsNativeArchiveContents", func(t *testing.T) {
+		t.Parallel()
+		prefix := copyNativePrefix(t, source)
+		binary := filepath.Join(repositoryTempDir(t), "tui-frame")
+
+		buildAgainstPrefix(t, prefix, cache, binary, "")
+		before := goBuildID(t, binary)
+		rewriteLastMemberOwner(t, filepath.Join(prefix, "lib", nativeArchive))
+		buildAgainstPrefix(t, prefix, cache, binary, "")
+		if after := goBuildID(t, binary); after == before {
+			t.Errorf("go build reused %s after its native archive changed; build ID %s", binary, after)
+		}
+	})
 }
 
-// Go's cache keys hash packages' contents, not the files their cgo flags name,
-// so an archive rebuilt at the same path does not change any key by itself.
-// This rebuilds an existing executable, as `just build` does with
-// bin/tui-frame, after the archive at the same prefix changes, and requires
-// the link step's cache key to change.
-func TestBuildCacheFollowsNativeArchiveContents(t *testing.T) {
-	prefix := copyNativePrefix(t, pkgConfigVariable(t, "prefix"))
-	cache := filepath.Join(projectTempDir(t), "gocache")
-	binary := filepath.Join(projectTempDir(t), "tui-frame")
-
-	buildAgainstPrefix(t, prefix, cache, binary, "")
-	before := goBuildID(t, binary)
-	rewriteLastMemberOwner(t, filepath.Join(prefix, "lib", nativeArchive))
-	buildAgainstPrefix(t, prefix, cache, binary, "")
-	if after := goBuildID(t, binary); after == before {
-		t.Errorf("go build reused %s after its native archive changed; build ID %s", binary, after)
+// repositoryTempDir returns a new directory under the repository's .tmp that
+// is removed when the test ends. Unlike projectTempDir it does not set TMPDIR,
+// which parallel tests cannot do.
+func repositoryTempDir(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
 	}
+	dir, err := os.MkdirTemp(filepath.Join(root, ".tmp"), "native-cache-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Errorf("remove %s: %v", dir, err)
+		}
+	})
+	return dir
 }
 
 // rewriteLastMemberOwner changes the owner ID in the header of the archive's
@@ -119,7 +150,7 @@ func pkgConfigVariable(t *testing.T, name string) string {
 // step does for each checkout's --prefix.
 func copyNativePrefix(t *testing.T, source string) string {
 	t.Helper()
-	prefix := projectTempDir(t)
+	prefix := repositoryTempDir(t)
 	if err := os.CopyFS(filepath.Join(prefix, "include"), os.DirFS(filepath.Join(source, "include"))); err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +207,7 @@ func copyFile(t *testing.T, from, to string) {
 // reports.
 func hostLinkAgainstPrefix(t *testing.T, prefix, cache string) string {
 	t.Helper()
-	out := buildAgainstPrefix(t, prefix, cache, filepath.Join(projectTempDir(t), "tui-frame"), "-v")
+	out := buildAgainstPrefix(t, prefix, cache, filepath.Join(repositoryTempDir(t), "tui-frame"), "-v")
 	for line := range strings.Lines(out) {
 		if strings.HasPrefix(line, "host link: ") {
 			return line

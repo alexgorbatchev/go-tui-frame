@@ -363,8 +363,8 @@ archive; see the [pinned native build](native-build.md). In
 `TestBuildCacheKeepsNativePrefixesApart` builds against two prefixes with one
 build cache and removes the first before building the second.
 `TestBuildCacheFollowsNativeArchiveContents` changes the archive in place and
-requires the rebuilt executable to get a new build ID. Both audited cross-builds used an empty `GOCACHE`, so each linked this
-checkout's archive.
+requires the rebuilt executable to get a new build ID. Both audited
+cross-builds used an empty `GOCACHE`, so each linked this checkout's archive.
 
 These audits follow the [pinned native build](native-build.md). Source changes
 require rebuilding and reauditing the resulting binaries. Linux x86_64 tests
