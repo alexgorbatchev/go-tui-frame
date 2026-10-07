@@ -38,6 +38,37 @@ func TestErasedCellsKeepBackground(t *testing.T) {
 	}
 }
 
+// Captures reuse resolved palette colors, so a palette change must reach
+// erased cells whose background references the changed entry.
+func TestErasedPaletteBackgroundFollowsOSCPaletteChanges(t *testing.T) {
+	em := newTerminal(t, 12, 3)
+	writeTerminal(t, em, "\x1b[48;5;33m\x1b[2K\x1b[0m")
+	initial := terminalState(t, em)
+	changed := ghostty.ColorRGB{R: 0x12, G: 0x34, B: 0x56}
+	if initial.Colors.Palette[33] == changed {
+		t.Fatalf("palette entry 33 already has the changed color %#v", changed)
+	}
+	for _, step := range []struct {
+		name, sequence string
+		want           ghostty.ColorRGB
+	}{
+		{"initial", "", initial.Colors.Palette[33]},
+		{"OSC 4", "\x1b]4;33;rgb:12/34/56\x1b\\", changed},
+		{"OSC 104", "\x1b]104;33\x1b\\", initial.Colors.Palette[33]},
+	} {
+		writeTerminal(t, em, step.sequence)
+		s := terminalState(t, em)
+		if s.Colors.Palette[33] != step.want {
+			t.Fatalf("%s: palette entry 33 = %#v; want %#v", step.name, s.Colors.Palette[33], step.want)
+		}
+		for x, cell := range s.Cells[:s.Size.Cols] {
+			if cell.Style.Bg != rgbColor(step.want) {
+				t.Fatalf("%s: erased cell %d background = %#v; want %#v", step.name, x, cell.Style.Bg, rgbColor(step.want))
+			}
+		}
+	}
+}
+
 func TestOSCDefaultColorsRepaintExistingCells(t *testing.T) {
 	for _, tt := range []struct {
 		name, change, reset string

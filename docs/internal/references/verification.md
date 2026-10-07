@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 20:10
-last_modified: 2026-10-07 09:27
+last_modified: 2026-10-07 09:39
 status: current
 ---
 
@@ -97,7 +97,8 @@ go tool pprof -sample_index=alloc_objects -top .tmp/emulator.test .tmp/borrowed.
 `TestRowCaptureAllocationsDoNotScaleWithWidth` in
 [row tests](../../../internal/emulator/row_test.go) logs the allocations of an
 unchanged internal capture and of a capture after one damaged row. It runs at
-20, 120 and 240 columns:
+20, 120 and 240 columns. The erased rows alternate two backgrounds, so each
+iteration damages the row:
 
 ```sh
 scripts/with-libghostty-cppflags go test -count=1 -v -run 'TestRowCaptureAllocationsDoNotScaleWithWidth' ./internal/emulator
@@ -105,10 +106,16 @@ scripts/with-libghostty-cppflags go test -count=1 -v -run 'TestRowCaptureAllocat
 
 | Damaged row | Unchanged | Damaged | Additional | Test limit |
 | :--- | ---: | ---: | ---: | ---: |
-| Plain text (`updated`) | 74 | 83 | 9 | 12 |
-| Two styles across the full width | 74 | 93 | 19 | 24 |
+| Plain text (`updated`) | 79 | 89 | 10 | 12 |
+| Two styles across the full width | 79 | 93 | 14 | 24 |
+| Erased with a palette background (`48;5;33`, `48;5;34`) | 79 | 89 | 10 | 12 |
+| Erased with an RGB background (`48;2;10;20;30`, `48;2;40;50;60`) | 79 | 90 | 11 | 12 |
 
-Each count is the same at all three widths, and the same with `-race`.
+Each count is the same at all three widths, and the same with `-race`. These
+counts were measured on 2026-10-07. Capture converts each palette entry and
+each default color once after the render colors change, and reuses the most
+recent direct RGB color, so erased cells add no allocation per column. The RGB
+row adds one allocation because each iteration changes the color.
 
 ## Session benchmarks
 
@@ -220,7 +227,9 @@ hyperlink leaves no link in the reused cell storage, and they reject
 unsupported manifests.
 [Color tests](../../../internal/emulator/colors_test.go) verify that RGB and
 palette backgrounds survive erase-line and erase-display, and that a later erase
-with default attributes restores the default background. In
+with default attributes restores the default background. They also verify
+that erased cells follow an OSC 4 change and an OSC 104 reset of their
+palette entry. In
 [repaint tests](../../../repaint_test.go), child output that erases with a
 background color arrives through a real PTY. Replaying the repaint on a native
 outer terminal shows that background on the erased rows without overwriting the
@@ -275,7 +284,8 @@ PTY. They verify:
 Each drawing callback receives its own copy of the snapshot. The copy holds
 one cell grid, which `Terminal.Cells` and `Terminal.Native.Cells` share, and
 the observation budget weighs that grid once. Capture also allocates when the
-geometry changes, for new graphemes and styles, and in native getter calls.
+geometry changes, for new graphemes and styles, for the first use of each color
+after the render colors change, and in native getter calls.
 
 ### Default foreground and background colors
 

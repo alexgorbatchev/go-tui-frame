@@ -6,6 +6,7 @@ package emulator
 import (
 	"errors"
 	"fmt"
+	"image/color"
 
 	"github.com/charmbracelet/colorprofile"
 	uv "github.com/charmbracelet/ultraviolet"
@@ -96,6 +97,17 @@ type Terminal struct {
 	cachedStyle                    uv.Style
 	styleValid                     bool
 	defaultStyle                   *ghostty.Style
+	// Converting a color value to color.Color allocates, so captures reuse
+	// converted colors. palette holds resolved entries, filled on first use;
+	// foreground and background hold the default colors, nil where the
+	// default rendition is kept. Both are reset when the render colors
+	// change. lastRGB caches the most recent direct RGB color, which erased
+	// runs and styled text repeat.
+	palette                [ghostty.PaletteSize]color.Color
+	foreground, background color.Color
+	colorsInterned         bool
+	lastRGB                ghostty.ColorRGB
+	lastRGBColor           color.Color
 }
 
 func New(opts Options) (*Terminal, error) {

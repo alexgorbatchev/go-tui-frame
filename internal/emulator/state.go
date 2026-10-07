@@ -209,8 +209,9 @@ func (t *Terminal) captureVisual() error {
 	if len(visual.dirty) != t.size.Rows {
 		visual.dirty = slices.Grow(visual.dirty, max(0, t.size.Rows-len(visual.dirty)))[:t.size.Rows]
 	}
-	if colorsChanged {
+	if colorsChanged || !t.colorsInterned {
 		t.styleValid = false
+		t.internColors(colors)
 	}
 	visual.cursor, visual.colors = *cursor, *colors
 	if err := t.render.RowIterator(t.rows); err != nil {
@@ -305,7 +306,7 @@ func (t *Terminal) copyCell(x, y int, cell *uv.Cell, native *NativeCell, colors 
 	case ghostty.CellContentBgColorPalette:
 		cell.Style.Bg = t.paletteColor(&colors.Palette, data.palette)
 	case ghostty.CellContentBgColorRGB:
-		cell.Style.Bg = rgbColor(data.rgb)
+		cell.Style.Bg = t.internedRGB(data.rgb)
 	}
 	switch data.wide {
 	case ghostty.CellWideWide:
@@ -361,14 +362,11 @@ func (t *Terminal) uvStyle(style *ghostty.Style, colors *ghostty.RenderStateColo
 		Fg: t.styleColor(style.FgColor(), &colors.Palette), Bg: t.styleColor(style.BgColor(), &colors.Palette),
 		UnderlineColor: t.styleColor(style.UnderlineColor(), &colors.Palette),
 	}
-	// Keep host-matching defaults as default rendition to preserve opacity
-	// and physical-terminal default-color policies. OSC overrides and isolated
-	// defaults require explicit colors so rendering agrees with child queries.
-	if result.Fg == nil && (t.hostForeground == nil || *t.hostForeground != colors.Foreground) {
-		result.Fg = rgbColor(colors.Foreground)
+	if result.Fg == nil {
+		result.Fg = t.foreground
 	}
-	if result.Bg == nil && (t.hostBackground == nil || *t.hostBackground != colors.Background) {
-		result.Bg = rgbColor(colors.Background)
+	if result.Bg == nil {
+		result.Bg = t.background
 	}
 	flags := []struct {
 		enabled bool
@@ -401,7 +399,7 @@ func (t *Terminal) uvStyle(style *ghostty.Style, colors *ghostty.RenderStateColo
 func (t *Terminal) styleColor(value ghostty.StyleColor, palette *ghostty.Palette) color.Color {
 	switch value.Tag {
 	case ghostty.StyleColorRGB:
-		return rgbColor(value.RGB)
+		return t.internedRGB(value.RGB)
 	case ghostty.StyleColorPalette:
 		return t.paletteColor(palette, value.Palette)
 	default:
@@ -409,12 +407,51 @@ func (t *Terminal) styleColor(value ghostty.StyleColor, palette *ghostty.Palette
 	}
 }
 
-// paletteColor keeps an entry the host reported, and the child has not
+// internColors discards colors converted from previous render colors and
+// converts the default colors. Palette entries are converted on first use,
+// so a change does not convert all 256 entries.
+func (t *Terminal) internColors(colors *ghostty.RenderStateColors) {
+	clear(t.palette[:])
+	t.foreground = defaultColor(t.hostForeground, colors.Foreground)
+	t.background = defaultColor(t.hostBackground, colors.Background)
+	t.colorsInterned = true
+}
+
+// defaultColor keeps a host-matching default as default rendition (nil) to
+// preserve opacity and physical-terminal default-color policies. OSC
+// overrides and isolated defaults require explicit colors so rendering agrees
+// with child queries.
+func defaultColor(host *ghostty.ColorRGB, rgb ghostty.ColorRGB) color.Color {
+	if host != nil && *host == rgb {
+		return nil
+	}
+	return rgbColor(rgb)
+}
+
+// internedRGB converts a direct RGB color, reusing the previous conversion
+// when the color repeats, as it does across an erased run.
+func (t *Terminal) internedRGB(rgb ghostty.ColorRGB) color.Color {
+	if t.lastRGBColor == nil || t.lastRGB != rgb {
+		t.lastRGB, t.lastRGBColor = rgb, rgbColor(rgb)
+	}
+	return t.lastRGBColor
+}
+
+// paletteColor returns entry i of palette, which must be the render colors
+// that internColors last received. It converts each entry once per palette.
+func (t *Terminal) paletteColor(palette *ghostty.Palette, i uint8) color.Color {
+	if t.palette[i] == nil {
+		t.palette[i] = t.resolvePaletteColor(palette, i)
+	}
+	return t.palette[i]
+}
+
+// resolvePaletteColor keeps an entry the host reported, and the child has not
 // changed, as a palette reference where the outer renderer would otherwise
 // downsample it. The outer terminal then paints its own theme color instead of
 // the nearest 256- or 16-color approximation. Child overrides and unreported
 // entries stay explicit, so rendering agrees with the child's palette queries.
-func (t *Terminal) paletteColor(palette *ghostty.Palette, i uint8) color.Color {
+func (t *Terminal) resolvePaletteColor(palette *ghostty.Palette, i uint8) color.Color {
 	if int(i) >= t.indexedEntries || !t.hostPaletteReported[i] || palette[i] != t.hostPalette[i] {
 		return rgbColor(palette[i])
 	}

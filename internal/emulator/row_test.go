@@ -91,20 +91,32 @@ func TestCellLayoutRejectsUnsupportedManifests(t *testing.T) {
 }
 
 func TestRowCaptureAllocationsDoNotScaleWithWidth(t *testing.T) {
-	for _, name := range []string{"plain", "styled"} {
+	for _, tt := range []struct {
+		name string
+		// writes cycle per iteration. Erased rows alternate two backgrounds
+		// so every iteration damages the row with a different color.
+		writes func(cols int) []string
+		limit  float64
+	}{
+		{"plain", func(int) []string { return []string{"\x1b[Hupdated"} }, 12},
+		{"styled", func(cols int) []string {
+			return []string{"\x1b[H\x1b[38;5;33m" + strings.Repeat("x", cols/2) + "\x1b[38;2;11;22;33m" + strings.Repeat("x", cols-cols/2) + "\x1b[0m"}
+		}, 24},
+		{"erased palette background", func(int) []string {
+			return []string{"\x1b[H\x1b[48;5;33m\x1b[2K\x1b[0m", "\x1b[H\x1b[48;5;34m\x1b[2K\x1b[0m"}
+		}, 12},
+		{"erased RGB background", func(int) []string {
+			return []string{"\x1b[H\x1b[48;2;10;20;30m\x1b[2K\x1b[0m", "\x1b[H\x1b[48;2;40;50;60m\x1b[2K\x1b[0m"}
+		}, 12},
+	} {
 		for _, cols := range []int{20, 120, 240} {
-			t.Run(fmt.Sprintf("%s/%d", name, cols), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s/%d", tt.name, cols), func(t *testing.T) {
 				em := newTerminal(t, cols, 3)
 				var state State
 				if err := em.UpdateState(&state); err != nil {
 					t.Fatal(err)
 				}
-				text := []byte("\x1b[Hupdated")
-				limit := 12.0
-				if name == "styled" {
-					text = []byte("\x1b[H\x1b[38;5;33m" + strings.Repeat("x", cols/2) + "\x1b[38;2;11;22;33m" + strings.Repeat("x", cols-cols/2) + "\x1b[0m")
-					limit = 24
-				}
+				writes := tt.writes(cols)
 				capture := func() {
 					if err := em.UpdateState(&state); err != nil {
 						t.Fatal(err)
@@ -112,16 +124,18 @@ func TestRowCaptureAllocationsDoNotScaleWithWidth(t *testing.T) {
 					em.ClearDamage()
 				}
 				unchanged := testing.AllocsPerRun(20, capture)
+				i := 0
 				row := testing.AllocsPerRun(20, func() {
-					if _, err := em.Write(text); err != nil {
+					if _, err := em.Write([]byte(writes[i%len(writes)])); err != nil {
 						t.Fatal(err)
 					}
+					i++
 					capture()
 				})
 				t.Logf("unchanged %.0f, damaged row %.0f, additional %.0f allocations", unchanged, row, row-unchanged)
-				// Row iterator queries have a fixed cost; plain cells must not add
+				// Row iterator queries have a fixed cost; cells must not add
 				// allocations as the viewport becomes wider.
-				if extra := row - unchanged; extra > limit {
+				if extra := row - unchanged; extra > tt.limit {
 					t.Errorf("%d-column row capture added %.0f allocations", cols, extra)
 				}
 			})
