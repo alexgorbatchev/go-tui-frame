@@ -57,6 +57,12 @@ func (f *Frame[T]) Run(ctx context.Context) (result Result, err error) {
 		// the session loop stopped reading its context.
 		err = joinOnce(err, events.failure())
 	}()
+	// Go ignores SIGWINCH while no channel is registered, so the subscription
+	// precedes reading the outer size: a resize during startup stays buffered
+	// until the loop's monitor turns it into a resize.
+	winch := make(chan os.Signal, 1)
+	signal.Notify(winch, syscall.SIGWINCH)
+	defer signal.Stop(winch)
 	fd, device, w, err := inspectConsole(f.input, f.output)
 	if err != nil {
 		return result, err
@@ -96,7 +102,7 @@ func (f *Frame[T]) Run(ctx context.Context) (result Result, err error) {
 		return result, err
 	}
 	defer router.close()
-	s := &session[T]{frame: f, console: c, terminal: em, router: router, events: events, geometry: g, screen: c.outerScreen(g), framer: c.framer}
+	s := &session[T]{frame: f, console: c, terminal: em, router: router, events: events, geometry: g, screen: c.outerScreen(g), framer: c.framer, winch: winch}
 	if err = s.openWake(); err != nil {
 		return result, err
 	}
@@ -199,6 +205,9 @@ type session[T any] struct {
 	framer                                                    *input.Framer
 	escapeDeadline, holdDeadline, killDeadline, drainDeadline time.Time
 	renderDeadline, reapDeadline                              time.Time
+	// winch receives the outer terminal's SIGWINCH from before Run reads the
+	// outer size until Run returns.
+	winch <-chan os.Signal
 }
 
 // endpointConflictVariables names outer-terminal variables the child must not
@@ -822,9 +831,6 @@ func (s *session[T]) wakeFailure() error {
 
 func (s *session[T]) monitor(ctx context.Context, stop <-chan struct{}, done chan<- struct{}, resizes chan<- struct{}) {
 	defer close(done)
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, syscall.SIGWINCH)
-	defer signal.Stop(signals)
 	canceled := ctx.Done()
 	for {
 		select {
@@ -835,7 +841,7 @@ func (s *session[T]) monitor(ctx context.Context, stop <-chan struct{}, done cha
 			s.wakeLoop()
 		case <-s.frame.wake:
 			s.wakeLoop()
-		case <-signals:
+		case <-s.winch:
 			select {
 			case resizes <- struct{}{}:
 			default:

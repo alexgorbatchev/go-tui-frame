@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -200,4 +201,72 @@ func readOuterReplies(t *testing.T, s *session[struct{}], reply string, n int) [
 		t.Fatal(err)
 	}
 	return packets
+}
+
+// A window resized while Run starts, after it read the outer size, must still
+// reach the session: the first loop iteration applies the new size.
+func TestRunAppliesResizeDuringStartup(t *testing.T) {
+	h := newHarness(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	// The harness never answers modifyOtherKeys, so the probe runs to this
+	// deadline and the resize below lands inside startup, before the loop.
+	const probeTimeout = time.Second
+	want := Size{Cols: 32, Rows: 10}
+	var resize sync.Once
+	started, resized := make(chan Size, 1), make(chan Snapshot, 1)
+	kinds := []EventKind{OuterInput, Started, Resized}
+	app := New(childCommand(t), struct{}{}).Terminal(h.slave, h.slave).ObserveEvents(kinds, func(e Event) {
+		switch {
+		case e.Kind == OuterInput && e.Origin == "terminal-probe":
+			resize.Do(func() {
+				// The harness PTY is not this process's controlling terminal,
+				// so the window manager's SIGWINCH is sent explicitly.
+				if err := pty.Setsize(h.slave, &pty.Winsize{Cols: uint16(want.Cols), Rows: uint16(want.Rows), X: uint16(want.Cols * harnessCellWidth), Y: uint16(want.Rows * harnessCellHeight)}); err != nil {
+					t.Error(err)
+				}
+				if err := unix.Kill(os.Getpid(), unix.SIGWINCH); err != nil {
+					t.Error(err)
+				}
+			})
+		case e.Kind == Started:
+			started <- e.Snapshot.Outer
+		case e.Kind == Resized:
+			select {
+			case resized <- *e.Snapshot:
+			default:
+			}
+		}
+	})
+	app.probeTimeout = probeTimeout
+	done := startRun(ctx, app)
+	select {
+	case outer := <-started:
+		if outer != (Size{Cols: 40, Rows: 12}) {
+			t.Fatalf("Started outer = %v, want the startup size 40x12", outer)
+		}
+	case got := <-done:
+		t.Fatalf("Run ended before Started: %#v, %v", got.result, got.err)
+	case <-ctx.Done():
+		t.Fatal("Started was not observed", ctx.Err())
+	}
+	select {
+	case s := <-resized:
+		if s.Outer != want || s.Viewport != want {
+			t.Errorf("Resized outer = %v, viewport = %v, want %v", s.Outer, s.Viewport, want)
+		}
+	case <-time.After(3 * time.Second):
+		t.Error("a resize during startup produced no Resized event")
+	}
+	if _, err := unix.Write(h.fd, []byte("q")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatalf("Run = %#v, %v", got.result, got.err)
+		}
+	case <-ctx.Done():
+		t.Fatal("Run did not finish", ctx.Err())
+	}
 }
