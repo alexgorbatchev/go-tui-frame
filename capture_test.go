@@ -3,7 +3,7 @@ package frame
 import (
 	"testing"
 
-	"github.com/alexgorbatchev/go-tui-frame/internal/input"
+	"github.com/alexgorbatchev/go-tui-frame/v2/internal/input"
 	uv "github.com/charmbracelet/ultraviolet"
 )
 

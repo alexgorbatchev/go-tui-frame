@@ -7,7 +7,7 @@ import (
 	"unicode"
 
 	"charm.land/lipgloss/v2"
-	frame "github.com/alexgorbatchev/go-tui-frame"
+	frame "github.com/alexgorbatchev/go-tui-frame/v2"
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 )

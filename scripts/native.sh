@@ -3,8 +3,8 @@
 # native build contract of go-tui-frame: the justfile's native recipes run it,
 # and consumers run the copy in the go-tui-frame module their go.mod selects:
 #
-#   go mod download github.com/alexgorbatchev/go-tui-frame
-#   frame=$(go list -m -f '{{.Dir}}' github.com/alexgorbatchev/go-tui-frame)
+#   go mod download github.com/alexgorbatchev/go-tui-frame/v2
+#   frame=$(go list -m -f '{{.Dir}}' github.com/alexgorbatchev/go-tui-frame/v2)
 #   bash "$frame/scripts/native.sh" ROOT TARGET PREFIX CACHE
 #
 # Run it with bash: the module cache keeps files read-only and without their

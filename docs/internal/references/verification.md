@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 20:10
-last_modified: 2026-10-07 12:00
+last_modified: 2026-10-07 12:44
 status: current
 ---
 
@@ -347,15 +347,15 @@ between runs, but those runs did not print it, so the host is the inferred
 cause. The Linux hit rate is still to be confirmed on real CI.
 
 The same gate passes locally. The race suite's package results follow; the
-elapsed times are indicative, with load averages of 4.9–5.7 over 1 minute
+elapsed times are indicative, with load averages of 6.4–13.0 over 1 minute
 during the run:
 
 ```text
-ok  	github.com/alexgorbatchev/go-tui-frame	64.633s
-ok  	github.com/alexgorbatchev/go-tui-frame/cmd/tui-frame	27.497s
-ok  	github.com/alexgorbatchev/go-tui-frame/internal/emulator	1.401s
-ok  	github.com/alexgorbatchev/go-tui-frame/internal/input	2.391s
-ok  	github.com/alexgorbatchev/go-tui-frame/internal/process	18.578s
+ok  	github.com/alexgorbatchev/go-tui-frame/v2	55.416s
+ok  	github.com/alexgorbatchev/go-tui-frame/v2/cmd/tui-frame	41.783s
+ok  	github.com/alexgorbatchev/go-tui-frame/v2/internal/emulator	2.184s
+ok  	github.com/alexgorbatchev/go-tui-frame/v2/internal/input	1.559s
+ok  	github.com/alexgorbatchev/go-tui-frame/v2/internal/process	19.590s
 ```
 
 The CLI's statement coverage is 93.5%, with or without `-race`.

@@ -1,6 +1,6 @@
 package frame
 
-import "github.com/alexgorbatchev/go-tui-frame/internal/process"
+import "github.com/alexgorbatchev/go-tui-frame/v2/internal/process"
 
 // deniedByExitedGroup reports whether kill(2) refused to signal process group
 // pgid with EPERM only because all its members have exited or are exiting.

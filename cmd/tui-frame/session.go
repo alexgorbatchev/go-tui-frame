@@ -9,7 +9,7 @@ import (
 	"syscall"
 
 	helptree "github.com/alexgorbatchev/cobra-help-tree/v2"
-	frame "github.com/alexgorbatchev/go-tui-frame"
+	frame "github.com/alexgorbatchev/go-tui-frame/v2"
 )
 
 var errDemoQuit = errors.New("quit requested by frame capture")

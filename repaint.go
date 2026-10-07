@@ -3,7 +3,7 @@ package frame
 import (
 	"time"
 
-	"github.com/alexgorbatchev/go-tui-frame/internal/emulator"
+	"github.com/alexgorbatchev/go-tui-frame/v2/internal/emulator"
 	ghostty "go.mitchellh.com/libghostty"
 )
 

@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 16:06
-last_modified: 2026-10-07 09:54
+last_modified: 2026-10-07 12:44
 status: current
 ---
 
@@ -184,14 +184,15 @@ amd64/arm64 executables. Linux runtime tests have not executed locally.
 
 ## Build a consumer
 
-A consumer builds the archive with the `scripts/native.sh` of the go-tui-frame
-module that its `go.mod` selects, so the Ghostty revision, archive checksum, Zig
-version, and build flags follow the module version it builds against. Resolve
-the module directory with `go list -m`. Its `Dir` field is empty until the
-module is in the module cache, so download it first. When a `go.work` file uses
-a local go-tui-frame checkout, `go list -m` reports that checkout instead.
-Module versions that predate `scripts/native.sh`, including `v1.0.0`, do not
-contain it.
+A consumer builds the archive with the `scripts/native.sh` of the
+`github.com/alexgorbatchev/go-tui-frame/v2` module that its `go.mod` selects,
+so the Ghostty revision, archive checksum, Zig version, and build flags follow
+the module version it builds against. Resolve the module directory with
+`go list -m`. Its `Dir` field is empty until the module is in the module cache,
+so download it first. When a `go.work` file uses a local go-tui-frame checkout,
+`go list -m` reports that checkout instead. `v1.0.0`, published under the
+module path without `/v2`, predates `scripts/native.sh` and does not contain
+it.
 
 The module cache keeps files read-only and without their executable bit, so run
 the scripts with `bash`. `scripts/native.sh` takes four arguments: an absolute
@@ -202,8 +203,8 @@ usage message when an argument is missing, the root is not absolute, or the
 prefix or cache would leave the root. For a macOS consumer:
 
 ```sh
-go mod download github.com/alexgorbatchev/go-tui-frame
-frame=$(go list -m -f '{{.Dir}}' github.com/alexgorbatchev/go-tui-frame)
+go mod download github.com/alexgorbatchev/go-tui-frame/v2
+frame=$(go list -m -f '{{.Dir}}' github.com/alexgorbatchev/go-tui-frame/v2)
 native="$PWD/.tmp/native"
 bash "$frame/scripts/native.sh" "$native" native prefix zig-cache
 

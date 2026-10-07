@@ -3,7 +3,7 @@ package frame
 import (
 	"time"
 
-	"github.com/alexgorbatchev/go-tui-frame/internal/process"
+	"github.com/alexgorbatchev/go-tui-frame/v2/internal/process"
 	"github.com/charmbracelet/x/termios"
 	"golang.org/x/sys/unix"
 )

@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/alexgorbatchev/go-tui-frame/internal/emulator"
-	"github.com/alexgorbatchev/go-tui-frame/internal/input"
+	"github.com/alexgorbatchev/go-tui-frame/v2/internal/emulator"
+	"github.com/alexgorbatchev/go-tui-frame/v2/internal/input"
 	"github.com/charmbracelet/colorprofile"
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"

@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
-	frame "github.com/alexgorbatchev/go-tui-frame"
-	"github.com/alexgorbatchev/go-tui-frame/internal/emulator"
+	frame "github.com/alexgorbatchev/go-tui-frame/v2"
+	"github.com/alexgorbatchev/go-tui-frame/v2/internal/emulator"
 )
 
 func TestShowcaseUpdatesIdleChildFrame(t *testing.T) {

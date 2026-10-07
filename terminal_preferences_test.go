@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/alexgorbatchev/go-tui-frame/internal/emulator"
-	"github.com/alexgorbatchev/go-tui-frame/internal/input"
+	"github.com/alexgorbatchev/go-tui-frame/v2/internal/emulator"
+	"github.com/alexgorbatchev/go-tui-frame/v2/internal/input"
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	ghostty "go.mitchellh.com/libghostty"

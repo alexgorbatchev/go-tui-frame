@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/alexgorbatchev/go-tui-frame/internal/process"
+	"github.com/alexgorbatchev/go-tui-frame/v2/internal/process"
 	ghostty "go.mitchellh.com/libghostty"
 	"golang.org/x/sys/unix"
 )

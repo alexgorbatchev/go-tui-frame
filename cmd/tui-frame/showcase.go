@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	frame "github.com/alexgorbatchev/go-tui-frame"
+	frame "github.com/alexgorbatchev/go-tui-frame/v2"
 )
 
 const showcaseInterval = 2 * time.Second
