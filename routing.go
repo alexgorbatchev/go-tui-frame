@@ -1,6 +1,7 @@
 package frame
 
 import (
+	"errors"
 	"fmt"
 	"image"
 	"maps"
@@ -22,6 +23,11 @@ type hostInputProfile struct {
 	MousePixels               bool
 	CellWidthPx, CellHeightPx uint32
 }
+
+// errUnroutable marks an input event the child's negotiated protocol cannot
+// represent. The session withholds that one event and continues; every other
+// routing error reports broken native or session state and ends the session.
+var errUnroutable = errors.New("input event cannot be represented in the child's protocol")
 
 type routedInput struct {
 	Bytes       []byte
@@ -155,7 +161,7 @@ func (r *inputRouter) routeKey(packet input.Packet) (routedInput, error) {
 func nativeMods(mod uv.KeyMod) (ghostty.Mods, error) {
 	const supported = uv.ModShift | uv.ModAlt | uv.ModCtrl | uv.ModSuper | uv.ModCapsLock | uv.ModNumLock
 	if mod&^supported != 0 {
-		return 0, fmt.Errorf("unsupported native modifier bits %#x", mod&^supported)
+		return 0, fmt.Errorf("%w: unsupported native modifier bits %#x", errUnroutable, mod&^supported)
 	}
 	var native ghostty.Mods
 	for _, pair := range []struct {
@@ -269,6 +275,9 @@ func (r *inputRouter) encodeMouse(event uv.MouseEvent, position ghostty.MousePos
 		pressed = pressed || childOwned
 	}
 	encoded, err := r.terminal.EncodeMouse(r.mouse, pressed)
+	if errors.Is(err, emulator.ErrMouseButton) {
+		return nil, fmt.Errorf("%w: %w", errUnroutable, err)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -282,7 +291,7 @@ func (r *inputRouter) encodeMouse(event uv.MouseEvent, position ghostty.MousePos
 	if encodedUTF8 {
 		// The pinned native UTF-8 encoder writes Cb as a raw byte. High
 		// button codes cannot be forwarded as a valid UTF-8 report.
-		return nil, fmt.Errorf("native UTF-8 mouse encoding cannot represent this button event")
+		return nil, fmt.Errorf("%w: native UTF-8 mouse encoding cannot represent this button event", errUnroutable)
 	}
 	return encoded, nil
 }
@@ -327,7 +336,9 @@ func (r *inputRouter) mousePosition(m uv.Mouse, state emulator.State) (ghostty.M
 		return ghostty.MousePosition{}, false, nil
 	}
 	if pixelChild {
-		return ghostty.MousePosition{}, inside, fmt.Errorf("child pixel mouse requires pixel input from the outer terminal")
+		// The outer terminal reports cells: it lacks pixel support, or the
+		// frame has not measured a cell size to enable it with.
+		return ghostty.MousePosition{}, inside, fmt.Errorf("%w: child pixel mouse requires pixel input from the outer terminal", errUnroutable)
 	}
 	x, y := m.X-r.viewport.Min.X, m.Y-r.viewport.Min.Y
 	w, h := state.Size.CellWidthPx, state.Size.CellHeightPx
@@ -368,7 +379,7 @@ func mouseWireBounds(position ghostty.MousePosition, state emulator.State) error
 		w, h = 1, 1
 	}
 	if position.X/float32(w) >= float32(limit) || position.Y/float32(h) >= float32(limit) {
-		return fmt.Errorf("child mouse encoding cannot represent coordinates beyond %d", limit)
+		return fmt.Errorf("%w: child mouse encoding cannot represent coordinates beyond %d", errUnroutable, limit)
 	}
 	return nil
 }
@@ -385,7 +396,7 @@ func (r *inputRouter) setMouse(event uv.MouseEvent, position ghostty.MousePositi
 	if m.Button != uv.MouseNone {
 		button, ok := nativeMouseButtons[m.Button]
 		if !ok {
-			return fmt.Errorf("unsupported native mouse button %d", m.Button)
+			return fmt.Errorf("%w: unsupported native mouse button %d", errUnroutable, m.Button)
 		}
 		r.mouse.SetButton(button)
 	}
@@ -397,7 +408,7 @@ func (r *inputRouter) setMouse(event uv.MouseEvent, position ghostty.MousePositi
 	case uv.MouseMotionEvent:
 		r.mouse.SetAction(ghostty.MouseActionMotion)
 	default:
-		return fmt.Errorf("unsupported native mouse event %T", event)
+		return fmt.Errorf("%w: unsupported native mouse event %T", errUnroutable, event)
 	}
 	return nil
 }

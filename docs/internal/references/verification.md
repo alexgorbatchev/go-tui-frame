@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 20:10
-last_modified: 2026-10-06 22:33
+last_modified: 2026-10-06 22:40
 status: current
 ---
 
@@ -331,7 +331,7 @@ that Lip Gloss is absent; the CLI demo uses it.
 | :--- | :--- |
 | [Real framed session](../../../session_test.go) | Idle push rendering, child title, native SID/group/argv/session inventory, real PTY window size, settings and foreground group, observer-copy isolation, termios restoration and closed-controller rejection. Cancellation restores the terminal before observers drain, returns the cause and ends every owned process group. An observer panic or `runtime.Goexit` ends the session through shutdown, also during the shutdown drain. Error and cancellation cleanup finish while a detached process holds the slave, also when flow control has stopped child output. |
 | [Wake pipe](../../../wake_test.go) | Native pipe wake, coalescing on a full pipe, and failure propagation to the event loop and cleanup. |
-| [Native routing](../../../routing_test.go) | Keys reach the child as the outer terminal sent them, also while outer and child keyboard modes differ and for a key without a native key code; paste envelopes, focus, localized cell and pixel mouse reports, buttonless releases, capture gestures, and the routed-input bound that mouse re-encoding reaches. |
+| [Native routing](../../../routing_test.go) | Keys reach the child as the outer terminal sent them, also while outer and child keyboard modes differ and for a key without a native key code; paste envelopes, focus, localized cell and pixel mouse reports, buttonless releases, capture gestures, and the routed-input bound that mouse re-encoding reaches. A mouse event the child's encoding cannot represent, such as a coordinate beyond 223 for an X10 child, is withheld from the child and reported as a `Routed` event with `Event.Error` set, and the session routes the input that follows. |
 | [Native graphics profile](../../../internal/emulator/profile_test.go) | Disabled Kitty graphics does not return a positive capability reply before or after reset and alternate-screen switches. |
 | [Native process ownership](../../../internal/process/snapshot_test.go), [groups](../../../internal/process/groups_test.go), [Darwin groups](../../../internal/process/groups_darwin_test.go), [Darwin argv](../../../internal/process/args_darwin_test.go) | Current native fields, runtime cwd and owned copies. Same-session inventory survives a reaped launch leader. Darwin group exit follows member states, and Darwin empty argv0 and environment alignment have dedicated native tests. |
 | [Live border](../../../border_test.go) | Updates before and during Run, closed-session rejection, and the applied native grid and actual PTY size. Measured cell pixels are preserved when the outer winsize has only cells. |
@@ -389,9 +389,10 @@ Linux arm64 runtime test runs. This record does not establish a consumer
 Passing tests do not establish arbitrary-TUI transparency. The current profile
 does not render graphics or overline, expose complete screen, scrollback,
 margin or damage state, retain all hyperlink parameters, or guarantee that a
-gesture closes after an outside release. Unsupported input identities, native
-mouse limits and unavailable pixel precision are explicit. OS observations are
-sampled and permission-limited; descendants in detached sessions and wrapper
+gesture closes after an outside release. Mouse events beyond native encoding
+limits or without the pixel precision the child requested are withheld from
+the child and reported to observers. OS observations are sampled and
+permission-limited; descendants in detached sessions and wrapper
 suspend/resume are teardown boundaries. See the
 [consumer profile](../../../README.md) and
 [architecture research](../../../reports/TUI%20frame%20architecture%20research.md).

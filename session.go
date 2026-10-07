@@ -512,6 +512,11 @@ func (s *session[T]) route(p input.Packet) error {
 	s.router.viewport = s.geometry.child
 	s.router.host = hostInputProfile{KittyFlags: s.console.kittyFlags, MousePixels: s.console.applied[1016], CellWidthPx: s.console.cellWidth, CellHeightPx: s.console.cellHeight}
 	r, err := s.router.route(p, s.inputState)
+	if errors.Is(err, errUnroutable) {
+		// One event the child's protocol cannot carry is withheld, as a
+		// terminal connected directly to the child could not send it either.
+		return s.events.emit(Event{Kind: Routed, Bytes: p.Raw, Origin: "unroutable-input", Disposition: Pass, Error: err})
+	}
 	if err != nil {
 		return err
 	}

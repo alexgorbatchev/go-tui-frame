@@ -938,10 +938,11 @@ func TestConsoleKeepsPermanentInputModes(t *testing.T) {
 		// unmeasured cases start before the cell-size reply arrives. pixelless
 		// cases resize to a winsize without pixels before outer is routed. late
 		// sequences must reach the outer terminal in order after the child
-		// chunk. routeErr is the error routing outer must end with.
+		// chunk. withheld is the error a Routed event reports when the session
+		// withholds outer as an event the child's protocol cannot represent.
 		unmeasured, pixelless bool
 		late                  []string
-		routeErr              string
+		withheld              string
 	}{
 		{
 			name: "cursor keys permanently reset", reports: modes{1: ansi.ModePermanentlyReset},
@@ -964,9 +965,9 @@ func TestConsoleKeepsPermanentInputModes(t *testing.T) {
 			name: "pixel mouse permanently reset", reports: modes{1006: ansi.ModeReset, 1016: ansi.ModePermanentlyReset},
 			child: "\x1b[?1000;1016h", written: []string{"\x1b[?1006h"}, absent: []string{"\x1b[?1016h"},
 			applied: map[ansi.DECMode]bool{1006: true, 1016: false},
-			// Unsupported conversion fails explicitly: a cell report cannot
-			// supply the pixel precision the child asked for.
-			outer: "\x1b[<0;7;5M", routeErr: "child pixel mouse requires pixel input from the outer terminal",
+			// A cell report cannot supply the pixel precision the child asked
+			// for, so the child receives nothing and the session continues.
+			outer: "\x1b[<0;7;5M", withheld: "child pixel mouse requires pixel input from the outer terminal",
 		},
 		{
 			name: "pixel mouse permanently set", reports: modes{1006: ansi.ModeReset, 1016: ansi.ModePermanentlySet},
@@ -1035,17 +1036,24 @@ func TestConsoleKeepsPermanentInputModes(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var routeErr error
+			var withheld []error
+			s.events = newEventDispatcher(eventBit(Routed), sessionCancel(t), func(ev Event) {
+				if ev.Origin == "unroutable-input" {
+					withheld = append(withheld, ev.Error)
+				}
+			})
+			t.Cleanup(s.events.close)
 			for _, p := range packets {
-				if routeErr = s.route(p); routeErr != nil {
-					break
+				if err := s.route(p); err != nil {
+					t.Fatalf("routing %q failed: %v", tt.outer, err)
 				}
 			}
-			if tt.routeErr == "" && routeErr != nil {
-				t.Fatalf("routing %q failed: %v", tt.outer, routeErr)
-			}
-			if tt.routeErr != "" && (routeErr == nil || !strings.Contains(routeErr.Error(), tt.routeErr)) {
-				t.Errorf("routing %q returned %v, want error %q", tt.outer, routeErr, tt.routeErr)
+			s.events.close()
+			switch {
+			case tt.withheld == "" && len(withheld) != 0:
+				t.Errorf("routing %q withheld input: %v", tt.outer, withheld)
+			case tt.withheld != "" && (len(withheld) != 1 || !strings.Contains(withheld[0].Error(), tt.withheld)):
+				t.Errorf("routing %q withheld input with %v, want one error %q", tt.outer, withheld, tt.withheld)
 			}
 			late := string(repaintOutput(t, out)[before+len(written):])
 			for rest, i := late, 0; i < len(tt.late); i++ {

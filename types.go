@@ -170,8 +170,13 @@ type Event struct {
 	Snapshot    *Snapshot
 	Disposition Disposition
 	Origin      string
-	Error       error
-	Effect      *ProtocolEffect
+	// Error is set on a Routed event with Origin "unroutable-input": outer
+	// input the child's negotiated protocol cannot represent, such as a mouse
+	// coordinate beyond its encoding's range. The session withholds that
+	// event from the child and continues; Bytes holds the input as the outer
+	// terminal sent it, and Error says why it was withheld.
+	Error  error
+	Effect *ProtocolEffect
 }
 
 // Result separates the child's exit status from drain and restoration errors.

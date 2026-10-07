@@ -2,6 +2,7 @@ package frame
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"image"
 	"testing"
@@ -9,6 +10,7 @@ import (
 	"github.com/alexgorbatchev/go-tui-frame/internal/emulator"
 	"github.com/alexgorbatchev/go-tui-frame/internal/input"
 	uv "github.com/charmbracelet/ultraviolet"
+	"github.com/charmbracelet/x/ansi"
 	ghostty "go.mitchellh.com/libghostty"
 )
 
@@ -367,10 +369,47 @@ func TestRoutingRejectsUnrepresentableMouseCoordinates(t *testing.T) {
 			}
 			r.viewport = image.Rect(2, 3, 2042, 8)
 			s := routerState(t, em, tt.modes)
-			if _, err := r.route(routerPackets(t, tt.input)[0], s); err == nil {
-				t.Fatal("silently lost or emitted out-of-protocol mouse coordinate")
+			if _, err := r.route(routerPackets(t, tt.input)[0], s); !errors.Is(err, errUnroutable) {
+				t.Fatalf("out-of-protocol mouse coordinate routed with %v, want an unroutable event", err)
 			}
 		})
+	}
+}
+
+// A click the child's X10 encoding cannot place is withheld from the child and
+// reported to observers; the session keeps routing the input that follows.
+func TestSessionWithholdsUnroutableMouseEvent(t *testing.T) {
+	s, _, slave := newRepaintSessionSize(t, Size{Cols: 240, Rows: 6}, ansi.ModeReset, nil)
+	router, err := newInputRouter(s.terminal, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(router.close)
+	s.router = router
+	var routed []Event
+	s.events = newEventDispatcher(eventBit(Routed), sessionCancel(t), func(ev Event) { routed = append(routed, ev) })
+	t.Cleanup(s.events.close)
+	readRepaintChunk(t, s, slave, "\x1b[?1000h")
+	const click = "\x1b[<0;230;3M"
+	for _, raw := range []string{click, "a"} {
+		if err := s.route(routerPackets(t, raw)[0]); err != nil {
+			t.Fatalf("routing %q ended the session: %v", raw, err)
+		}
+	}
+	var queued []byte
+	for _, p := range s.queue {
+		queued = append(queued, p.bytes[p.offset:]...)
+	}
+	if string(queued) != "a" {
+		t.Fatalf("child input queue holds %q, want only the key", queued)
+	}
+	s.events.close()
+	if len(routed) != 1 {
+		t.Fatalf("observed %d routed events, want 1: %#v", len(routed), routed)
+	}
+	ev := routed[0]
+	if string(ev.Bytes) != click || ev.Origin != "unroutable-input" || ev.Disposition != Pass || !errors.Is(ev.Error, errUnroutable) {
+		t.Fatalf("withheld click observed as %q from %q (%v), error %v", ev.Bytes, ev.Origin, ev.Disposition, ev.Error)
 	}
 }
 
@@ -378,8 +417,71 @@ func TestRoutingRejectsNativeInvalidUTF8MouseButton(t *testing.T) {
 	r, em := newRouterTest(t, nil)
 	s := routerState(t, em, "\x1b[?1000;1005h")
 	packet := routerPackets(t, "\x1b[<128;6;8M")[0]
-	if _, err := r.route(packet, s); err == nil {
-		t.Fatal("emitted a raw high-byte button code in UTF-8 mouse mode")
+	if _, err := r.route(packet, s); !errors.Is(err, errUnroutable) {
+		t.Fatalf("high-byte button code in UTF-8 mouse mode routed with %v, want an unroutable event", err)
+	}
+}
+
+// The pinned decoder reads SGR button codes 130 and 131 as buttons 10 and 11,
+// which the native encoder does not encode. The press stays with the frame,
+// so its release and drags are not delivered either.
+func TestRoutingRejectsButtonsTenAndEleven(t *testing.T) {
+	for _, tt := range []struct{ name, press, drag, release string }{
+		{"button 10", "\x1b[<130;6;8M", "\x1b[<162;7;8M", "\x1b[<130;7;8m"},
+		{"button 11", "\x1b[<131;6;8M", "\x1b[<163;7;8M", "\x1b[<131;7;8m"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r, em := newRouterTest(t, nil)
+			s := routerState(t, em, "\x1b[?1002;1006h")
+			_, err := r.route(routerPackets(t, tt.press)[0], s)
+			if !errors.Is(err, errUnroutable) || !errors.Is(err, emulator.ErrMouseButton) {
+				t.Fatalf("press routed with %v, want an unroutable native button", err)
+			}
+			for _, raw := range []string{tt.drag, tt.release} {
+				got, err := r.route(routerPackets(t, raw)[0], s)
+				if err != nil || len(got.Bytes) != 0 || got.Origin != "unowned-mouse-gesture" {
+					t.Fatalf("%q after the withheld press = %#v, %v", raw, got, err)
+				}
+			}
+		})
+	}
+}
+
+// otherMouseEvent is a uv.MouseEvent of a kind the native encoder has no
+// action for.
+type otherMouseEvent uv.Mouse
+
+func (e otherMouseEvent) String() string  { return uv.Mouse(e).String() }
+func (e otherMouseEvent) Mouse() uv.Mouse { return uv.Mouse(e) }
+
+// Events the decoder never produces from the outer terminal's reports still
+// fail as single unroutable events: modifier bits and buttons outside the
+// native mouse model, and an event kind with no native action.
+func TestRoutingRejectsMouseEventsOutsideNativeModel(t *testing.T) {
+	at := uv.Mouse{X: 5, Y: 7, Button: uv.MouseLeft}
+	with := func(change func(*uv.Mouse)) uv.Mouse {
+		m := at
+		change(&m)
+		return m
+	}
+	for _, tt := range []struct {
+		name  string
+		event uv.MouseEvent
+	}{
+		{"meta", uv.MouseClickEvent(with(func(m *uv.Mouse) { m.Mod = uv.ModMeta }))},
+		{"hyper", uv.MouseClickEvent(with(func(m *uv.Mouse) { m.Mod = uv.ModCtrl | uv.ModHyper }))},
+		{"scroll lock", uv.MouseClickEvent(with(func(m *uv.Mouse) { m.Mod = uv.ModScrollLock }))},
+		{"button", uv.MouseClickEvent(with(func(m *uv.Mouse) { m.Button = uv.MouseButton11 + 1 }))},
+		{"event kind", otherMouseEvent(at)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r, em := newRouterTest(t, nil)
+			s := routerState(t, em, "\x1b[?1003;1006h")
+			packet := input.Packet{Raw: []byte("\x1b[<0;6;8M"), Event: tt.event}
+			if _, err := r.route(packet, s); !errors.Is(err, errUnroutable) {
+				t.Fatalf("%v routed with %v, want an unroutable event", tt.event, err)
+			}
+		})
 	}
 }
 
@@ -402,8 +504,8 @@ func TestRoutingMeasuredPixelsPreserveWireOffsets(t *testing.T) {
 	}
 	r, em := newRouterTest(t, nil)
 	s := routerState(t, em, "\x1b[?1000;1016h")
-	if _, err := r.route(routerPackets(t, "\x1b[<0;6;8M")[0], s); err == nil {
-		t.Fatal("fabricated pixel precision from a cell report")
+	if _, err := r.route(routerPackets(t, "\x1b[<0;6;8M")[0], s); !errors.Is(err, errUnroutable) {
+		t.Fatalf("cell report for a pixel child routed with %v, want an unroutable event", err)
 	}
 }
 
@@ -435,9 +537,12 @@ func TestRoutingDropsPixelReportsWithoutMeasuredCells(t *testing.T) {
 	if err != nil || len(got.Bytes) != 0 || got.Origin != "unowned-mouse-gesture" {
 		t.Fatalf("drag after unmeasured release = %#v, %v", got, err)
 	}
+	// The session resizes the child to every measured cell size before it
+	// routes another report, so a mismatch is broken session state, not an
+	// event the child's protocol cannot represent.
 	r.host.CellWidthPx = 12
-	if _, err := r.route(routerPackets(t, "\x1b[<0;61;91M")[0], s); err == nil {
-		t.Fatal("pixel report used a cell size the child emulator does not have")
+	if _, err := r.route(routerPackets(t, "\x1b[<0;61;91M")[0], s); err == nil || errors.Is(err, errUnroutable) {
+		t.Fatalf("pixel report with a cell size the child emulator does not have routed with %v, want a session error", err)
 	}
 }
 
