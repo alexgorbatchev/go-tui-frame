@@ -9,7 +9,7 @@ description: >-
 author: alexgorbatchev
 metadata:
   created_on: 2026-10-01 13:23
-  last_modified: 2026-10-06 17:24
+  last_modified: 2026-10-07 09:27
   status: current
 ---
 
@@ -97,8 +97,13 @@ Terminal preference inheritance is enabled by default. At startup, reported
 foreground/background colors, all 256 palette entries, cursor color/style/blink,
 supported preference modes, keyboard settings, and light/dark color scheme seed
 the child emulator. The child PTY receives the outer terminal's original line
-discipline, including control characters, echo, and flow control. Missing or
-invalid probe replies retain native defaults after a 300 ms deadline.
+discipline, including control characters, echo, and flow control. The startup
+probe ends at the terminal's Primary Device Attributes (DA1) reply, assuming the
+terminal answers queries in order, as Ghostty does; 300 ms is the limit for a
+terminal that answers neither DA1 nor every other query. Missing or invalid
+probe replies retain native defaults, as does a preference reply sent after the
+DA1 reply. The probe waits for the required alternate-screen report until the
+deadline even after DA1.
 Default-colored cells use the outer terminal's default rendition. On a
 256-color outer terminal, cells using an inherited palette entry the child has
 not redefined use the outer terminal's palette index; a 16-color terminal does

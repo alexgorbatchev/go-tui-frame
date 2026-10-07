@@ -133,9 +133,12 @@ func (c *console) probe(ctx context.Context, events *eventDispatcher, timeout ti
 	c.modifyPending, c.cellPending = true, true
 	query += ansi.RequestKittyKeyboard + ansi.QueryModifyOtherKeys + ansi.WindowOp(16)
 	query += c.preferenceQueries()
-	// Every terminal answers Primary Device Attributes (DA1) and terminals
-	// answer queries in order, so its reply follows every other reply still to
-	// come. Queries unanswered by then are ones the terminal ignores.
+	// The Primary Device Attributes (DA1) query goes last on the assumption
+	// that the terminal answers queries in order, so its reply follows every
+	// other reply still to come and queries unanswered by then are ones the
+	// terminal ignores. Ghostty does: it queues every reply the probe asks for
+	// on one first-in-first-out writer. The xterm control sequences define DA1
+	// but no reply order.
 	c.daPending = true
 	query += ansi.RequestPrimaryDeviceAttributes
 	// Query replies can fill the input queue before all queries are written.
@@ -161,8 +164,10 @@ func (c *console) probe(ctx context.Context, events *eventDispatcher, timeout ti
 	// The probe ends at the DA1 reply, or once every other query is answered,
 	// with the timeout as the limit for a terminal that answers neither. The
 	// markers of unanswered queries stay set, so a reply that comes later is
-	// consumed as one instead of reaching the child as typed input.
-	for time.Now().Before(deadline) && (len(writes) > 0 || c.daPending && c.awaitingReplies()) {
+	// consumed as one instead of reaching the child as typed input. Startup
+	// requires the alternate-screen report, so the probe waits for it even
+	// after DA1: a terminal that answers out of order then still starts.
+	for time.Now().Before(deadline) && (len(writes) > 0 || c.pending[ansi.ModeAltScreenSaveCursor] || c.daPending && c.awaitingReplies()) {
 		if ctx.Err() != nil {
 			return nil, context.Cause(ctx)
 		}

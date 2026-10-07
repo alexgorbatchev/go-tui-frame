@@ -726,6 +726,52 @@ func TestProbeEndsAtPrimaryDeviceAttributesReply(t *testing.T) {
 	}
 }
 
+// Startup requires the alternate-screen report, so a terminal that sends it
+// after its DA1 reply, out of order, still starts: the probe keeps waiting for
+// that report until its deadline.
+func TestProbeAwaitsAlternateScreenReportAfterPrimaryDeviceAttributes(t *testing.T) {
+	const alternate = "\x1b[?1049;2$y"
+	h := newHarness(t)
+	h.report(ansi.ModeAltScreenSaveCursor, "")
+	fd, device, _, err := inspectConsole(h.slave, h.slave)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := acquireConsole(h.slave, h.slave, fd, device)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := c.restore(); err != nil {
+			t.Error(err)
+		}
+	})
+	var once sync.Once
+	writeErr := make(chan error, 1)
+	events := newEventDispatcher(eventBit(OuterInput), sessionCancel(t), func(e Event) {
+		if strings.Contains(string(e.Bytes), "\x1b[?62;22c") {
+			once.Do(func() { writeErr <- h.writeReplies([]byte(alternate)) })
+		}
+	})
+	defer events.close()
+	const timeout = 10 * capabilityTimeout
+	ctx, cancel := context.WithTimeout(context.Background(), 2*timeout)
+	defer cancel()
+	start := time.Now()
+	if _, err := c.probe(ctx, events, timeout); err != nil {
+		t.Fatalf("probe with the alternate-screen report after DA1: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed >= timeout {
+		t.Fatalf("probe took %v, want it to end at the alternate-screen report before its %v deadline", elapsed, timeout)
+	}
+	if err := <-writeErr; err != nil {
+		t.Fatal(err)
+	}
+	if c.daPending || c.pending[ansi.ModeAltScreenSaveCursor] {
+		t.Fatalf("probe ended with DA1 pending=%v and the alternate-screen report pending=%v", c.daPending, c.pending[ansi.ModeAltScreenSaveCursor])
+	}
+}
+
 // Only the DA1 reply to the probe's own query is a reply. Once it arrived, a
 // later report answers nothing the frame asked and stays input.
 func TestConsoleConsumesOnlyPendingPrimaryDeviceAttributes(t *testing.T) {
