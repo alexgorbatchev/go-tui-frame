@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 20:10
-last_modified: 2026-10-06 20:39
+last_modified: 2026-10-06 20:54
 status: current
 ---
 
@@ -315,9 +315,13 @@ and also accept an optional Lip Gloss canvas.
 Capture and plain-text programs against the module and native archive. They
 run the Keyboard Capture program on a real PTY whose outer terminal is a
 libghostty emulator. A shell script stands in for nvim on `PATH`, so the
-documented source runs unchanged. Three cases check the exit status and
-standard error: Ctrl+Q exits 0 with empty standard error, a child exit status
-is reported, and a session error after Ctrl+Q is reported. The core dependency
+documented source runs unchanged. Five cases check the exit status and
+standard error. Ctrl+Q never reports the quit itself: a child that its SIGTERM
+ends is reported as `signal: terminated`, and a child that exits 0 on SIGTERM
+exits 0 with empty standard error. A Ctrl+Q that the frame holds behind a full
+input queue until the child has exited with status 7 still reports
+`exit status 7`. A child exit status without Ctrl+Q is reported, and a session
+error after Ctrl+Q is reported. The core dependency
 test resolves the production package graph with `go list -deps` and confirms
 that Lip Gloss is absent; the CLI demo uses it.
 

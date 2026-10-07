@@ -1,6 +1,7 @@
 package frame
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -72,19 +73,36 @@ func TestReadmeExamples(t *testing.T) {
 func runReadmeCapture(t *testing.T, binary string) {
 	for _, tt := range []struct {
 		name string
-		// child is the sh script the program runs as nvim.
+		// child is the sh script the program runs as nvim. It prints started
+		// once it runs, and finds its own directory, which it shares with
+		// readmeProgram.dir, as ${0%/*}.
 		child string
-		// quitAfter is child output after which the case presses Ctrl+Q; empty
-		// lets the child exit on its own.
-		quitAfter string
-		code      int
-		stderr    *regexp.Regexp
+		// quit presses Ctrl+Q; nil lets the child exit on its own.
+		quit   func(ctx context.Context, t *testing.T, h *terminalHarness, p *readmeProgram)
+		code   int
+		stderr *regexp.Regexp
 	}{
 		{
-			name:      "Ctrl+Q",
-			child:     "printf started; exec sleep 30",
-			quitAfter: "started",
-			stderr:    regexp.MustCompile(`^$`),
+			// The quit's SIGTERM ends the child, and the program reports that
+			// outcome rather than the quit.
+			name:   "Ctrl+Q",
+			child:  "printf started; exec sleep 30",
+			quit:   quitWhenStarted,
+			code:   1,
+			stderr: regexp.MustCompile(`^signal: terminated\n$`),
+		},
+		{
+			name:   "Ctrl+Q to a child that exits 0 on SIGTERM",
+			child:  "trap 'exit 0' TERM; printf started; while :; do sleep 1; done",
+			quit:   quitWhenStarted,
+			stderr: regexp.MustCompile(`^$`),
+		},
+		{
+			name:   "Ctrl+Q held until the child exited",
+			child:  `stty raw -echo; printf started; while [ ! -e "${0%/*}/exit" ]; do sleep 0.01; done; exit 7`,
+			quit:   quitAfterChildExit,
+			code:   1,
+			stderr: regexp.MustCompile(`^exit status 7\n$`),
 		},
 		{
 			name:   "child exit status",
@@ -96,19 +114,21 @@ func runReadmeCapture(t *testing.T, binary string) {
 			// The child answers the quit's SIGTERM by switching to 132 columns
 			// (DECCOLM), which the viewport cannot fit, so a session error
 			// follows the quit.
-			name:      "Ctrl+Q with a later session error",
-			child:     `trap 'printf "\033[?40h\033[?3h"' TERM; printf started; while :; do sleep 1; done`,
-			quitAfter: "started",
-			code:      1,
-			stderr:    regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(ErrGeometry.Error()) + `: `),
+			name:   "Ctrl+Q with a later session error",
+			child:  `trap 'printf "\033[?40h\033[?3h"' TERM; printf started; while :; do sleep 1; done`,
+			quit:   quitWhenStarted,
+			code:   1,
+			stderr: regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(ErrGeometry.Error()) + `: `),
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newHarness(t)
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
-			p := &readmeProgram{cmd: exec.CommandContext(ctx, binary), exited: make(chan struct{})}
-			p.cmd.Env = readmeChildEnv(t, tt.child)
+			// Fd makes the descriptor blocking, so it is taken before the
+			// program, which shares the terminal's file description, starts.
+			p := &readmeProgram{cmd: exec.CommandContext(ctx, binary), exited: make(chan struct{}), terminal: int(h.slave.Fd())}
+			p.cmd.Env, p.dir = readmeChildEnv(t, tt.child)
 			p.cmd.Stdin, p.cmd.Stdout, p.cmd.Stderr = h.slave, h.slave, &p.stderr
 			if err := p.cmd.Start(); err != nil {
 				t.Fatal(err)
@@ -124,9 +144,8 @@ func runReadmeCapture(t *testing.T, binary string) {
 					t.Logf("README program %s", p.outcome())
 				}
 			})
-			if tt.quitAfter != "" {
-				p.awaitText(ctx, t, h, tt.quitAfter)
-				pressCtrlQ(t, h)
+			if tt.quit != nil {
+				tt.quit(ctx, t, h, p)
 			}
 			<-p.exited
 			if code := p.cmd.ProcessState.ExitCode(); code != tt.code || !tt.stderr.MatchString(p.stderr.String()) {
@@ -143,6 +162,72 @@ type readmeProgram struct {
 	// exited is closed when Wait returns; err and stderr are final from then.
 	exited chan struct{}
 	err    error
+	// terminal is the descriptor of the program's terminal, the harness slave.
+	terminal int
+	// dir holds the child's script.
+	dir string
+}
+
+// quitWhenStarted presses Ctrl+Q once the child has started.
+func quitWhenStarted(ctx context.Context, t *testing.T, h *terminalHarness, p *readmeProgram) {
+	t.Helper()
+	p.awaitText(ctx, t, h, "started")
+	pressCtrlQ(t, h)
+}
+
+// quitAfterChildExit presses Ctrl+Q while the child runs, but the frame holds
+// the key until the child has exited and been reaped, and only then passes it
+// to capture.
+//
+// The child puts its terminal in raw mode and never reads, so the frame's
+// input queue fills. A paste leaves less room in that queue than the APC
+// string that follows it, and the frame frames that string only once its
+// terminator arrives. The terminator and Ctrl+Q are written together and so
+// read together: both are held behind the string, and outer reads pause until
+// the child exits. The child exits once the frame has read them.
+func quitAfterChildExit(ctx context.Context, t *testing.T, h *terminalHarness, p *readmeProgram) {
+	t.Helper()
+	p.awaitText(ctx, t, h, "started")
+	const room = 8 << 10
+	fill := bracketedPaste(inputQueueLimit - room)
+	held := append([]byte("\x1b_"), bytes.Repeat([]byte("x"), 32*room)...)
+	// String Terminator, then Ctrl+Q.
+	quit := append([]byte("\x1b\\"), ctrlQReport(t, h)...)
+	for _, input := range [][]byte{fill, held, quit} {
+		p.send(ctx, t, h, input)
+	}
+	if err := os.WriteFile(filepath.Join(p.dir, "exit"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// send makes the outer terminal send input and waits until the program has
+// read all of it. It fails as soon as the program exits or ctx ends.
+func (p *readmeProgram) send(ctx context.Context, t *testing.T, h *terminalHarness, input []byte) {
+	t.Helper()
+	_, written := feedOuter(t, h.master, input)
+	select {
+	case err := <-written:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-p.exited:
+		t.Fatalf("README program %s before its terminal sent its input", p.outcome())
+	case <-ctx.Done():
+		t.Fatalf("terminal could not send its input when the case ended: %v", ctx.Err())
+	}
+	poll := time.NewTicker(time.Millisecond)
+	defer poll.Stop()
+	// A zero-timeout poll reports unread input without consuming it.
+	for inputWaiting(t, p.terminal, 0) {
+		select {
+		case <-p.exited:
+			t.Fatalf("README program %s before it read its input", p.outcome())
+		case <-ctx.Done():
+			t.Fatalf("README program left its input unread when the case ended: %v", ctx.Err())
+		case <-poll.C:
+		}
+	}
 }
 
 // outcome describes how the program ended. The caller has received from
@@ -169,8 +254,9 @@ func (p *readmeProgram) awaitText(ctx context.Context, t *testing.T, h *terminal
 }
 
 // readmeChildEnv returns this process's environment with a PATH whose nvim
-// runs script with sh, ignoring the arguments it receives.
-func readmeChildEnv(t *testing.T, script string) []string {
+// runs script with sh, ignoring the arguments it receives, and the directory
+// that holds that nvim.
+func readmeChildEnv(t *testing.T, script string) (env []string, dir string) {
 	t.Helper()
 	// exec.LookPath rejects a relative PATH entry's result.
 	dir, err := filepath.Abs(readmeTempDir(t))
@@ -181,12 +267,20 @@ func readmeChildEnv(t *testing.T, script string) []string {
 		t.Fatal(err)
 	}
 	// The last PATH entry wins in an exec.Cmd environment.
-	return append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH")), dir
 }
 
-// pressCtrlQ makes the outer terminal report a Ctrl+Q press under the
-// keyboard modes the frame mirrored from its child.
+// pressCtrlQ makes the outer terminal report a Ctrl+Q press.
 func pressCtrlQ(t *testing.T, h *terminalHarness) {
+	t.Helper()
+	if _, err := unix.Write(h.fd, ctrlQReport(t, h)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// ctrlQReport returns the outer terminal's report of a Ctrl+Q press under the
+// keyboard modes the frame mirrored from its child.
+func ctrlQReport(t *testing.T, h *terminalHarness) []byte {
 	t.Helper()
 	event, err := ghostty.NewKeyEvent()
 	if err != nil {
@@ -198,9 +292,7 @@ func pressCtrlQ(t *testing.T, h *terminalHarness) {
 	event.SetMods(ghostty.ModCtrl)
 	event.SetUTF8("q")
 	event.SetUnshiftedCodepoint('q')
-	if _, err := unix.Write(h.fd, outerKeyReport(t, h, event)); err != nil {
-		t.Fatal(err)
-	}
+	return outerKeyReport(t, h, event)
 }
 
 // outerKeyReport encodes event as the harness terminal reports it in its
