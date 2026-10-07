@@ -332,10 +332,11 @@ Other root-package tests cover capture dispositions (`capture_test.go`),
 composition (`composition_test.go`), layout and invalidation
 (`frame_test.go`), outer input queuing (`input_queue_test.go` and
 `input_queue_darwin_test.go`), observation delivery (`observation_test.go`),
-resize, including one during startup (`resize_test.go`), configuration validation (`validation_test.go`),
-snapshot metadata (`metadata_test.go`) and Darwin process-group signalling
-(`signal_darwin_test.go`). The `internal/emulator`, `internal/input` and
-`internal/process` packages have further unit tests.
+resize, including one during startup (`resize_test.go`), configuration
+validation (`validation_test.go`), snapshot metadata (`metadata_test.go`) and
+Darwin process-group signalling (`signal_darwin_test.go`). The
+`internal/emulator`, `internal/input` and `internal/process` packages have
+further unit tests.
 
 ## Artifact audits
 

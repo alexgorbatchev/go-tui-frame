@@ -209,12 +209,14 @@ func TestRunAppliesResizeDuringStartup(t *testing.T) {
 	h := newHarness(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	// The harness never answers modifyOtherKeys, so the probe runs to this
-	// deadline and the resize below lands inside startup, before the loop.
+	// The harness leaves at least one probe query unanswered, so the probe runs
+	// to this deadline and the resize below lands during startup. The test
+	// checks that the signal was sent before the child's start, which precedes
+	// the loop, instead of relying on that.
 	const probeTimeout = time.Second
 	want := Size{Cols: 32, Rows: 10}
 	var resize sync.Once
-	started, resized := make(chan Size, 1), make(chan Snapshot, 1)
+	signaled, started, resized := make(chan time.Time, 1), make(chan time.Time, 1), make(chan Snapshot, 1)
 	kinds := []EventKind{OuterInput, Started, Resized}
 	app := New(childCommand(t), struct{}{}).Terminal(h.slave, h.slave).ObserveEvents(kinds, func(e Event) {
 		switch {
@@ -228,9 +230,10 @@ func TestRunAppliesResizeDuringStartup(t *testing.T) {
 				if err := unix.Kill(os.Getpid(), unix.SIGWINCH); err != nil {
 					t.Error(err)
 				}
+				signaled <- time.Now()
 			})
 		case e.Kind == Started:
-			started <- e.Snapshot.Outer
+			started <- e.Snapshot.Child.StartedAt
 		case e.Kind == Resized:
 			select {
 			case resized <- *e.Snapshot:
@@ -241,9 +244,16 @@ func TestRunAppliesResizeDuringStartup(t *testing.T) {
 	app.probeTimeout = probeTimeout
 	done := startRun(ctx, app)
 	select {
-	case outer := <-started:
-		if outer != (Size{Cols: 40, Rows: 12}) {
-			t.Fatalf("Started outer = %v, want the startup size 40x12", outer)
+	case childStarted := <-started:
+		// The observer handles events in order, so the probe event that sent
+		// the signal was handled before Started.
+		select {
+		case sent := <-signaled:
+			if !sent.Before(childStarted) {
+				t.Fatalf("SIGWINCH sent at %v, after the child started at %v: the resize did not land during startup", sent, childStarted)
+			}
+		default:
+			t.Fatal("Started arrived before the probe input that sends SIGWINCH")
 		}
 	case got := <-done:
 		t.Fatalf("Run ended before Started: %#v, %v", got.result, got.err)
