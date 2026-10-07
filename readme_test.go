@@ -120,9 +120,11 @@ func runReadmeCapture(t *testing.T, binary string) {
 		{
 			// The child answers the quit's SIGTERM by switching to 132 columns
 			// (DECCOLM), which the viewport cannot fit, so a session error
-			// follows the quit.
+			// follows the quit. It then outlives the SIGTERM until the frame's
+			// SIGKILL. As in the SIGTERM case above, its exec'd job prints
+			// started, so the trap runs promptly.
 			name:   "Ctrl+Q with a later session error",
-			child:  `trap 'printf "\033[?40h\033[?3h"' TERM; printf started; while :; do sleep 1 & wait $!; done`,
+			child:  `trap 'printf "\033[?40h\033[?3h"' TERM; sh -c 'printf started; exec sleep 30' & wait; exec sleep 30`,
 			quit:   quitWhenStarted,
 			code:   1,
 			stderr: regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(ErrGeometry.Error()) + `: `),
