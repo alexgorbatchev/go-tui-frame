@@ -444,9 +444,20 @@ func TestConsoleMirrorsActiveMouseTrackingMode(t *testing.T) {
 			want   ghostty.MouseTrackingMode
 			// active is the outer tracking mode bit expected on with want.
 			active ghostty.Mode
+			// pixelsOnly reports 1016 permanently set before any cell size is
+			// measured: tracking is withheld while the format follows the child.
+			pixelsOnly bool
 			// written and absent check the output of the last chunk.
 			written, absent []string
 		}{
+			{
+				name: "X10", chunks: []string{"\x1b[?9h"}, want: ghostty.MouseTrackingX10, active: ghostty.ModeX10Mouse,
+				written: []string{"\x1b[?9h", "\x1b[?1006h"},
+			},
+			{
+				name: "withheld until cells are measured", chunks: []string{"\x1b[?1003h", "\x1b[?9h\x1b[?1000h"}, want: ghostty.MouseTrackingNone,
+				pixelsOnly: true, absent: []string{"\x1b[?9h", "\x1b[?1000h", "\x1b[?1003h"},
+			},
 			{
 				name: "normal", chunks: []string{"\x1b[?1000h"}, want: ghostty.MouseTrackingNormal, active: ghostty.ModeNormalMouse,
 				written: []string{"\x1b[?1000h", "\x1b[?1006h"},
@@ -485,6 +496,9 @@ func TestConsoleMirrorsActiveMouseTrackingMode(t *testing.T) {
 					9: ansi.ModeReset, 1000: ansi.ModeReset, 1002: ansi.ModeReset, 1003: ansi.ModeReset,
 					1006: ansi.ModeReset, alternateScrollMode: ansi.ModeReset,
 				})
+				if tt.pixelsOnly {
+					reportModes(t, s.console, map[ansi.DECMode]ansi.ModeSetting{1016: ansi.ModePermanentlySet})
+				}
 				outer, err := emulator.New(emulator.Options{Size: emulator.Size{Cols: 20, Rows: 6}})
 				if err != nil {
 					t.Fatal(err)
@@ -522,7 +536,7 @@ func TestConsoleMirrorsActiveMouseTrackingMode(t *testing.T) {
 						t.Errorf("outer mode %d = %v with tracking mode %v", m, got, tt.want)
 					}
 				}
-				if got := state.Modes[ghostty.ModeSGRMouse]; got != (tt.want != ghostty.MouseTrackingNone) {
+				if got := state.Modes[ghostty.ModeSGRMouse]; got != (tt.want != ghostty.MouseTrackingNone || tt.pixelsOnly) {
 					t.Errorf("outer SGR mouse = %v with tracking mode %v", got, tt.want)
 				}
 			})
