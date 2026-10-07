@@ -474,6 +474,95 @@ func childCommand(t *testing.T) *exec.Cmd {
 	return cmd
 }
 
+// The child talks to the virtual endpoint, so it must not see the outer
+// terminal's TERM and COLORTERM, the variables programs read to pick
+// protocols or escape sequences the endpoint does not provide, or the outer
+// size. Socket and window handles, variables with no such reader, and every
+// unrelated variable reach it unchanged and in order.
+func TestChildEnvironmentDescribesTheVirtualEndpoint(t *testing.T) {
+	tests := []struct {
+		entry string
+		kept  bool
+	}{
+		{"HOME=/Users/frame", true},
+		// The endpoint's own values replace the outer terminal's.
+		{"TERM=xterm-ghostty", false},
+		{"COLORTERM=24bit", false},
+		// Terminal identity that selects Kitty graphics, Sixel, or iTerm2
+		// inline images.
+		{"TERM_PROGRAM=iTerm.app", false},
+		{"TERM_PROGRAM_VERSION=3.6.4", false},
+		{"LC_TERMINAL=iTerm2", false},
+		{"TERM_FEATURES=T3LrMSc7UUw9Ts3BFGsGoSyHNoSxPrSo", false},
+		{"KONSOLE_VERSION=250401", false},
+		{"KITTY_WINDOW_ID=3", false},
+		{"KITTY_PID=4242", false},
+		{"GHOSTTY_RESOURCES_DIR=/Applications/Ghostty.app/Contents/Resources/ghostty", false},
+		{"GHOSTTY_BIN_DIR=/Applications/Ghostty.app/Contents/MacOS", false},
+		{"WEZTERM_EXECUTABLE=/Applications/WezTerm.app/Contents/MacOS/wezterm-gui", false},
+		{"WEZTERM_PANE=0", false},
+		{"ITERM_SESSION_ID=w0t0p0:6F4A2C3E-1B9D-4E7A-8C5F-2D0B3A9E7F61", false},
+		{"TERM_SESSION_ID=w0t0p0:6F4A2C3E-1B9D-4E7A-8C5F-2D0B3A9E7F61", false},
+		{"XTERM_VERSION=XTerm(397)", false},
+		{"MLTERM=3.9.3", false},
+		{"TERMINAL_NAME=contour", false},
+		{"EAT_SHELL_INTEGRATION_DIR=/usr/share/emacs/site-lisp/eat/integration", false},
+		{"WARP_HONOR_PS1=0", false},
+		{"WARP_SESSION_ID=4242", false},
+		{"WARP_TERMINAL_SESSION_UUID=1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f", false},
+		{"WARP_IS_LOCAL_SHELL_SESSION=1", false},
+		{"VSCODE_INJECTION=1", false},
+		{"TABBY_CONFIG_DIRECTORY=/Users/frame/Library/Application Support/tabby", false},
+		// Terminal-specific sequences and integrations.
+		{"VTE_VERSION=7800", false},
+		{"GHOSTTY_SHELL_FEATURES=cursor:blink,path,title,ssh-terminfo", false},
+		// Terminal identity that makes programs trust OSC 52 clipboard writes.
+		{"WT_SESSION=9b2a4c1e-7d3f-4a8b-b6e2-5c0d9f1a3e47", false},
+		{"ITERM_PROFILE=Default", false},
+		{"CURSOR_TRACE_ID=7f3e2d1c0b9a", false},
+		// The outer size, which ncurses prefers over the viewport's PTY size.
+		{"COLUMNS=212", false},
+		{"LINES=58", false},
+		// Multiplexer and remote-control handles share prefixes with removed
+		// names but address the outer terminal on purpose.
+		{"TMUX=/private/tmp/tmux-501/default,4242,0", true},
+		{"TMUX_PANE=%3", true},
+		{"WEZTERM_UNIX_SOCKET=/Users/frame/.local/share/wezterm/gui-sock-4242", true},
+		{"KITTY_LISTEN_ON=unix:/tmp/kitty-4242", true},
+		{"ALACRITTY_SOCKET=/tmp/Alacritty-4242.sock", true},
+		{"VSCODE_GIT_ASKPASS_MAIN=/Applications/Visual Studio Code.app/Contents/Resources/app/extensions/git/dist/askpass-main.js", true},
+		{"WINDOWID=4242", true},
+		{"COLORFGBG=15;0", true},
+		// Outer-terminal variables that no known program reads to pick
+		// something the endpoint lacks.
+		{"LC_TERMINAL_VERSION=3.6.4", true},
+		{"TERMINAL_EMULATOR=JetBrains-JediTerm", true},
+		{"KONSOLE_PROFILE_NAME=Profile 1", true},
+		{"KONSOLE_DBUS_SESSION=/Sessions/1", true},
+		// Only the name before the first '=' selects an entry.
+		{"FRAME_NOTE=TERM=vt100", true},
+		{"PATH=/usr/bin:/bin", true},
+	}
+	env := make([]string, 0, len(tests))
+	want := make([]string, 0, len(tests)+2)
+	for _, tt := range tests {
+		env = append(env, tt.entry)
+		if tt.kept {
+			want = append(want, tt.entry)
+		}
+	}
+	want = append(want, "TERM="+endpointTerminfo, "COLORTERM=truecolor")
+	got := childEnvironment(env)
+	for _, tt := range tests {
+		if kept := slices.Contains(got, tt.entry); kept != tt.kept {
+			t.Errorf("child environment keeps %q = %t, want %t", tt.entry, kept, tt.kept)
+		}
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("child environment = %q, want %q", got, want)
+	}
+}
+
 func TestRunFramesRealChildAndPushesIdleUpdate(t *testing.T) {
 	h := newHarness(t)
 	before := termiosState(t, h)

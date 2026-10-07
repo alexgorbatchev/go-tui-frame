@@ -33,6 +33,9 @@ const (
 	terminationTimeout = time.Second
 	drainTimeout       = 2 * time.Second
 	maxScreenCells     = 1 << 20
+	// endpointTerminfo names the terminfo entry the virtual endpoint
+	// implements: the child's TERM and the endpoint's XTGETTCAP TN reply.
+	endpointTerminfo = "xterm-256color"
 )
 
 // Run executes the child in a native PTY and owns one outer-terminal session.
@@ -198,19 +201,77 @@ type session[T any] struct {
 	renderDeadline, reapDeadline                              time.Time
 }
 
+// endpointConflictVariables names the outer-terminal variables the child must
+// not inherit. The child talks to the virtual endpoint, and programs read
+// these to pick protocols or escape sequences the endpoint does not provide,
+// or to size themselves to the outer terminal. A variable stays here only
+// while a known program reads it that way; one that merely names the outer
+// terminal passes through. Names match exactly: multiplexer and
+// remote-control handles such as TMUX, TMUX_PANE, WEZTERM_UNIX_SOCKET,
+// KITTY_LISTEN_ON, and ALACRITTY_SOCKET pass through, so tools in the child
+// can still address the outer multiplexer or terminal. KITTY_WINDOW_ID,
+// KITTY_PID, WEZTERM_PANE, and ITERM_SESSION_ID also act as default targets
+// for remote control, but image tools read them to emit graphics into the
+// child's display, so they are removed and such tools need an explicit target.
+var endpointConflictVariables = map[string]bool{
+	// The endpoint's own TERM and COLORTERM replace the outer ones.
+	"TERM":      true,
+	"COLORTERM": true,
+	// Terminal identity that image tools such as chafa, yazi, viuer, pi,
+	// odiff, and go-termimg map to Kitty graphics, Sixel, or iTerm2 inline
+	// images. The endpoint disables Kitty graphics and implements neither
+	// Sixel nor iTerm2's OSC 1337 File.
+	"TERM_PROGRAM":                true,
+	"TERM_PROGRAM_VERSION":        true,
+	"LC_TERMINAL":                 true,
+	"TERM_FEATURES":               true,
+	"KONSOLE_VERSION":             true,
+	"KITTY_WINDOW_ID":             true,
+	"KITTY_PID":                   true,
+	"GHOSTTY_RESOURCES_DIR":       true,
+	"GHOSTTY_BIN_DIR":             true,
+	"WEZTERM_EXECUTABLE":          true,
+	"WEZTERM_PANE":                true,
+	"ITERM_SESSION_ID":            true,
+	"TERM_SESSION_ID":             true,
+	"XTERM_VERSION":               true,
+	"MLTERM":                      true,
+	"TERMINAL_NAME":               true,
+	"EAT_SHELL_INTEGRATION_DIR":   true,
+	"WARP_HONOR_PS1":              true,
+	"WARP_SESSION_ID":             true,
+	"WARP_TERMINAL_SESSION_UUID":  true,
+	"WARP_IS_LOCAL_SHELL_SESSION": true,
+	"VSCODE_INJECTION":            true,
+	"TABBY_CONFIG_DIRECTORY":      true,
+	// Terminal-specific integrations: VTE's vte.sh emits VTE's OSC 666
+	// properties, and Ghostty's shell integration makes ssh request its
+	// xterm-ghostty terminfo on remote hosts.
+	"VTE_VERSION":            true,
+	"GHOSTTY_SHELL_FEATURES": true,
+	// Terminal identity that makes programs such as grok-build trust OSC 52
+	// clipboard writes, which the endpoint refuses.
+	"WT_SESSION":      true,
+	"ITERM_PROFILE":   true,
+	"CURSOR_TRACE_ID": true,
+	// The outer size. ncurses prefers exported COLUMNS and LINES to the PTY
+	// window size and then ignores SIGWINCH, so the child would size itself to
+	// the outer terminal for the whole session.
+	"COLUMNS": true,
+	"LINES":   true,
+}
+
+// childEnvironment returns env without the variables that conflict with the
+// virtual endpoint and with the endpoint's TERM and COLORTERM.
 func childEnvironment(env []string) []string {
-	// The child talks to the virtual endpoint, whose supported identity is
-	// independent of the physical terminal's vendor and graphics features.
 	out := make([]string, 0, len(env)+2)
 	for _, v := range env {
 		name, _, _ := strings.Cut(v, "=")
-		switch name {
-		case "TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "KITTY_WINDOW_ID", "GHOSTTY_RESOURCES_DIR", "GHOSTTY_BIN_DIR", "WEZTERM_PANE", "ITERM_SESSION_ID":
-			continue
+		if !endpointConflictVariables[name] {
+			out = append(out, v)
 		}
-		out = append(out, v)
 	}
-	return append(out, "TERM=xterm-256color", "COLORTERM=truecolor")
+	return append(out, "TERM="+endpointTerminfo, "COLORTERM=truecolor")
 }
 
 func (f *Frame[T]) checkedLayout(w *unix.Winsize) (geometry, error) {
