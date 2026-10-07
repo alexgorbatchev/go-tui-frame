@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -120,11 +121,11 @@ func Read(pid int) Snapshot {
 	if err != nil {
 		return missing(pid, err)
 	}
-	end, err := parseStat(string(raw))
+	start, err := parseStatStart(raw)
 	if err != nil {
 		return missing(pid, err)
 	}
-	if end.start != stat.start {
+	if start != stat.start {
 		return missing(pid, ErrIdentityChanged)
 	}
 	return s
@@ -139,19 +140,20 @@ func readLink(path string) Field[string] {
 }
 
 func (r *procReader) readStrings(path, meaning string) Field[[]string] {
+	source := path + "; " + meaning
 	raw, err := r.read(path)
 	if err != nil {
-		return unavailable[[]string](path+"; "+meaning, err)
+		return unavailable[[]string](source, err)
 	}
 	if len(raw) == 0 {
-		return available([]string{}, path+"; "+meaning)
+		return available([]string{}, source)
 	}
 	if raw[len(raw)-1] != 0 {
 		return unavailable[[]string](path, fmt.Errorf("unterminated procfs string vector"))
 	}
 	// One conversion and one split keep the allocation count independent of
 	// the element count; the elements share one immutable backing string.
-	return available(strings.Split(string(raw[:len(raw)-1]), "\x00"), path+"; "+meaning)
+	return available(strings.Split(string(raw[:len(raw)-1]), "\x00"), source)
 }
 
 func statResources(stat procStat) Resources {
@@ -162,16 +164,26 @@ func statResources(stat procStat) Resources {
 		Threads:       available(stat.threads, source),
 		Native:        available(map[string]uint64{"user_clock_ticks": stat.user, "system_clock_ticks": stat.system, "resident_pages": stat.resident, "start_clock_ticks": stat.start}, source),
 	}
+	if hz, err := clockTicks(); err != nil {
+		const tickSource = "sysconf(_SC_CLK_TCK)"
+		r.CPUUser = unavailable[time.Duration](tickSource, err)
+		r.CPUSystem = unavailable[time.Duration](tickSource, err)
+	} else {
+		r.CPUUser = scaledDuration(stat.user, uint64(time.Second), hz, source+" user clock ticks converted to nanoseconds")
+		r.CPUSystem = scaledDuration(stat.system, uint64(time.Second), hz, source+" system clock ticks converted to nanoseconds")
+	}
+	return r
+}
+
+// clockTicks is the procfs clock-tick rate. It is fixed for the life of the
+// process, so one sysconf call serves every Read.
+var clockTicks = sync.OnceValues(func() (uint64, error) {
 	hz, err := C.sysconf(C._SC_CLK_TCK)
 	if hz <= 0 {
 		if err == nil {
 			err = ErrUnavailable
 		}
-		r.CPUUser = unavailable[time.Duration]("sysconf(_SC_CLK_TCK)", err)
-		r.CPUSystem = unavailable[time.Duration]("sysconf(_SC_CLK_TCK)", err)
-	} else {
-		r.CPUUser = scaledDuration(stat.user, uint64(time.Second), uint64(hz), source+" user clock ticks")
-		r.CPUSystem = scaledDuration(stat.system, uint64(time.Second), uint64(hz), source+" system clock ticks")
+		return 0, err
 	}
-	return r
-}
+	return uint64(hz), nil
+})

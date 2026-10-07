@@ -13,7 +13,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"strconv"
-	"strings"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -31,8 +31,18 @@ func procInfo(pid, flavor int, dst unsafe.Pointer, size uintptr) error {
 	return fmt.Errorf("proc_pidinfo(%d,%d): received %d bytes, want %d", pid, flavor, n, size)
 }
 
+// sameStart reports whether two BSD info samples describe the same process
+// start, which guards against PID reuse between them.
+func sameStart(a, b *C.struct_proc_bsdinfo) bool {
+	return a.pbi_start_tvsec == b.pbi_start_tvsec && a.pbi_start_tvusec == b.pbi_start_tvusec
+}
+
+// startIdentity formats the start timeval as seconds:microseconds.
 func startIdentity(v *C.struct_proc_bsdinfo) string {
-	return fmt.Sprintf("%d:%d", v.pbi_start_tvsec, v.pbi_start_tvusec)
+	var buf [2*20 + 1]byte // two uint64 values and the separator
+	b := strconv.AppendUint(buf[:0], uint64(v.pbi_start_tvsec), 10)
+	b = append(b, ':')
+	return string(strconv.AppendUint(b, uint64(v.pbi_start_tvusec), 10))
 }
 
 // Read samples native libproc/sysctl data without executing helper programs.
@@ -71,7 +81,7 @@ func Read(pid int) Snapshot {
 	if err := procInfo(pid, C.PROC_PIDTBSDINFO, unsafe.Pointer(&end), unsafe.Sizeof(end)); err != nil {
 		return missing(pid, err)
 	}
-	if startIdentity(&info) != startIdentity(&end) {
+	if !sameStart(&info, &end) {
 		return missing(pid, ErrIdentityChanged)
 	}
 	return s
@@ -98,9 +108,10 @@ func readPaths(pid int, s *Snapshot) {
 	}
 }
 
+// cString copies a NUL-terminated C array of n bytes up to its first NUL, so
+// the result owns only its own length rather than the whole array.
 func cString(p *C.char, n int) string {
-	value, _, _ := strings.Cut(C.GoStringN(p, C.int(n)), "\x00")
-	return value
+	return unix.ByteSliceToString(unsafe.Slice((*byte)(unsafe.Pointer(p)), n))
 }
 
 func readArgs(pid int, wide bool, s *Snapshot) {
@@ -183,6 +194,16 @@ func parseArgs(raw []byte, pointerBytes int) ([]string, []string, error) {
 	return args, env, nil
 }
 
+// timebase is the Mach tick-to-nanosecond ratio. It is fixed for the life of
+// the system, so one mach_timebase_info call serves every Read.
+var timebase = sync.OnceValues(func() (C.mach_timebase_info_data_t, error) {
+	var base C.mach_timebase_info_data_t
+	if code := C.mach_timebase_info(&base); code != 0 || base.denom == 0 {
+		return base, fmt.Errorf("mach_timebase_info: code %d, denominator %d", code, base.denom)
+	}
+	return base, nil
+})
+
 func readResources(pid int) Resources {
 	const source = "libproc PROC_PIDTASKINFO"
 	var info C.struct_proc_taskinfo
@@ -194,14 +215,12 @@ func readResources(pid int) Resources {
 		VirtualBytes:  available(uint64(info.pti_virtual_size), source+" virtual-size bytes"),
 		Threads:       available(int(info.pti_threadnum), source),
 	}
-	var base C.mach_timebase_info_data_t
-	if code := C.mach_timebase_info(&base); code != 0 || base.denom == 0 {
-		err := fmt.Errorf("mach_timebase_info: code %d, denominator %d", code, base.denom)
+	if base, err := timebase(); err != nil {
 		r.CPUUser = unavailable[time.Duration](source, err)
 		r.CPUSystem = unavailable[time.Duration](source, err)
 	} else {
-		r.CPUUser = scaledDuration(uint64(info.pti_total_user), uint64(base.numer), uint64(base.denom), source+" user Mach timebase ticks")
-		r.CPUSystem = scaledDuration(uint64(info.pti_total_system), uint64(base.numer), uint64(base.denom), source+" system Mach timebase ticks")
+		r.CPUUser = scaledDuration(uint64(info.pti_total_user), uint64(base.numer), uint64(base.denom), source+" user Mach timebase ticks converted to nanoseconds")
+		r.CPUSystem = scaledDuration(uint64(info.pti_total_system), uint64(base.numer), uint64(base.denom), source+" system Mach timebase ticks converted to nanoseconds")
 	}
 	r.Native = available(map[string]uint64{
 		"user_mach_ticks": uint64(info.pti_total_user), "system_mach_ticks": uint64(info.pti_total_system),

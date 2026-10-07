@@ -18,6 +18,8 @@ type Field[T any] struct {
 	Error     error
 }
 
+// scaledDuration converts ticks to a duration at numer/denom nanoseconds per
+// tick. source is the complete label of the converted value.
 func scaledDuration(ticks, numer, denom uint64, source string) Field[time.Duration] {
 	if denom == 0 {
 		return unavailable[time.Duration](source, fmt.Errorf("native CPU clock has zero denominator"))
@@ -31,7 +33,7 @@ func scaledDuration(ticks, numer, denom uint64, source string) Field[time.Durati
 	if nanos > math.MaxInt64 {
 		return unavailable[time.Duration](source, fmt.Errorf("native CPU time overflows duration"))
 	}
-	return available(time.Duration(nanos), source+" converted to nanoseconds")
+	return available(time.Duration(nanos), source)
 }
 
 // Resources contains native process accounting, not an atomic resource sample.

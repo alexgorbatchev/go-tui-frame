@@ -1,8 +1,10 @@
 package process
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"testing"
 )
@@ -44,8 +46,14 @@ func TestReadCurrentNativeProcess(t *testing.T) {
 	if !s.Resources.CPUUser.Available || !s.Resources.CPUSystem.Available {
 		t.Fatalf("CPU: %+v", s.Resources)
 	}
-	if s.StartIdentity.Value == "" || !s.StartIdentity.Available {
-		t.Fatalf("identity: %+v", s.StartIdentity)
+	if !s.StartIdentity.Available || !startIdentityFormat.MatchString(s.StartIdentity.Value) {
+		t.Fatalf("identity: %+v, want format %s", s.StartIdentity, startIdentityFormat)
+	}
+	if want := nativeStartIdentity(t, member); s.StartIdentity.Value != want {
+		t.Fatalf("identity = %q, native start %q", s.StartIdentity.Value, want)
+	}
+	if got, want := readSources(s), wantReadSources(member); !maps.Equal(got, want) {
+		t.Fatalf("sources = %#v\nwant %#v", got, want)
 	}
 	members, err := List(leader)
 	if err != nil {
@@ -98,5 +106,38 @@ func TestReadDistinguishesCurrentDirectoryAndOwnsCopies(t *testing.T) {
 	copy.Resources.Native.Value["new"] = 1
 	if s.Args.Value[0] == "changed" || s.Environment.Value[0] == "changed" || s.Resources.Native.Value["new"] != 0 {
 		t.Fatal("clone aliases retained observation storage")
+	}
+	if got, want := readSources(s), wantReadSources(member); !maps.Equal(got, want) {
+		t.Fatalf("sources = %#v\nwant %#v", got, want)
+	}
+}
+
+// Native constants such as the CPU clock rate are process-wide, so a sample
+// pays only for the per-process native calls (readCgoCalls) once the first
+// Read has cached them.
+func TestReadMakesOnlyPerProcessCgoCalls(t *testing.T) {
+	pid := os.Getpid()
+	Read(pid)
+	const samples = 20
+	before := runtime.NumCgoCall()
+	for range samples {
+		if s := Read(pid); !s.StartIdentity.Available {
+			t.Fatalf("own process unreadable: %v", s.StartIdentity.Error)
+		}
+	}
+	if got := runtime.NumCgoCall() - before; got != samples*readCgoCalls {
+		t.Fatalf("%d samples made %d cgo calls, want %d per sample", samples, got, readCgoCalls)
+	}
+}
+
+// readSources names the Source of every field Read observes.
+func readSources(s Snapshot) map[string]string {
+	r := s.Resources
+	return map[string]string{
+		"ParentPID": s.ParentPID.Source, "SessionID": s.SessionID.Source, "ProcessGroup": s.ProcessGroup.Source,
+		"Name": s.Name.Source, "State": s.State.Source, "Directory": s.Directory.Source, "Executable": s.Executable.Source,
+		"Args": s.Args.Source, "Environment": s.Environment.Source, "StartIdentity": s.StartIdentity.Source, "Status": s.Status.Source,
+		"ResidentBytes": r.ResidentBytes.Source, "VirtualBytes": r.VirtualBytes.Source, "CPUUser": r.CPUUser.Source,
+		"CPUSystem": r.CPUSystem.Source, "Threads": r.Threads.Source, "Native": r.Native.Source,
 	}
 }

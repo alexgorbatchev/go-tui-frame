@@ -1,6 +1,7 @@
 package process
 
 import (
+	"bytes"
 	"fmt"
 	"strconv"
 	"strings"
@@ -26,6 +27,37 @@ type procStat struct {
 	name, state                                 string
 	parent, group, session, foreground, threads int
 	user, system, start, virtual, resident      uint64
+}
+
+// statSpace is the ASCII whitespace strings.Fields splits stat fields on.
+const statSpace = " \t\n\v\f\r"
+
+// parseStatStart extracts only the start field (statStart) from a raw stat
+// record, without converting or splitting the rest of it.
+func parseStatStart(raw []byte) (uint64, error) {
+	begin, end := bytes.IndexByte(raw, '('), bytes.LastIndexByte(raw, ')')
+	if begin < 0 || end < begin {
+		return 0, fmt.Errorf("proc stat: missing comm delimiters")
+	}
+	rest := raw[end+1:]
+	for field := statState; ; field++ {
+		rest = bytes.TrimLeft(rest, statSpace)
+		if len(rest) == 0 {
+			return 0, fmt.Errorf("proc stat: truncated fields")
+		}
+		n := bytes.IndexAny(rest, statSpace)
+		if n < 0 {
+			n = len(rest)
+		}
+		if field == statStart {
+			value, err := strconv.ParseUint(string(rest[:n]), 10, 64)
+			if err != nil {
+				return 0, fmt.Errorf("proc stat field %d: %w", statStart, err)
+			}
+			return value, nil
+		}
+		rest = rest[n:]
+	}
 }
 
 func parseStat(raw string) (procStat, error) {

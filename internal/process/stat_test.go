@@ -21,3 +21,45 @@ func TestParseProcStatPreservesNativeFields(t *testing.T) {
 		}
 	}
 }
+
+// The identity re-check reads only the start field, so it must agree with
+// parseStat without converting or splitting the whole record.
+func TestParseStatStartMatchesParseStat(t *testing.T) {
+	const prefix = " R 12 34 56 0 -1 0 0 0 0 0 123 456 0 0 20 0 7 0"
+	tests := []struct {
+		name string
+		raw  string
+		want uint64
+		ok   bool
+	}{
+		{"ordinary", "100 (sh)" + prefix + " 999 4096 8\n", 999, true},
+		{"comm with spaces and parens", "100 (a ) b)" + prefix + " 18446744073709551615 4096 8", 1<<64 - 1, true},
+		{"start is last field", "100 (sh)" + prefix + " 999", 999, true},
+		{"truncated before start", "100 (sh)" + prefix, 0, false},
+		{"non-numeric start", "100 (sh)" + prefix + " x9 4096 8", 0, false},
+		{"missing comm", "100 sh" + prefix + " 999", 0, false},
+		{"empty", "", 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseStatStart([]byte(tt.raw))
+			if (err == nil) != tt.ok || got != tt.want {
+				t.Fatalf("parseStatStart = %d, %v; want %d, ok %v", got, err, tt.want, tt.ok)
+			}
+			if !tt.ok {
+				return
+			}
+			if full, err := parseStat(tt.raw + " 0 0 0"); err != nil || full.start != got {
+				t.Fatalf("parseStat start = %d, %v; parseStatStart %d", full.start, err, got)
+			}
+		})
+	}
+	raw := []byte("100 (sh)" + prefix + " 999 4096 8\n")
+	if allocs := testing.AllocsPerRun(100, func() {
+		if _, err := parseStatStart(raw); err != nil {
+			t.Fatal(err)
+		}
+	}); allocs != 0 {
+		t.Fatalf("parseStatStart allocates %v times per record", allocs)
+	}
+}
