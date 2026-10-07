@@ -197,6 +197,22 @@ arm64). `just check` runs `go mod tidy -diff`, the native archive build,
 `go test -race ./...`. Both jobs passed at `f674572` (CI run 37510976188),
 so the race suite also ran on Linux x86_64.
 
+Each job restores `.tmp/native/ghostty`, the installed prefix, the Zig cache
+and `.tmp/native/zig-global-cache` with
+[`actions/cache`](https://github.com/actions/cache) before `just check`. The key
+names the runner's system and architecture, the Zig binary's SHA-256, the hash
+of `scripts/native.sh`, and a digest of the root, target, prefix and cache
+names the justfile passes to the script plus the native target that `zig
+targets` reports for the host. A change to any of them misses the cache and
+runs a full native build. The workflow sets no `restore-keys`, because a
+restored source tree from another revision fails the script's revision check.
+`actions/cache` saves an entry only after a successful job and never replaces
+an existing one. On a hit, Zig re-hashes the restored files, whose inodes
+changed, and reuses its cached outputs when their contents match. Locally, a
+`.tmp/native` restored from a tar of those four directories, without the
+archive, rebuilt in under two seconds with no download and produced the same
+`libghostty-vt.a`.
+
 The same gate passes locally. The race suite's package results follow; the
 elapsed times are indicative, with load averages of 4.9–5.7 over 1 minute
 during the run:

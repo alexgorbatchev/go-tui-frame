@@ -51,6 +51,46 @@ jobs:
           fi
           command -v pkg-config
 
+      # The native build cache key covers every input of `just native` that
+      # the restored files depend on: the Zig binary, scripts/native.sh (the
+      # Ghostty revision, archive SHA-256, Zig version and build flags), the
+      # root, target, prefix and cache the justfile passes to it, and the
+      # target Zig resolves for this host. The macOS target is `native`, and
+      # Ghostty's build tools compile for the host on both systems.
+      - name: Resolve native build cache inputs
+        id: native
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=$(just --evaluate native_root)
+          target=$(just --evaluate native_target)
+          prefix=$(just --evaluate native_prefix_name)
+          cache=$(just --evaluate native_cache_name)
+          host=$(zig targets | sed -n '/^    \.native = \.{$/,$p')
+          test -n "$host" || { printf 'zig targets printed no native target.\n' >&2; exit 1; }
+          digest=$(printf '%s\n' "$root" "$target" "$prefix" "$cache" "$host" | shasum -a 256)
+          {
+            printf 'prefix=%s\n' "$prefix"
+            printf 'cache=%s\n' "$cache"
+            printf 'digest=%s\n' "${digest%% *}"
+          } >> "$GITHUB_OUTPUT"
+
+      # Restores the extracted source, which carries its revision marker, the
+      # installed prefix and both Zig caches, so `just native` neither
+      # downloads the archive nor recompiles. There are no restore-keys: a
+      # prefix match would restore another revision's source, which
+      # scripts/native.sh refuses. The action saves only after a successful
+      # job, and only when no entry exists for the key.
+      - name: Restore native build cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            .tmp/native/ghostty
+            .tmp/native/${{ steps.native.outputs.prefix }}
+            .tmp/native/${{ steps.native.outputs.cache }}
+            .tmp/native/zig-global-cache
+          key: native-${{ runner.os }}-${{ runner.arch }}-zig-${{ matrix.zig_sha }}-script-${{ hashFiles('scripts/native.sh') }}-inputs-${{ steps.native.outputs.digest }}
+
       - name: Verify module hygiene, build, vet, and race tests
         run: just check
 
