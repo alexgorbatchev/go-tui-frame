@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 20:10
-last_modified: 2026-10-07 11:38
+last_modified: 2026-10-07 11:43
 status: current
 ---
 
@@ -281,14 +281,16 @@ a successful job and never replaces an existing one. On a hit, Zig re-hashes
 the restored files, whose inodes changed, and reuses its cached outputs when
 their contents match. Locally, a `.tmp/native` restored from a tar of those
 four directories, without the archive, rebuilt in under two seconds with no
-download and produced the same `libghostty-vt.a`. On CI, the macOS job hit
-the cache on its second run (CI run 37665156959) and did not download the
-archive. The Linux job missed on that run because its `inputs` digest
-changed. The host block is the only part of that digest that varies between
-runs, but those runs did not print it, so the host is the inferred cause. CI
-run 37667067041 (`e9fc4fa`) also missed on Linux and saved a third key, so
-each of the first three Linux runs produced a distinct key. The Linux hit rate
-is still to be confirmed on real CI.
+download and produced the same `libghostty-vt.a`. On CI, four runs have
+reached the restore step: 37660508704 (`608a3b7`), 37663431480 (`11a6de0`),
+37665156959 (`666f07e`) and 37667067041 (`e9fc4fa`). The macOS key was the
+same in all four. The first run missed and failed before saving, the second
+saved the entry, and the third and fourth hit it without downloading the
+archive. Each of the four Linux runs resolved a distinct `inputs` digest, so
+every one missed; the first failed before saving and the other three each
+saved an entry. The host block is the only part of that digest that varies
+between runs, but those runs did not print it, so the host is the inferred
+cause. The Linux hit rate is still to be confirmed on real CI.
 
 The same gate passes locally. The race suite's package results follow; the
 elapsed times are indicative, with load averages of 4.9–5.7 over 1 minute
