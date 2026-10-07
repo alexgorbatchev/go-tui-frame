@@ -380,3 +380,165 @@ func TestNativeMutationRefreshesRoutingState(t *testing.T) {
 		})
 	}
 }
+
+// A border toggle, a cell-size reply and a SIGWINCH that changes only the
+// pixel size keep the outer size, so they keep the outer composition buffer.
+// The full compose each one still causes repaints every cell, so neither the
+// buffer nor the display keeps a cell of the previous layout.
+func TestSameSizeGeometryChangeKeepsOuterScreen(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		change func(t *testing.T, h *terminalHarness, s *session[struct{}])
+	}{
+		{"border", func(t *testing.T, _ *terminalHarness, s *session[struct{}]) {
+			setBorder(t, s, false)
+		}},
+		{"cell-size reply", func(t *testing.T, h *terminalHarness, s *session[struct{}]) {
+			reply := fmt.Sprintf("\x1b[6;%d;%dt", harnessCellHeight+4, harnessCellWidth+2)
+			if _, err := unix.Write(h.fd, []byte(reply)); err != nil {
+				t.Fatal(err)
+			}
+			for _, p := range readOuterReplies(t, s, reply, 1) {
+				if err := s.route(p); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}},
+		{"pixel-only resize", func(t *testing.T, h *terminalHarness, s *session[struct{}]) {
+			cols, rows := s.geometry.outer.Dx(), s.geometry.outer.Dy()
+			if err := pty.Setsize(h.slave, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows), X: uint16(cols * (harnessCellWidth + 2)), Y: uint16(rows * (harnessCellHeight + 4))}); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.resize(); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t)
+			s := newProbedSession(t, h)
+			// The border puts cells on the display that a later layout without
+			// it must erase.
+			setBorder(t, s, true)
+			awaitComposedDisplay(t, h, s)
+			buffer := s.screen.RenderBuffer
+			resized := countResized(t, s, func() { tt.change(t, h, s) })
+			if resized != 1 {
+				t.Fatalf("%s caused %d Resized events, want 1", tt.name, resized)
+			}
+			if s.screen.RenderBuffer != buffer {
+				t.Errorf("%s replaced the %dx%d outer screen buffer", tt.name, s.geometry.outer.Dx(), s.geometry.outer.Dy())
+			}
+			assertComposedScreen(t, s)
+			awaitComposedDisplay(t, h, s)
+		})
+	}
+}
+
+// A real outer resize resizes the outer composition buffer in place, and the
+// full compose leaves no cell of the previous size in it.
+func TestResizeResizesOuterScreen(t *testing.T) {
+	h := newHarness(t)
+	s := newProbedSession(t, h)
+	setBorder(t, s, true)
+	buffer := s.screen.RenderBuffer
+	for _, size := range []Size{{Cols: 30, Rows: 8}, {Cols: 40, Rows: 12}} {
+		resized := countResized(t, s, func() {
+			if err := pty.Setsize(h.slave, &pty.Winsize{Cols: uint16(size.Cols), Rows: uint16(size.Rows), X: uint16(size.Cols * harnessCellWidth), Y: uint16(size.Rows * harnessCellHeight)}); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.resize(); err != nil {
+				t.Fatal(err)
+			}
+		})
+		if resized != 1 {
+			t.Fatalf("resize to %v caused %d Resized events, want 1", size, resized)
+		}
+		if got := (Size{Cols: s.screen.Width(), Rows: s.screen.Height()}); got != size {
+			t.Fatalf("outer screen = %v after resize, want %v", got, size)
+		}
+		if s.screen.RenderBuffer != buffer {
+			t.Errorf("resize to %v replaced the outer screen buffer", size)
+		}
+		assertComposedScreen(t, s)
+	}
+	// The harness display has the outer terminal's original size again.
+	awaitComposedDisplay(t, h, s)
+}
+
+func setBorder(t *testing.T, s *session[struct{}], enabled bool) {
+	t.Helper()
+	if err := s.frame.SetBorder(enabled); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.updateLayout(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// countResized reports how many Resized events change emits.
+func countResized(t *testing.T, s *session[struct{}], change func()) int {
+	t.Helper()
+	var (
+		mu      sync.Mutex
+		resized int
+	)
+	s.events = newEventDispatcher(eventBit(Resized), sessionCancel(t), func(Event) {
+		mu.Lock()
+		resized++
+		mu.Unlock()
+	})
+	change()
+	s.events.close()
+	s.events = nil
+	mu.Lock()
+	defer mu.Unlock()
+	return resized
+}
+
+// composedScreen composes the session's current state into a new outer buffer,
+// as a session that started with the current layout would.
+func composedScreen(s *session[struct{}]) uv.ScreenBuffer {
+	screen := s.console.outerScreen(s.geometry)
+	s.frame.compose(&screen, s.geometry, s.snapshot, repaintDamage{full: true})
+	return screen
+}
+
+// assertComposedScreen checks that the session's outer buffer holds exactly the
+// cells a new buffer of the current layout would.
+func assertComposedScreen(t *testing.T, s *session[struct{}]) {
+	t.Helper()
+	want := composedScreen(s)
+	if !reflect.DeepEqual(s.screen.Lines, want.Lines) {
+		t.Errorf("outer screen =\n%s\nwant\n%s", s.screen.Render(), want.Render())
+	}
+	if s.screen.Method != want.Method {
+		t.Errorf("outer screen width method = %v, want %v", s.screen.Method, want.Method)
+	}
+}
+
+// awaitComposedDisplay waits until the outer terminal shows the cells a new
+// buffer of the session's current layout holds.
+func awaitComposedDisplay(t *testing.T, h *terminalHarness, s *session[struct{}]) {
+	t.Helper()
+	want := composedScreen(s)
+	awaitOuter(t, h, "the composed layout", func(state emulator.State) bool {
+		if state.Size.Cols != want.Width() || state.Size.Rows != want.Height() {
+			return false
+		}
+		for i, cell := range state.Cells {
+			if displayed(cell.Content) != displayed(want.CellAt(i%state.Size.Cols, i/state.Size.Cols).Content) {
+				return false
+			}
+		}
+		return true
+	})
+}
+
+// displayed treats an unwritten cell as the blank it shows.
+func displayed(content string) string {
+	if content == "" {
+		return " "
+	}
+	return content
+}

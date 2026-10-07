@@ -313,11 +313,17 @@ func (c *console) childWinsize(g geometry) *pty.Winsize {
 // the outer terminal does.
 func (c *console) outerScreen(g geometry) uv.ScreenBuffer {
 	screen := uv.NewScreenBuffer(g.outer.Dx(), g.outer.Dy())
-	screen.Method = ansi.WcWidth
-	if c.graphemeWidth() {
-		screen.Method = ansi.GraphemeWidth
-	}
+	screen.Method = c.widthMethod()
 	return screen
+}
+
+// widthMethod is the text measurement the outer terminal uses. A mode report
+// can change it after the outer screen was allocated.
+func (c *console) widthMethod() ansi.Method {
+	if c.graphemeWidth() {
+		return ansi.GraphemeWidth
+	}
+	return ansi.WcWidth
 }
 
 func (s *session[T]) refresh(force bool) error {
@@ -773,7 +779,12 @@ func (s *session[T]) applyGeometry(g geometry) error {
 		return err
 	}
 	s.geometry = g
-	s.screen = s.console.outerScreen(g)
+	// The buffer depends only on the outer size, which a border or cell-size
+	// change keeps, so it is resized in place rather than replaced. Resize
+	// keeps an unchanged size as it is, and the full compose that composed =
+	// false selects clears and touches every line.
+	s.screen.Resize(g.outer.Dx(), g.outer.Dy())
+	s.screen.Method = s.console.widthMethod()
 	s.composed = false
 	s.console.renderer.Resize(g.outer.Dx(), g.outer.Dy())
 	s.snapshot.Outer = Size{Cols: g.outer.Dx(), Rows: g.outer.Dy()}
