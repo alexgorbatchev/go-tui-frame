@@ -106,7 +106,8 @@ type TerminalSnapshot struct {
 // style table: resolve a cell's full native style as
 // NativeStyles[cell.StyleIndex], and only with the table of the snapshot that
 // holds the cell, because another snapshot's table can hold a different style
-// at the same index.
+// at the same index. The table holds at most one style per native cell plus
+// the default style, which is index 0.
 // ModeErrors preserve unavailable getters rather than substituting false.
 // ModifyOtherKeys2 and MouseTrackingMode come from libghostty's key and mouse
 // encoders, because its getters do not expose them. MouseTrackingMode is the

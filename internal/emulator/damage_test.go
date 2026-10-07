@@ -73,8 +73,10 @@ func BenchmarkStateCapture(b *testing.B) {
 // BenchmarkStyledCapture measures an internal capture of a viewport whose
 // every row is damaged and styled. Few styles repeats three runs on each row;
 // style per cell gives every cell its own direct RGB color, as gradients and
-// image-to-ANSI output do. The styles stay the same across iterations and
-// only the text alternates, so the write that damages the rows is excluded.
+// image-to-ANSI output do, and new style per cell also changes every style
+// between the two alternating frames. Otherwise the styles stay the same
+// across iterations and only the text alternates. The write that damages the
+// rows is excluded.
 func BenchmarkStyledCapture(b *testing.B) {
 	for _, tt := range []struct {
 		name string
@@ -89,6 +91,8 @@ func BenchmarkStyledCapture(b *testing.B) {
 		{"style per cell/200x24", Size{Cols: 200, Rows: 24}, styledCellRow},
 		{"style per cell/400x2", Size{Cols: 400, Rows: 2}, styledCellRow},
 		{"style per cell/1000x1", Size{Cols: 1000, Rows: 1}, styledCellRow},
+		{"new style per cell/40x24", Size{Cols: 40, Rows: 24}, newStyledCellRow},
+		{"new style per cell/200x24", Size{Cols: 200, Rows: 24}, newStyledCellRow},
 	} {
 		b.Run(tt.name, func(b *testing.B) {
 			em, err := New(Options{Size: tt.size})
@@ -132,11 +136,18 @@ func BenchmarkStyledCapture(b *testing.B) {
 	}
 }
 
-func styledCellRow(cols, y int, text string) string {
+func styledCellRow(cols, y int, text string) string { return cellStyledRow(cols, y, 7, text) }
+
+// newStyledCellRow gives each frame its own styles, as an animated gradient
+// does, so every capture interns a style for each cell and the table drops
+// the previous frame's styles.
+func newStyledCellRow(cols, y int, text string) string { return cellStyledRow(cols, y, text[0], text) }
+
+func cellStyledRow(cols, y int, blue byte, text string) string {
 	var row strings.Builder
 	for x := range cols {
 		n := y*cols + x
-		fmt.Fprintf(&row, "\x1b[38;2;%d;%d;7m%s", uint8(n>>8), uint8(n), text)
+		fmt.Fprintf(&row, "\x1b[38;2;%d;%d;%dm%s", uint8(n>>8), uint8(n), blue, text)
 	}
 	return row.String() + "\x1b[0m"
 }

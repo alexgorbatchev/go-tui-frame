@@ -35,7 +35,8 @@ type State struct {
 	NativeCells []NativeCell
 	// NativeStyles is this snapshot's style table: each style once, indexed
 	// by NativeCell.StyleIndex. Index 0 is the default style. The table can
-	// also hold styles no cell references.
+	// also hold styles no cell references, but never more styles than
+	// NativeCells has cells plus the default style.
 	NativeStyles       []ghostty.Style
 	Cursor             ghostty.RenderStateCursor
 	Colors             ghostty.RenderStateColors
@@ -89,7 +90,8 @@ func (t *Terminal) State() (State, error) {
 // UpdateState borrows the terminal's display storage and style table, and
 // reuses dst's maps. The owner must serialize use and clone the result before
 // publishing it. Display cells and styles remain valid only until the next
-// capture, resize or close.
+// capture, Write, resize or close: a Write that begins a render hold can
+// convert the preserved frame into the same storage.
 func (t *Terminal) UpdateState(s *State) error {
 	if t == nil || t.native == nil {
 		return ErrClosed
@@ -258,21 +260,14 @@ func (t *Terminal) updateRender() error {
 	if err != nil {
 		return fmt.Errorf("reading native render colors: %w", err)
 	}
-	count := t.size.Cols * t.size.Rows
-	// A resize recaptures every row, so it also compacts the style table.
-	compact := len(t.visual.cells) != count || len(t.styles) > maxStylesPerCell*count
-	if compact || t.visual.colors != *colors {
+	if len(t.visual.cells) != t.size.Cols*t.size.Rows || t.visual.colors != *colors {
 		// Colors are resolved into each UV cell; palette/default-color changes
 		// therefore invalidate cached styles even without any text damage.
-		// Compacting the style table invalidates every captured index.
 		// Invalidate here rather than at conversion, so a deferred conversion's
 		// rows are known when the update preserves a held frame.
 		if err := t.render.SetDirty(ghostty.RenderStateDirtyFull); err != nil {
 			return fmt.Errorf("invalidating native render styles: %w", err)
 		}
-	}
-	if compact {
-		t.resetStyles()
 	}
 	t.renderColors = *colors
 	return nil
@@ -353,6 +348,10 @@ func (t *Terminal) convertVisual() error {
 	if err := t.render.Clean(); err != nil {
 		return fmt.Errorf("consuming native render damage: %w", err)
 	}
+	// Compact only after a complete conversion: a failed one leaves rows
+	// whose cells the next conversion rewrites, and the table only grew, so
+	// every index it left still resolves.
+	t.compactStyles(visual.nativeCells)
 	t.visual = visual
 	return nil
 }

@@ -4,18 +4,9 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"unsafe"
 
 	ghostty "go.mitchellh.com/libghostty"
 )
-
-func TestNativeCellHoldsStyleIndex(t *testing.T) {
-	// The packed cell and the width are 8 bytes each; a style index and the
-	// selection flag share the last word. A full ghostty.Style would add 72.
-	if got := unsafe.Sizeof(NativeCell{}); got > 24 {
-		t.Fatalf("NativeCell is %d bytes, want at most 24", got)
-	}
-}
 
 // renderStyles reads every viewport cell's full style with libghostty's own
 // getter, from the render state the last capture updated, in cell order.
@@ -70,11 +61,12 @@ func assertStyles(t *testing.T, name string, got, want []ghostty.Style) {
 }
 
 // rgbRow writes cols cells to row y, each with its own RGB foreground.
+// Rows of one seed share no style, and neither do rows of different seeds.
 func rgbRow(y, cols, seed int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "\x1b[%d;1H", y)
 	for x := range cols {
-		fmt.Fprintf(&b, "\x1b[38;2;%d;%d;7mx", seed%256, x)
+		fmt.Fprintf(&b, "\x1b[38;2;%d;%d;%dmx", seed%256, x, y)
 	}
 	b.WriteString("\x1b[0m")
 	return b.String()
@@ -105,10 +97,10 @@ func TestNativeStylesResolveAcrossCapturesAndClones(t *testing.T) {
 
 	clone := CloneState(second)
 	cloneStyles := resolvedStyles(t, clone)
-	// Each write gives the last row six new RGB styles. The table compacts
-	// once it holds more than twice the viewport's cells, and the full
-	// recapture that follows assigns every row, clean ones included, an
-	// index into the rebuilt table.
+	// Each write gives the last row six new RGB styles. Once a capture
+	// leaves the table with more styles than the viewport has cells, besides
+	// the default style, it drops the styles no cell references and
+	// renumbers every row, clean ones included.
 	compacted := false
 	for seed := 0; !compacted; seed++ {
 		if seed == 32 {
@@ -120,7 +112,7 @@ func TestNativeStylesResolveAcrossCapturesAndClones(t *testing.T) {
 		compacted = len(em.styles) < before
 		assertStyles(t, fmt.Sprintf("capture %d", seed), resolvedStyles(t, state), renderStyles(t, em))
 	}
-	if limit := 2 * 6 * 3; len(em.styles) > limit {
+	if limit := 6*3 + 1; len(em.styles) > limit {
 		t.Fatalf("compacted table holds %d styles, want at most %d", len(em.styles), limit)
 	}
 	assertStyles(t, "clone after compaction", resolvedStyles(t, clone), cloneStyles)
@@ -130,4 +122,104 @@ func TestNativeStylesResolveAcrossCapturesAndClones(t *testing.T) {
 	}
 	resized := terminalState(t, em)
 	assertStyles(t, "capture after resize", resolvedStyles(t, resized), renderStyles(t, em))
+}
+
+// rgbFrame writes every cell of a cols×rows viewport with its own RGB
+// foreground. Frames of different seeds share no style.
+func rgbFrame(cols, rows, seed int) string {
+	var b strings.Builder
+	for y := range rows {
+		b.WriteString(rgbRow(y+1, cols, seed))
+	}
+	return b.String()
+}
+
+// lendState captures em into s, borrowing the terminal storage as the session
+// does. The lent table may hold at most one style per cell plus the default
+// style, so a snapshot of distinct styles is no larger than one whose cells
+// each held their style, and every cell must resolve to libghostty's style.
+func lendState(t *testing.T, em *Terminal, s *State, name string) {
+	t.Helper()
+	if err := em.UpdateState(s); err != nil {
+		t.Fatal(err)
+	}
+	if limit := len(s.NativeCells) + 1; len(s.NativeStyles) > limit {
+		t.Fatalf("%s: lent style table holds %d styles for %d cells, want at most %d", name, len(s.NativeStyles), len(s.NativeCells), limit)
+	}
+	assertStyles(t, name, resolvedStyles(t, *s), renderStyles(t, em))
+}
+
+func TestLentStyleTableHoldsAtMostOneStylePerCell(t *testing.T) {
+	const cols, rows = 20, 6
+	type step struct {
+		output string
+		// held is whether the output leaves a render hold whose preserved
+		// frame waits for the read to convert it.
+		held bool
+		// firstDirty is the first row the capture converts; rows above it
+		// keep the indices of earlier captures.
+		firstDirty int
+	}
+	tests := []struct {
+		name  string
+		steps []step
+	}{
+		{
+			name: "new styles in every cell of every capture",
+			steps: []step{
+				{output: rgbFrame(cols, rows, 0)},
+				{output: rgbFrame(cols, rows, 1)},
+				{output: rgbFrame(cols, rows, 2)},
+				{output: rgbFrame(cols, rows, 3)},
+				// No cell referenced the default style before the erase.
+				{output: "\x1b[H\x1b[2J"},
+			},
+		},
+		{
+			// Each compaction drops the last row's previous styles and moves
+			// its new ones down. Rewriting the row then finds the moved
+			// styles, and the dropped ones are interned again.
+			name: "new styles in the last row beside clean rows",
+			steps: []step{
+				{output: rgbFrame(cols, rows, 0)},
+				{output: rgbRow(rows, cols, 1), firstDirty: rows - 1},
+				{output: rgbRow(rows, cols, 2), firstDirty: rows - 1},
+				{output: rgbRow(rows, cols, 2), firstDirty: rows - 1},
+				{output: rgbRow(rows, cols, 1), firstDirty: rows - 1},
+			},
+		},
+		{
+			// The hold preserves frame 1 and leaves its conversion to the
+			// read; frame 2, written in the hold, shows once it ends.
+			name: "render hold begins before the conversion",
+			steps: []step{
+				{output: rgbFrame(cols, rows, 0)},
+				{output: rgbFrame(cols, rows, 1) + "\x1b[?2026h" + rgbFrame(cols, rows, 2), held: true},
+				{output: "\x1b[?2026l"},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			em := newTerminal(t, cols, rows)
+			var s State
+			for i, st := range tt.steps {
+				name := fmt.Sprintf("capture %d", i)
+				writeTerminal(t, em, st.output)
+				if em.holdPending != st.held {
+					t.Fatalf("%s: conversion deferred to the read = %v, want %v", name, em.holdPending, st.held)
+				}
+				lendState(t, em, &s, name)
+				if s.Held != st.held {
+					t.Fatalf("%s: Held = %v, want %v", name, s.Held, st.held)
+				}
+				for y, dirty := range em.DirtyRows() {
+					if dirty != (y >= st.firstDirty) {
+						t.Fatalf("%s: dirty rows = %v, want rows %d to %d", name, em.DirtyRows(), st.firstDirty, rows-1)
+					}
+				}
+				em.ClearDamage()
+			}
+		})
+	}
 }

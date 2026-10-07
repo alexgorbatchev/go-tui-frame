@@ -3,6 +3,7 @@ package emulator
 import (
 	"fmt"
 	"math"
+	"slices"
 
 	uv "github.com/charmbracelet/ultraviolet"
 	ghostty "go.mitchellh.com/libghostty"
@@ -19,27 +20,54 @@ type capturedStyle struct {
 // zero NativeCell resolves to the default style.
 const defaultStyleIndex = 0
 
-// maxStylesPerCell bounds the style table relative to the viewport. Cells
-// reference at most one style each, so a table holding more than twice as
-// many styles as cells holds more unreferenced styles than referenced ones.
-const maxStylesPerCell = 2
+// initStyles creates the style table holding only the default style.
+func (t *Terminal) initStyles() {
+	t.styles = []ghostty.Style{*t.defaultStyle}
+	t.styleIndex = map[ghostty.Style]uint32{*t.defaultStyle: defaultStyleIndex}
+}
 
-// resetStyles empties the style table down to the default style. Indices of
-// captured cells become invalid, so the caller must have marked every row
-// dirty for the next conversion. The storage is kept for reuse.
-func (t *Terminal) resetStyles() {
-	t.styles = append(t.styles[:0], *t.defaultStyle)
-	if t.styleIndex == nil {
-		t.styleIndex = make(map[ghostty.Style]uint32)
+// compactStyles bounds the table that UpdateState lends at one style per cell
+// plus the default style, so a snapshot of distinct styles is no larger than
+// one whose cells each held a full style. Once a conversion leaves the table
+// above that bound, it drops the styles no cell of cells references and
+// renumbers the cells' indices in place, so clean rows need no recapture.
+// Kept styles keep their order, and the default style keeps index 0.
+func (t *Terminal) compactStyles(cells []NativeCell) {
+	if len(t.styles) <= len(cells)+1 {
+		return
 	}
-	clear(t.styleIndex)
-	t.styleIndex[*t.defaultStyle] = defaultStyleIndex
+	// remap marks each referenced style, then holds its new index.
+	remap := slices.Grow(t.styleRemap[:0], len(t.styles))[:len(t.styles)]
+	clear(remap)
+	remap[defaultStyleIndex] = 1
+	for i := range cells {
+		remap[cells[i].StyleIndex] = 1
+	}
+	kept := 0
+	for i := range t.styles {
+		if remap[i] == 0 {
+			delete(t.styleIndex, t.styles[i])
+			continue
+		}
+		remap[i] = uint32(kept)
+		if kept != i {
+			t.styles[kept] = t.styles[i]
+			t.styleIndex[t.styles[kept]] = uint32(kept)
+		}
+		kept++
+	}
+	t.styles = t.styles[:kept]
+	for i := range cells {
+		cells[i].StyleIndex = remap[cells[i].StyleIndex]
+	}
+	t.styleRemap = remap
 }
 
 // internStyle returns style's index in the style table, appending it on first
 // use. The table persists across captures because clean rows keep the indices
 // an earlier capture assigned; native style IDs cannot serve as indices,
-// because they belong to the source page and may be reused.
+// because they belong to the source page and may be reused. Indices stay
+// valid until compactStyles renumbers the cells that hold them.
 func (t *Terminal) internStyle(style *ghostty.Style) (uint32, error) {
 	if i, ok := t.styleIndex[*style]; ok {
 		return i, nil

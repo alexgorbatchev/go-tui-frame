@@ -100,11 +100,12 @@ type Terminal struct {
 	lastRowStyle  int
 	plainStyle    capturedStyle
 	defaultStyle  *ghostty.Style
-	// styles is the append-only style table that captured cells index and
-	// UpdateState lends; styleIndex finds a style's entry. updateRender
-	// compacts the table on resize and past maxStylesPerCell styles per cell.
+	// styles is the style table that captured cells index and UpdateState
+	// lends; styleIndex finds a style's entry. Conversions append to it, and
+	// compactStyles then bounds it, renumbering cells through styleRemap.
 	styles     []ghostty.Style
 	styleIndex map[ghostty.Style]uint32
+	styleRemap []uint32
 	// Converting a color value to color.Color allocates, so captures reuse
 	// converted colors. palette holds resolved entries, filled on first use;
 	// foreground and background hold the default colors, nil where the
@@ -146,6 +147,7 @@ func New(opts Options) (*Terminal, error) {
 		size: opts.Size, layout: layout, defaultStyle: ghostty.DefaultStyle(),
 		indexedEntries: indexedPaletteEntries(opts.OuterColorProfile),
 	}
+	t.initStyles()
 	if err := t.newRenderState(); err != nil {
 		t.Close()
 		return nil, err
@@ -308,5 +310,6 @@ func (t *Terminal) Close() {
 	t.rowStyleIndex = nil
 	t.styles = nil
 	t.styleIndex = nil
+	t.styleRemap = nil
 	t.defaultStyle = nil
 }

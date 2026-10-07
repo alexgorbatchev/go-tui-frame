@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 20:10
-last_modified: 2026-10-07 13:07
+last_modified: 2026-10-07 13:50
 status: current
 ---
 
@@ -158,13 +158,16 @@ because capture keeps only the most recent RGB color.
 
 `BenchmarkStyledCapture` in [damage tests](../../../internal/emulator/damage_test.go)
 times an internal capture (`UpdateState`) after a write that damages every
-row; the write is not timed. The styles stay the same across iterations and
-only the text alternates. Few styles writes three runs on each row: bold
-palette, plain and underlined RGB. Style per cell gives every cell its own
-direct RGB color, as gradients and image-to-ANSI output do. A row finds its
-styles by scanning up to 16 of them and through an ID index past that, so a
-row of distinct styles costs time linear in its width. Each style a row reads
-is then looked up by value in the terminal's style table:
+row; the write is not timed. The frames alternate text. Few styles writes
+three runs on each row: bold palette, plain and underlined RGB. Style per cell
+gives every cell its own direct RGB color, as gradients and image-to-ANSI
+output do. New style per cell does the same with different colors in the two
+alternating frames, as an animated gradient does, so every capture interns a
+new style for every cell and then drops the previous frame's styles from the
+table. A row finds its styles by scanning up to 16 of them and through an ID
+index past that, so a row of distinct styles costs time linear in its width.
+Each style a row reads is then looked up by value in the terminal's style
+table:
 
 ```sh
 scripts/with-libghostty-cppflags go test -run '^$' -bench 'BenchmarkStyledCapture' -benchmem -count=3 ./internal/emulator
@@ -172,20 +175,30 @@ scripts/with-libghostty-cppflags go test -run '^$' -bench 'BenchmarkStyledCaptur
 
 | Viewport | Time/op (indicative) | Bytes/op | Allocations/op |
 | :--- | ---: | ---: | ---: |
-| Few styles, 120×40 | 133.2 µs | 17,648 | 479 |
-| Style per cell, 40×24 | 226.0 µs | 161,393 | 3,103 |
-| Style per cell, 200×24 | 1,025.2 µs | 791,157 | 14,623 |
-| Style per cell, 400×2 | 170.4 µs | 133,920 | 2,491 |
-| Style per cell, 1000×1 | 212.8 µs | 166,664 | 3,085 |
+| Few styles, 120×40 | 142.8 µs | 17,649 | 479 |
+| Style per cell, 40×24 | 236.9 µs | 161,393 | 3,103 |
+| Style per cell, 200×24 | 1,159.7 µs | 791,159 | 14,623 |
+| Style per cell, 400×2 | 190.4 µs | 133,920 | 2,491 |
+| Style per cell, 1000×1 | 244.6 µs | 166,666 | 3,085 |
+| New style per cell, 40×24 | 337.8 µs | 161,393 | 3,103 |
+| New style per cell, 200×24 | 1,705.2 µs | 791,156 | 14,623 |
 
-These figures are medians of three runs measured on 2026-10-07 with load
-averages of 4.2–6.3 over 1 minute, directly before the same benchmark on the
-capture code that stored a full style in every native cell, under similar
-load. That code's medians were 133.4, 190.2, 887.7, 152.5 and 192.8 µs in the
-order above, with the same bytes and allocations. The style-table lookup
-costs about 20–40 ns per distinct style in a row. In exchange, a snapshot copy
-of a 200×24 viewport copies 345,600 fewer bytes of native cells and adds 72
-bytes for each style in the table, which a viewport of few styles keeps small.
+These figures are medians of seven runs measured on 2026-10-07 with load
+averages of 10–17 over 1 minute. Each run alternated with a run of the same
+benchmark on the capture code that stored a full style in every native cell,
+whose medians were 142.4, 195.9, 945.3, 165.0, 203.7, 212.3 and 1,010.0 µs in
+the order above, with the same bytes and allocations. When styles persist
+across frames, the style-table lookup costs about 30–45 ns per distinct style
+in a row. When every frame replaces every style, interning the new styles and
+compacting the table cost about 130–145 ns per cell, so the 200×24 capture
+takes 69% longer.
+
+In exchange, a snapshot copy holds 24 instead of 96 bytes per native cell,
+plus 72 bytes for each style in its table. The table holds at most one style
+per cell plus the default style, so the worst case, every cell with its own
+style, is 96 bytes per cell plus one style: 460,872 bytes for a 200×24
+viewport, against 460,800 for full styles. A viewport of few styles keeps the
+table small: a 200×24 viewport with 16 styles holds 116,352 bytes.
 
 ### Synchronized-update captures
 
@@ -390,20 +403,28 @@ per captured row and keeps its map storage between rows. Style IDs are
 page-local and can be reused after mutations, so cached entries are cleared for
 each row. A native cell stores a 32-bit index into the terminal's style table
 rather than the 72-byte style, so it is 24 bytes. The table holds each style
-once and persists across captures, because clean rows keep the indices an
-earlier capture assigned. On a resize, or once the table holds more than twice
-as many styles as the viewport has cells, capture empties the table to the
-default style at index 0 and marks every row dirty, so the conversion that
-follows assigns every cell an index into the rebuilt table. `UpdateState`
-lends the table with the cells; `State` and `CloneState` copy it, so each
+once, with the default style at index 0, and persists across captures,
+because clean rows keep the indices an earlier capture assigned. A conversion
+appends the new styles of the rows it reads. When it leaves the table with
+more styles than the viewport has cells plus one, it drops every style no
+cell references and renumbers the indices of every cell in place, clean rows
+included, so no row is captured again. The table that `UpdateState` lends
+therefore never holds more than one style per cell plus the default style.
+Compaction runs only after a conversion completes, including the conversion a
+read of a held frame runs; a failed conversion leaves the table as it grew, so
+every index still resolves. `State` and `CloneState` copy the table, so each
 snapshot resolves its indices against its own table.
 
 [Cell style tests](../../../internal/emulator/cell_style_test.go) resolve every
 cell's index through its snapshot's table and compare the style with
 libghostty's getter after captures that intern new styles beside clean rows,
-after a compaction and its full recapture, and after a resize. An earlier
-snapshot and a clone keep resolving to the styles they captured, and the
-native cell is at most 24 bytes.
+after compactions, and after a resize. An earlier snapshot and a clone keep
+resolving to the styles they captured. Every lent table holds at most one
+style per cell plus the default style while every frame gives every cell a new
+style, while one row's styles change beside clean rows, and when a render hold
+defers the conversion to the read of the held frame. They also cover styles
+that move during a compaction and are found again, dropped styles that are
+interned again, and a default style that no cell referenced at the compaction.
 
 [Row tests](../../../internal/emulator/row_test.go) compare captured content,
 packed metadata, full styles, erased-cell backgrounds and hyperlinks with
