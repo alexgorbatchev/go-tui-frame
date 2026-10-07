@@ -10,7 +10,7 @@ type capturedStyle struct {
 	visual uv.Style
 }
 
-func (t *Terminal) rowStyle(x, id uint16, colors ghostty.RenderStateColors) (capturedStyle, error) {
+func (t *Terminal) rowStyle(x, id uint16, colors *ghostty.RenderStateColors) (capturedStyle, error) {
 	// Native style ID zero denotes the default style. Plain rows need no map.
 	if id == 0 {
 		return t.plainStyle, nil

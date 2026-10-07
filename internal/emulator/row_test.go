@@ -3,9 +3,11 @@ package emulator
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
+	uv "github.com/charmbracelet/ultraviolet"
 	ghostty "go.mitchellh.com/libghostty"
 )
 
@@ -130,15 +132,25 @@ func TestRowCaptureAllocationsDoNotScaleWithWidth(t *testing.T) {
 func TestCaptureMatchesNativeCellData(t *testing.T) {
 	for _, tt := range []struct {
 		name, text string
+		// linkedBefore is output captured first. It must link cells that
+		// text then overwrites, so the second capture reuses linked storage.
+		linkedBefore string
 	}{
-		{"ASCII", "ASCII \x1b[2;4Hoffset"},
-		{"graphemes and wide spacers", "e\u0301 界 👩🏽‍💻\r\n\x1b[2;8H界"},
-		{"full styles", "\x1b[1;3;53;4:3;38;2;10;20;30;58;2;40;50;60mstyled\x1b[0m\r\nplain"},
-		{"background-only cells", "\x1b[48;2;10;20;30m\x1b[2K\x1b[0m\r\n\x1b[44m\x1b[2K\x1b[0m"},
-		{"hyperlinks", "\x1b]8;;https://example.test/report\x1b\\link界\x1b]8;;\x1b\\ plain"},
+		{"ASCII", "ASCII \x1b[2;4Hoffset", ""},
+		{"graphemes and wide spacers", "e\u0301 界 👩🏽‍💻\r\n\x1b[2;8H界", ""},
+		{"full styles", "\x1b[1;3;53;4:3;38;2;10;20;30;58;2;40;50;60mstyled\x1b[0m\r\nplain", ""},
+		{"background-only cells", "\x1b[48;2;10;20;30m\x1b[2K\x1b[0m\r\n\x1b[44m\x1b[2K\x1b[0m", ""},
+		{"hyperlinks", "\x1b]8;;https://example.test/report\x1b\\link界\x1b]8;;\x1b\\ plain", ""},
+		{"plain text over hyperlinks", "\x1b[Hplain 界", "\x1b]8;;https://example.test/report\x1b\\linked界 row\x1b]8;;\x1b\\"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			em := newTerminal(t, 8, 5)
+			if tt.linkedBefore != "" {
+				writeTerminal(t, em, tt.linkedBefore)
+				if !slices.ContainsFunc(terminalState(t, em).Cells, func(c uv.Cell) bool { return c.Link.URL != "" }) {
+					t.Fatal("linkedBefore output captured no hyperlinked cell")
+				}
+			}
 			writeTerminal(t, em, tt.text)
 			state := terminalState(t, em)
 			if err := em.render.RowIterator(em.rows); err != nil {
@@ -210,8 +222,8 @@ func TestCaptureMatchesNativeCellData(t *testing.T) {
 					if decoded.codepoint != codepoint || decoded.tag != tag || decoded.wide != wide || decoded.styleID != styleID || (decoded.styleID != 0) != styled || decoded.linked != linked {
 						t.Fatalf("cell %d,%d manifest decode differs from Ghostty's getters", x, y)
 					}
-					if linked != (cell.Link.URL != "") {
-						t.Fatalf("cell %d,%d lost or invented a hyperlink", x, y)
+					if linked != (cell.Link.URL != "") || !linked && cell.Link != (uv.Link{}) {
+						t.Fatalf("cell %d,%d lost or invented a hyperlink: %#v", x, y, cell.Link)
 					}
 				}
 			}

@@ -254,50 +254,56 @@ func (t *Terminal) copyRow(y int, visual *visualState) error {
 	if err != nil {
 		return fmt.Errorf("reading native row selection: %w", err)
 	}
-	t.plainStyle = capturedStyle{native: *t.defaultStyle, visual: t.cellStyle(t.defaultStyle, visual.colors)}
+	t.plainStyle = capturedStyle{native: *t.defaultStyle, visual: t.cellStyle(t.defaultStyle, &visual.colors)}
 	// Style IDs belong to the source page and may be reused after mutations.
 	// Reuse only within this captured row; retain map storage between rows.
 	clear(t.styles)
-	for x := range t.size.Cols {
-		i := y*t.size.Cols + x
+	start := y * t.size.Cols
+	cells, natives := visual.cells[start:start+t.size.Cols], visual.nativeCells[start:start+t.size.Cols]
+	for x := range cells {
+		native := &natives[x]
 		// CellsRaw supplies copied packed values without a native getter per
 		// cell. Decode properties from the linked library's layout manifest.
-		visual.nativeCells[i].Raw = *raw.Cell(x)
-		visual.nativeCells[i].Selected = selection != nil && x >= int(selection.StartX) && x <= int(selection.EndX)
-		cell, native, err := t.copyCell(i, visual, t.layout.decode(visual.nativeCells[i].Raw.PackedValue()))
-		if err != nil {
+		native.Raw = *raw.Cell(x)
+		native.Selected = selection != nil && x >= int(selection.StartX) && x <= int(selection.EndX)
+		if err := t.copyCell(x, y, &cells[x], native, &visual.colors); err != nil {
 			return fmt.Errorf("copying native cell %d,%d: %w", x, y, err)
 		}
-		visual.cells[i], visual.nativeCells[i] = cell, native
 	}
 	return nil
 }
 
-func (t *Terminal) copyCell(i int, visual *visualState, data cellData) (uv.Cell, NativeCell, error) {
-	native := &visual.nativeCells[i]
-	raw := &native.Raw
-	style, err := t.rowStyle(uint16(i%t.size.Cols), data.styleID, visual.colors)
+// copyCell converts the native cell at viewport position x,y into the
+// borrowed visual storage in place, so no per-cell value crosses the call.
+// native already holds the cell's raw value and selection; cell holds the
+// previous capture, whose content cellText may reuse.
+func (t *Terminal) copyCell(x, y int, cell *uv.Cell, native *NativeCell, colors *ghostty.RenderStateColors) error {
+	data := t.layout.decode(native.Raw.PackedValue())
+	style, err := t.rowStyle(uint16(x), data.styleID, colors)
 	if err != nil {
-		return uv.Cell{}, NativeCell{}, err
+		return err
 	}
 	t.text = t.text[:0]
 	if data.tag == ghostty.CellContentCodepointGrapheme {
-		if err := t.cells.Select(uint16(i % t.size.Cols)); err != nil {
-			return uv.Cell{}, NativeCell{}, err
+		if err := t.cells.Select(uint16(x)); err != nil {
+			return err
 		}
 		t.text, err = t.cells.AppendGraphemes(t.text)
 		if err != nil {
-			return uv.Cell{}, NativeCell{}, err
+			return err
 		}
 	} else if data.codepoint != 0 {
 		t.text = utf8.AppendRune(t.text, rune(data.codepoint))
 	}
-	cell := uv.Cell{Content: cellText(t.text, visual.cells[i].Content), Style: style.visual, Width: 1}
+	// Read the previous content before the reset, and reset every field so
+	// no link or other value of the previous capture survives.
+	content := cellText(t.text, cell.Content)
+	*cell = uv.Cell{Content: content, Style: style.visual, Width: 1}
 	// Erased cells store their background in the content union rather than
 	// the style. Resolve it independently of the row's shared style cache.
 	switch data.tag {
 	case ghostty.CellContentBgColorPalette:
-		cell.Style.Bg = t.paletteColor(&visual.colors.Palette, data.palette)
+		cell.Style.Bg = t.paletteColor(&colors.Palette, data.palette)
 	case ghostty.CellContentBgColorRGB:
 		cell.Style.Bg = rgbColor(data.rgb)
 	}
@@ -315,17 +321,17 @@ func (t *Terminal) copyCell(i int, visual *visualState, data cellData) (uv.Cell,
 		cell.Content = " "
 	}
 	if data.linked {
-		x, y := i%t.size.Cols, i/t.size.Cols
 		ref, err := t.native.GridRef(ghostty.Point{Tag: ghostty.PointTagViewport, X: uint16(x), Y: uint32(y)})
 		if err != nil {
-			return uv.Cell{}, NativeCell{}, err
+			return err
 		}
 		cell.Link.URL, err = ref.HyperlinkURI()
 		if err != nil {
-			return uv.Cell{}, NativeCell{}, err
+			return err
 		}
 	}
-	return cell, NativeCell{Raw: *raw, Style: style.native, Wide: data.wide, Selected: native.Selected}, nil
+	native.Style, native.Wide = style.native, data.wide
+	return nil
 }
 
 // The immutable ASCII string supplies stable single-character strings without
@@ -343,14 +349,14 @@ func cellText(text []byte, previous string) string {
 	return string(text)
 }
 
-func (t *Terminal) cellStyle(style *ghostty.Style, colors ghostty.RenderStateColors) uv.Style {
+func (t *Terminal) cellStyle(style *ghostty.Style, colors *ghostty.RenderStateColors) uv.Style {
 	if !t.styleValid || t.style != *style {
 		t.style, t.cachedStyle, t.styleValid = *style, t.uvStyle(style, colors), true
 	}
 	return t.cachedStyle
 }
 
-func (t *Terminal) uvStyle(style *ghostty.Style, colors ghostty.RenderStateColors) uv.Style {
+func (t *Terminal) uvStyle(style *ghostty.Style, colors *ghostty.RenderStateColors) uv.Style {
 	result := uv.Style{
 		Fg: t.styleColor(style.FgColor(), &colors.Palette), Bg: t.styleColor(style.BgColor(), &colors.Palette),
 		UnderlineColor: t.styleColor(style.UnderlineColor(), &colors.Palette),

@@ -1,6 +1,8 @@
 package emulator
 
 import (
+	"slices"
+	"strings"
 	"testing"
 
 	ghostty "go.mitchellh.com/libghostty"
@@ -54,9 +56,13 @@ func TestBorrowedStateReusesStorageAndAccumulatesDamage(t *testing.T) {
 }
 
 func BenchmarkBorrowedState(b *testing.B) {
-	for _, name := range []string{"input", "unchanged", "one row"} {
+	const cols, rows = 120, 40
+	// Erasing and refilling the display dirties every row, so the capture
+	// converts every viewport cell.
+	fullViewport := []byte("\x1b[H\x1b[2J" + strings.Repeat(strings.Repeat("x", cols), rows))
+	for _, name := range []string{"input", "unchanged", "one row", "full viewport"} {
 		b.Run(name, func(b *testing.B) {
-			em, err := New(Options{Size: Size{Cols: 120, Rows: 40}})
+			em, err := New(Options{Size: Size{Cols: cols, Rows: rows}})
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -66,10 +72,24 @@ func BenchmarkBorrowedState(b *testing.B) {
 				b.Fatal(err)
 			}
 			text := []byte("\x1b[Hupdated")
+			if name == "full viewport" {
+				text = fullViewport
+				em.ClearDamage()
+				if _, err := em.Write(text); err != nil {
+					b.Fatal(err)
+				}
+				if err := em.UpdateState(&state); err != nil {
+					b.Fatal(err)
+				}
+				if slices.Contains(em.DirtyRows(), false) {
+					b.Fatalf("full-viewport output left rows clean: %v", em.DirtyRows())
+				}
+				em.ClearDamage()
+			}
 			b.ReportAllocs()
 			b.ResetTimer()
 			for range b.N {
-				if name == "one row" {
+				if name == "one row" || name == "full viewport" {
 					if _, err := em.Write(text); err != nil {
 						b.Fatal(err)
 					}
