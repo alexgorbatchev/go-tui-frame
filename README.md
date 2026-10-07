@@ -275,8 +275,11 @@ Selecting `StateChanged` captures an owned terminal snapshot after every child
 output read, including reads coalesced into one repaint. A subscription without
 `StateChanged` captures the viewport when painting or delivering a selected
 lifecycle snapshot. A child synchronized update also checkpoints its last
-complete frame. Use transport events when per-read display state is
-unnecessary to avoid those captures and copies.
+complete frame. The checkpoint copies the frame's cells only when a paint or
+snapshot during the update shows them, or when it begins if a changed row may
+hold a hyperlink. A frame without links that a later frame replaces before the
+next paint or snapshot is never copied. Use transport events when per-read
+display state is unnecessary to avoid those captures and copies.
 
 | Information | Available data |
 | :--- | :--- |

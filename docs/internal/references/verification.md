@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 20:10
-last_modified: 2026-10-07 10:33
+last_modified: 2026-10-07 11:18
 status: current
 ---
 
@@ -129,6 +129,34 @@ counts were measured on 2026-10-07. Capture converts each palette entry and
 each default color once after the render colors change, and reuses the most
 recent direct RGB color, so erased cells add no allocation per column. The RGB
 row adds one allocation because each iteration changes the color.
+
+### Synchronized-update captures
+
+`BenchmarkSynchronizedFrames` in
+[render-hold tests](../../../internal/emulator/render_hold_test.go) writes two
+frames of 30 rows × 100 columns into a 120×40 terminal per `Write`, without
+reading the state. The synchronized run wraps each frame in DEC 2026
+(`\x1b[?2026h` … `\x1b[?2026l`), so every write begins two render holds and
+completes a frame that no read displays.
+
+```sh
+scripts/with-libghostty-cppflags go test -run '^$' -bench 'BenchmarkSynchronizedFrames' -benchmem -count=3 ./internal/emulator
+```
+
+| Frames per `Write` | Time/op (indicative) | Bytes/op | Allocations/op |
+| :--- | ---: | ---: | ---: |
+| Unsynchronized | 3.621 µs | 6 | 3 |
+| Synchronized | 12.22 µs | about 7,760 | 252 |
+
+These figures were measured on 2026-10-07, with load averages of 4.3–4.4 over
+1 minute and 5.7–5.8 over 5 minutes. A hold's beginning updates the native
+render state, which preserves the last complete frame, and reads the
+hyperlink flag of each row a conversion would read. It converts no cell. The
+libghostty row getters make nearly all the allocations, and the synchronized
+byte count varies by a few bytes/op between runs. The held frame is converted
+when a read of the state during the hold displays it. A frame whose hold ends
+first is never converted: the next capture converts the rows of every update
+since the last conversion once.
 
 ## Session benchmarks
 
@@ -299,6 +327,15 @@ viewport storage and damage accumulated across three captures. They also verify
 that input-mode reads leave the display clean, that a plain row does not
 allocate a style per cell, and that selection and full styles agree with
 libghostty's getters.
+
+[Render-hold tests](../../../internal/emulator/render_hold_test.go) verify that
+a write of several synchronized frames converts none of them, and that the
+next read converts only the frame it shows: the last frame, or the last
+complete frame while a hold is open. They also verify that a held frame keeps
+its text and hyperlink URLs when later bytes of the same write replace them,
+including linked rows that a default-color change makes a conversion read
+again. Conversion reads URLs from the live terminal, so a hold whose rows may
+contain a hyperlink converts them when it begins.
 
 [Repaint tests](../../../repaint_test.go) read most child output through a real
 PTY. They verify:

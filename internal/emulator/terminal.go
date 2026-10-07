@@ -111,6 +111,14 @@ type Terminal struct {
 	colorsInterned         bool
 	lastRGB                ghostty.ColorRGB
 	lastRGBColor           color.Color
+
+	// holdPending records that the render state holds the frame preserved
+	// when the current hold began and the visual storage does not. A frame
+	// no read displays before its hold ends is therefore never converted.
+	holdPending bool
+	// renderColors are the colors of the last render-state update, which a
+	// deferred conversion resolves cells with.
+	renderColors ghostty.RenderStateColors
 }
 
 func New(opts Options) (*Terminal, error) {
@@ -244,7 +252,7 @@ func (t *Terminal) ReleaseHold() error {
 		return fmt.Errorf("releasing native render hold: %w", err)
 	}
 	if t.held {
-		t.held = false
+		t.held, t.holdPending = false, false
 		t.effects = append(t.effects, Effect{Kind: RenderHold, Held: false})
 	}
 	return nil

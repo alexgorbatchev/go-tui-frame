@@ -71,11 +71,14 @@ func (t *Terminal) nativeOptions(opts Options) []ghostty.TerminalOption {
 		}),
 		ghostty.WithRenderHold(func(_ *ghostty.Terminal, held bool) {
 			if held {
-				// The callback precedes remaining bytes in this VTWrite, making
-				// this the only safe point to capture the last complete frame.
-				if err := t.captureVisual(); err != nil {
+				if err := t.preserveFrame(); err != nil {
 					t.callbackErr = errors.Join(t.callbackErr, err)
 				}
+			} else {
+				// Child ESU, RIS and Resize end a hold here. The next capture
+				// updates the render state and converts the accumulated rows
+				// once, so the held frame is never converted.
+				t.holdPending = false
 			}
 			t.held = held
 			t.effects = append(t.effects, Effect{Kind: RenderHold, Held: held})
@@ -109,6 +112,27 @@ func (t *Terminal) nativeOptions(opts Options) []ghostty.TerminalOption {
 			return ghostty.ClipboardWriteReply{Result: ghostty.ClipboardWriteUnsupported}
 		}),
 	}
+}
+
+// preserveFrame keeps the last complete frame when a hold begins. The callback
+// precedes the remaining bytes of this VTWrite, making it the only safe point
+// to update the render state. Conversion waits for a read of the held state,
+// except where a converted row may contain a hyperlink: the render state does
+// not copy URIs, and conversion reads them from the live terminal, which the
+// remaining bytes change.
+func (t *Terminal) preserveFrame() error {
+	if err := t.updateRender(); err != nil {
+		return err
+	}
+	linked, err := t.dirtyRowsMayLink()
+	if err != nil {
+		return err
+	}
+	if linked {
+		return t.convertVisual()
+	}
+	t.holdPending = true
+	return nil
 }
 
 func cloneContents(contents []ghostty.ClipboardContent) []ghostty.ClipboardContent {

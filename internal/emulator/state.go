@@ -84,10 +84,18 @@ func (t *Terminal) UpdateState(s *State) error {
 	if t == nil || t.native == nil {
 		return ErrClosed
 	}
-	if !t.held {
+	switch {
+	case !t.held:
 		if err := t.captureVisual(); err != nil {
 			return err
 		}
+	case t.holdPending:
+		// The render state still holds the frame preserved when the hold
+		// began; no update has run since.
+		if err := t.convertVisual(); err != nil {
+			return err
+		}
+		t.holdPending = false
 	}
 	s.Cells, s.NativeCells = t.visual.cells, t.visual.nativeCells
 	s.Cursor, s.Colors = t.visual.cursor, t.visual.colors
@@ -219,30 +227,75 @@ func read[T any](name string, dst *T, getter func() (T, error)) error {
 }
 
 func (t *Terminal) captureVisual() error {
+	if err := t.updateRender(); err != nil {
+		return err
+	}
+	return t.convertVisual()
+}
+
+// updateRender copies the native terminal into the render state and marks
+// every row the next conversion must read as dirty. Native row dirty flags
+// accumulate across updates until convertVisual cleans them, so a conversion
+// after several updates reads every row any of them changed.
+func (t *Terminal) updateRender() error {
 	if err := t.checkGeometry(); err != nil {
 		return err
 	}
 	if err := t.render.Update(t.native); err != nil {
 		return fmt.Errorf("updating native render state: %w", err)
 	}
-	cursor, err := t.render.Cursor()
-	if err != nil {
-		return fmt.Errorf("reading native render cursor: %w", err)
-	}
 	colors, err := t.render.Colors()
 	if err != nil {
 		return fmt.Errorf("reading native render colors: %w", err)
 	}
-	visual := t.visual
-	count := t.size.Cols * t.size.Rows
-	colorsChanged := visual.colors != *colors
-	if len(visual.cells) != count || colorsChanged {
+	if len(t.visual.cells) != t.size.Cols*t.size.Rows || t.visual.colors != *colors {
 		// Colors are resolved into each UV cell; palette/default-color changes
 		// therefore invalidate cached styles even without any text damage.
+		// Invalidate here rather than at conversion, so a deferred conversion's
+		// rows are known when the update preserves a held frame.
 		if err := t.render.SetDirty(ghostty.RenderStateDirtyFull); err != nil {
 			return fmt.Errorf("invalidating native render styles: %w", err)
 		}
 	}
+	t.renderColors = *colors
+	return nil
+}
+
+// dirtyRowsMayLink reports whether a row the next conversion reads may
+// contain a hyperlink. The native row flag has false positives but no false
+// negatives, and the render state copied it during the last update.
+func (t *Terminal) dirtyRowsMayLink() (bool, error) {
+	if err := t.render.RowIterator(t.rows); err != nil {
+		return false, fmt.Errorf("reading native render rows: %w", err)
+	}
+	for {
+		if _, ok := t.rows.NextDirty(); !ok {
+			return false, nil
+		}
+		row, err := t.rows.Raw()
+		if err != nil {
+			return false, fmt.Errorf("reading native row: %w", err)
+		}
+		linked, err := row.Hyperlink()
+		if err != nil {
+			return false, fmt.Errorf("reading native row hyperlink flag: %w", err)
+		}
+		if linked {
+			return true, nil
+		}
+	}
+}
+
+// convertVisual converts the render state's dirty rows, as of the last
+// updateRender, into the visual storage and cleans the native damage.
+func (t *Terminal) convertVisual() error {
+	cursor, err := t.render.Cursor()
+	if err != nil {
+		return fmt.Errorf("reading native render cursor: %w", err)
+	}
+	colors := &t.renderColors
+	visual := t.visual
+	count := t.size.Cols * t.size.Rows
 	if len(visual.cells) != count {
 		visual.cells = slices.Grow(visual.cells, max(0, count-len(visual.cells)))[:count]
 		visual.nativeCells = slices.Grow(visual.nativeCells, max(0, count-len(visual.nativeCells)))[:count]
