@@ -87,3 +87,9 @@ check:
     just build
     just vet
     just test
+
+# Prepare dependencies and generated assets for local development
+setup:
+    mkdir -p .tmp
+    go mod download
+    just native
