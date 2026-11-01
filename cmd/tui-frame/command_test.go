@@ -102,7 +102,8 @@ func TestNativeHelpHonorsTerminalWidth(t *testing.T) {
 				t.Fatalf("help: err=%v stderr=%q", err, diagnostic)
 			}
 			for _, line := range strings.Split(out, "\n") {
-				if got := lipgloss.Width(line); got > width {
+				// A word wider than the terminal stays whole on its own line.
+				if got := lipgloss.Width(line); got > width && len(strings.Fields(strings.Trim(line, " │├╰─#"))) > 1 {
 					t.Errorf("help line uses %d cells: %q", got, line)
 				}
 			}

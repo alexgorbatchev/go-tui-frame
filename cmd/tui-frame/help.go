@@ -3,10 +3,8 @@ package main
 import (
 	"fmt"
 	"io"
-	"strings"
 
-	helptree "github.com/alexgorbatchev/cobra-help-tree/v2"
-	"github.com/charmbracelet/x/ansi"
+	helptree "github.com/alexgorbatchev/cobra-help-tree/v4"
 	"github.com/spf13/cobra"
 )
 
@@ -75,22 +73,12 @@ func wrapHelp(cmd *cobra.Command, options helptree.HelpOptions) {
 
 func helpScreen(cmd *cobra.Command, options helptree.HelpOptions, help bool) string {
 	if helptree.IsAgentMode() {
-		return helptree.RenderAgentHelp(cmd, options.Catalog, options.Agent)
+		return helptree.RenderAgentHelp(cmd, options.Catalog)
 	}
-	var screen string
 	if help {
-		screen = helptree.RenderTreeHelp(cmd, options.Catalog, options.Tree)
-	} else {
-		screen = helptree.RenderTreeUsage(cmd, options.Catalog, options.Tree)
+		return helptree.RenderTreeHelp(cmd, options.Catalog, options.Tree)
 	}
-	// The native tree clips its catalog columns, while descriptions and the
-	// footer remain unbounded in v2.1.0. Bound the complete human screen in cells.
-	lines := strings.Split(screen, "\n")
-	tail := strings.Repeat(".", min(3, options.Tree.TerminalWidth))
-	for i, line := range lines {
-		lines[i] = ansi.Truncate(line, options.Tree.TerminalWidth, tail)
-	}
-	return strings.Join(lines, "\n")
+	return helptree.RenderTreeUsage(cmd, options.Catalog, options.Tree)
 }
 
 func writeHelpAlert(out io.Writer) error {

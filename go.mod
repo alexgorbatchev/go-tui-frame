@@ -4,7 +4,7 @@ go 1.27.1
 
 require (
 	charm.land/lipgloss/v2 v2.0.6
-	github.com/alexgorbatchev/cobra-help-tree/v2 v2.1.0
+	github.com/alexgorbatchev/cobra-help-tree/v4 v4.0.0
 	github.com/charmbracelet/colorprofile v0.4.3
 	github.com/charmbracelet/ultraviolet v0.0.0-20261001125412-878653296cfd
 	github.com/charmbracelet/x/ansi v0.11.8

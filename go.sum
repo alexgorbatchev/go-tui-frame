@@ -1,7 +1,7 @@
 charm.land/lipgloss/v2 v2.0.6 h1:EaGKeuA8FvF+v2BT5VmZd2LoYLaMZJXA5n34th8nCIQ=
 charm.land/lipgloss/v2 v2.0.6/go.mod h1:ipDDJNSGa1hlwDtSfW1s2/xR8Vdhbut4PXh2zEKZd0Q=
-github.com/alexgorbatchev/cobra-help-tree/v2 v2.1.0 h1:HnwodqKw+4ub0DFCW6/9Hs0oYVHjVuPFM1cnvy+1ZBQ=
-github.com/alexgorbatchev/cobra-help-tree/v2 v2.1.0/go.mod h1:Vm/pvT2ktLcHypR7Nbru91OvoKMBukS2cVd7QhxsSOI=
+github.com/alexgorbatchev/cobra-help-tree/v4 v4.0.0 h1:lsgP09cFsQq25htGjEYvh8ATiBE7t7R7ECfJBe01QVU=
+github.com/alexgorbatchev/cobra-help-tree/v4 v4.0.0/go.mod h1:iW2OKycMBhufRu+sBuCIqV8uwzqLfLzz24zyP65j/cY=
 github.com/alexgorbatchev/ultraviolet v0.0.0-20261006132318-0ff1fafbd555 h1:Fe9tEibbb7J+gsTjf/H/EYnQxdzBsVLuM4vAE2W7txM=
 github.com/alexgorbatchev/ultraviolet v0.0.0-20261006132318-0ff1fafbd555/go.mod h1:D9SVXVpAsD1pP6xR6BiERbe4+dUU6EW9US1TFrNutGA=
 github.com/charmbracelet/colorprofile v0.4.3 h1:QPa1IWkYI+AOB+fE+mg/5/4HRMZcaXex9t5KX76i20Q=

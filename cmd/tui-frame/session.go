@@ -8,7 +8,7 @@ import (
 	"sync"
 	"syscall"
 
-	helptree "github.com/alexgorbatchev/cobra-help-tree/v2"
+	helptree "github.com/alexgorbatchev/cobra-help-tree/v4"
 	frame "github.com/alexgorbatchev/go-tui-frame/v2"
 )
 
