@@ -62,7 +62,7 @@ func TestCLIInheritanceFlagControlsRealPTYSettings(t *testing.T) {
 			if err := charmterm.SetState(slave.Fd(), state); err != nil {
 				t.Fatal(err)
 			}
-			file := filepath.Join(projectTempDir(t), "erase-byte")
+			file := filepath.Join(t.TempDir(), "erase-byte")
 			ctx, cancel := context.WithTimeout(context.Background(), sessionTimeout)
 			defer cancel()
 			args := append(append([]string{}, tt.flags...), "--", os.Args[0], "-test.run=^TestCLIInheritanceChild$")
@@ -243,8 +243,8 @@ func TestDemoControlsRepaintAndResizeRealChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	inputFile := filepath.Join(projectTempDir(t), "child-input")
-	sizeFile := filepath.Join(projectTempDir(t), "child-sizes")
+	inputFile := filepath.Join(t.TempDir(), "child-input")
+	sizeFile := filepath.Join(t.TempDir(), "child-sizes")
 	child := exec.Command("sh", "-c", `stty -echo; sizes=0; printf '\033]2;demo-child\007'; while IFS= read -r line; do if test "$line" = size; then stty size >> "$1"; sizes=$((sizes+1)); printf '\033]2;sized-%d\007' "$sizes"; else printf '%s' "$line" > "$2"; break; fi; done`, "sh", sizeFile, inputFile)
 	ctx, cancel := context.WithTimeout(context.Background(), sessionTimeout)
 	defer cancel()
@@ -389,7 +389,7 @@ func TestDemoQuitPreservesCauseAndReapsChild(t *testing.T) {
 					}
 				}
 			})
-			inputFile := filepath.Join(projectTempDir(t), "child-input")
+			inputFile := filepath.Join(t.TempDir(), "child-input")
 			if err := os.WriteFile(inputFile, nil, 0600); err != nil {
 				t.Fatal(err)
 			}
@@ -520,7 +520,7 @@ func TestDemoPrefixKeysThroughRealSession(t *testing.T) {
 	} {
 		t.Run(form.name, func(t *testing.T) {
 			master, slave := demoTTY(t)
-			inputFile := filepath.Join(projectTempDir(t), "child-input")
+			inputFile := filepath.Join(t.TempDir(), "child-input")
 			if err := os.WriteFile(inputFile, nil, 0600); err != nil {
 				t.Fatal(err)
 			}

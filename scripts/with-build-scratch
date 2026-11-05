@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Scope build-only temporary files to this invocation. Tests and applications
+# run outside this wrapper so they retain the caller's native temp environment.
+set -euo pipefail
+root="$(cd "$(dirname "$0")/.." && pwd)"
+mkdir -p "$root/.tmp"
+scratch="$(mktemp -d "$root/.tmp/build.XXXXXX")"
+trap 'rm -r "$scratch"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 131' QUIT
+trap 'exit 143' TERM
+# Keep the command in the foreground: Bash waits for it before running traps,
+# including a signal sent only to this wrapper, so cleanup follows its exit.
+TMPDIR="$scratch" GOTMPDIR="$scratch" "$@"

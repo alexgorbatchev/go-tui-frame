@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 16:06
-last_modified: 2026-10-07 12:44
+last_modified: 2026-11-05 13:07
 status: current
 ---
 
@@ -42,10 +42,18 @@ just run -- nvim
 just run-ai -- nvim
 ```
 
+Build-only recipes use `scripts/with-build-scratch` to allocate a unique
+`.tmp/build.*` directory and remove it after the command exits, including
+failure or a handled signal. The wrapper scopes `TMPDIR` and `GOTMPDIR` to
+that command. Tests retain the caller's native temporary-directory settings
+and use `t.TempDir()` for fixtures. Example run recipes build first, then run
+`bin/tui-frame` with the caller's environment. Retained native sources, Zig
+caches, and installed archives live under ignored `.cache/native/`.
+
 `scripts/native.sh` owns the native build contract: the Ghostty revision, the
 archive's SHA-256, the required Zig version, the `zig build` flags, and the
 `pkg-config` check. The `native` and `native-linux` recipes run it with
-`.tmp/native` as its root; consumers run the same script, see
+`.cache/native` as its root; consumers run the same script, see
 [Build a consumer](#build-a-consumer). `TestNativeScriptBuildsBindingRevision`
 in `cmd/tui-frame` fails when the script's Ghostty revision differs from the
 `GIT_TAG` that the `CMakeLists.txt` of the binding version selected by `go.mod`
@@ -53,13 +61,13 @@ fetches, so a binding update in `go.mod` must update the script in the same
 change.
 
 `just native` downloads the pinned native source archive, verifies its SHA-256,
-extracts it into `.tmp/native/ghostty`, and builds only libghostty-vt with:
+extracts it into `.cache/native/ghostty`, and builds only libghostty-vt with:
 
 ```sh
 zig build -Demit-lib-vt -Demit-xcframework=false -Doptimize=ReleaseFast
 ```
 
-The script caches the archive as `.tmp/native/ghostty-<revision>.tar.gz`. It
+The script caches the archive as `.cache/native/ghostty-<revision>.tar.gz`. It
 downloads to a temporary file in the same directory and renames that file to
 the cached path only after the checksum passes. A failed or interrupted
 transfer, or a download with other bytes, leaves no file at the cached path, so
@@ -70,16 +78,16 @@ the cached path, and the expected digest. A cached archive that fails the
 check, because its digest differs or it cannot be read, is removed and
 downloaded again. When `shasum` is interrupted or cannot run, the script stops
 with its status and leaves the cached archive in place. The script needs
-`shasum` only while `.tmp/native/ghostty` does not exist; without it, the script
+`shasum` only while `.cache/native/ghostty` does not exist; without it, the script
 stops before it checks or downloads the archive. Recipes that run Go always need
 `shasum`; see below.
 
 The script extracts the archive into a temporary directory under
-`.tmp/native` and renames it to `.tmp/native/ghostty`. `just native` and
+`.cache/native` and renames it to `.cache/native/ghostty`. `just native` and
 `just native-linux` share that directory, so runs that start together can both
 extract. `mv` moves a directory into an existing target directory instead of
 failing, so each run renames its tree only while it holds the lock file
-`.tmp/native/ghostty.lock`, and checks for `.tmp/native/ghostty` again first.
+`.cache/native/ghostty.lock`, and checks for `.cache/native/ghostty` again first.
 When another run has already renamed its tree, the run checks that tree's
 revision marker and removes its own extraction. The lock is created with the
 shell's [noclobber option](https://pubs.opengroup.org/onlinepubs/9799919799/utilities/V3_chap02.html#tag_19_07_02),
@@ -95,23 +103,23 @@ Ghostty's build runs `git` in its source directory to detect its version. The
 extracted archive is not a git repository, so the script runs `zig build`
 without git's repository-local variables and with
 [`GIT_CEILING_DIRECTORIES`](https://git-scm.com/docs/git#Documentation/git.txt-GITCEILINGDIRECTORIES)
-set to `.tmp/native`. It removes the variables that
+set to `.cache/native`. It removes the variables that
 [`git rev-parse --local-env-vars`](https://git-scm.com/docs/git-rev-parse#Documentation/git-rev-parse.txt---local-env-vars)
 lists. [Git hooks](https://git-scm.com/docs/githooks) export `GIT_DIR` and
 `GIT_WORK_TREE`, `git rebase --exec` exports `GIT_DIR` in a linked worktree, and
 the ceiling does not apply to an explicit `GIT_DIR`. Git's repository
-discovery then stops at `.tmp/native`, so Ghostty uses the development version
+discovery then stops at `.cache/native`, so Ghostty uses the development version
 it assigns to builds outside a git checkout. Without these limits, git reports
 this repository's branch, commit, and tag to Ghostty, and a tag that is not
 Ghostty's matching release tag aborts the build. When `git` is not installed,
 Ghostty uses the same development version.
 
-The recipes pass `.tmp/native` as the root and name the installation and cache
+The recipes pass `.cache/native` as the root and name the installation and cache
 directories relative to it, and the script hands Zig their absolute paths. macOS
-uses `.tmp/native/prefix`. Linux selects the host architecture with just's
+uses `.cache/native/prefix`. Linux selects the host architecture with just's
 native `arch()` function and keeps each archive in its own prefix:
 
-| Go architecture | Zig target | Prefix under `.tmp/native/` |
+| Go architecture | Zig target | Prefix under `.cache/native/` |
 | --- | --- | --- |
 | `amd64` | `x86_64-linux-musl` | `linux-musl/amd64/prefix` |
 | `arm64` | `aarch64-linux-musl` | `linux-musl/arm64/prefix` |
@@ -120,7 +128,7 @@ The Linux target is passed to both Zig's archive build and cgo's C compiler.
 An existing source directory must contain the
 matching `.frame-source-revision`; the script refuses an unmarked or differently
 pinned directory. Zig caches and downloaded sources remain under ignored
-`.tmp/native/`. Binaries go to ignored `bin/`.
+`.cache/native/`. Binaries go to ignored `bin/`.
 
 The binding gets the archive's include and link flags from a `#cgo pkg-config`
 directive. Go's build cache key for a cgo package includes the `CGO_CPPFLAGS`,
@@ -130,7 +138,7 @@ in Go 1.27.1's `cmd/go/internal/work/exec.go`; see also
 [`go help cache`](https://pkg.go.dev/cmd/go#hdr-Build_and_test_caching)). The
 binding's module-cache directory is the same in every checkout, so without
 another key input a binding compiled in one checkout is reused in the others
-and links the first checkout's archive. Once that checkout's `.tmp/native` is
+and links the first checkout's archive. Once that checkout's `.cache/native` is
 removed, the other checkouts fail to link. An archive rebuilt at the same
 prefix, for example for another Ghostty revision, changes no key either: Go
 reuses the compiled binding, the existing `bin/tui-frame`, and cached test
@@ -205,7 +213,7 @@ prefix or cache would leave the root. For a macOS consumer:
 ```sh
 go mod download github.com/alexgorbatchev/go-tui-frame/v2
 frame=$(go list -m -f '{{.Dir}}' github.com/alexgorbatchev/go-tui-frame/v2)
-native="$PWD/.tmp/native"
+native="$PWD/.cache/native"
 bash "$frame/scripts/native.sh" "$native" native prefix zig-cache
 
 export CGO_ENABLED=1

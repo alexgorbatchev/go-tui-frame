@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 13:56
-last_modified: 2026-10-07 15:45
+last_modified: 2026-11-05 13:07
 status: current
 ---
 
@@ -16,7 +16,12 @@ From the repository root:
 - `just example run-ai --help` runs its agent help.
 - `just example build` writes the executable to `bin/tui-frame`.
 - `just example test` runs the CLI tests with the race detector.
-- `just native` installs the pinned native archive under ignored `.tmp/native`.
+- `just native` installs the pinned native archive under ignored `.cache/native`.
+- Build-only recipes use `scripts/with-build-scratch`; each invocation owns and
+  removes its `.tmp/build.*` directory. Never export a shared `TMPDIR` or
+  `GOTMPDIR` from a justfile. Tests use native temporary directories and
+  `t.TempDir()` cleanup. Run recipes build first and execute with the caller's
+  environment, outside the build scratch scope.
 - `just build-linux` builds the Linux amd64 executable with musl and a static link;
   `just build-linux arm64` selects Linux arm64. Native Linux recipes select the
   host architecture and use separate prefixes for each archive.

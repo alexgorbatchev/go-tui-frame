@@ -30,8 +30,8 @@ const (
 func TestBuildCache(t *testing.T) {
 	t.Parallel()
 	source := pkgConfigVariable(t, "prefix")
-	cache := repositoryTempDir(t)
-	buildAgainstPrefix(t, source, cache, filepath.Join(repositoryTempDir(t), "tui-frame"), "")
+	cache := t.TempDir()
+	buildAgainstPrefix(t, source, cache, filepath.Join(t.TempDir(), "tui-frame"), "")
 
 	// Two checkouts with their own prefixes share one cached binding unless
 	// the build environment names the prefix. This builds against two
@@ -60,7 +60,7 @@ func TestBuildCache(t *testing.T) {
 	t.Run("FollowsNativeArchiveContents", func(t *testing.T) {
 		t.Parallel()
 		prefix := copyNativePrefix(t, source)
-		binary := filepath.Join(repositoryTempDir(t), "tui-frame")
+		binary := filepath.Join(t.TempDir(), "tui-frame")
 
 		buildAgainstPrefix(t, prefix, cache, binary, "")
 		before := goBuildID(t, binary)
@@ -70,27 +70,6 @@ func TestBuildCache(t *testing.T) {
 			t.Errorf("go build reused %s after its native archive changed; build ID %s", binary, after)
 		}
 	})
-}
-
-// repositoryTempDir returns a new directory under the repository's .tmp that
-// is removed when the test ends. Unlike projectTempDir it does not set TMPDIR,
-// which parallel tests cannot do.
-func repositoryTempDir(t *testing.T) string {
-	t.Helper()
-	root, err := filepath.Abs("../..")
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir, err := os.MkdirTemp(filepath.Join(root, ".tmp"), "native-cache-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := os.RemoveAll(dir); err != nil {
-			t.Errorf("remove %s: %v", dir, err)
-		}
-	})
-	return dir
 }
 
 // rewriteLastMemberOwner changes the owner ID in the header of the archive's
@@ -150,7 +129,7 @@ func pkgConfigVariable(t *testing.T, name string) string {
 // step does for each checkout's --prefix.
 func copyNativePrefix(t *testing.T, source string) string {
 	t.Helper()
-	prefix := repositoryTempDir(t)
+	prefix := t.TempDir()
 	if err := os.CopyFS(filepath.Join(prefix, "include"), os.DirFS(filepath.Join(source, "include"))); err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +186,7 @@ func copyFile(t *testing.T, from, to string) {
 // reports.
 func hostLinkAgainstPrefix(t *testing.T, prefix, cache string) string {
 	t.Helper()
-	out := buildAgainstPrefix(t, prefix, cache, filepath.Join(repositoryTempDir(t), "tui-frame"), "-v")
+	out := buildAgainstPrefix(t, prefix, cache, filepath.Join(t.TempDir(), "tui-frame"), "-v")
 	for line := range strings.Lines(out) {
 		if strings.HasPrefix(line, "host link: ") {
 			return line

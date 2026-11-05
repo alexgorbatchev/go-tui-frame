@@ -95,7 +95,7 @@ func TestExecuteCtrlQStopsItsRealChild(t *testing.T) {
 		}, 9},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			ready := filepath.Join(projectTempDir(t), "child-started")
+			ready := filepath.Join(t.TempDir(), "child-started")
 			t.Setenv("FRAME_CLI_SIGTERM_READY", ready)
 			// cliTTY replaces os.Args, which child reads.
 			child := tt.child(ready)
@@ -159,7 +159,7 @@ const frameInputQueue = 1 << 20
 // together: both are held behind the string, and outer reads pause until the
 // child exits.
 func TestExecuteReturnsChildStatusWhenCtrlQFollowsItsExit(t *testing.T) {
-	dir := projectTempDir(t)
+	dir := t.TempDir()
 	started, exit := filepath.Join(dir, "started"), filepath.Join(dir, "exit")
 	script := `stty raw -echo; printf started > "$1"; while [ ! -e "$2" ]; do sleep 0.01; done; exit 7`
 	master, diagnostic := cliTTY(t, "--", "sh", "-c", script, "sh", started, exit)
@@ -264,7 +264,7 @@ func TestCLIQuitChild(t *testing.T) {
 // write must both happen inside that window. If they do not, the child dies
 // before the frame has failed to paint, and the test fails.
 func TestExecuteCtrlQReportsShutdownFailures(t *testing.T) {
-	dir := projectTempDir(t)
+	dir := t.TempDir()
 	t.Setenv("FRAME_CLI_QUIT_DIR", dir)
 	t.Setenv("AGENT", "0")
 	master, diagnostic := cliTTY(t, "--", os.Args[0], "-test.run=^TestCLIQuitChild$")
@@ -415,7 +415,7 @@ func TestExecuteSignalsCancelTheSession(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			dir := projectTempDir(t)
+			dir := t.TempDir()
 			diagnostic := filepath.Join(dir, "diagnostic")
 			stderr, err := os.Create(diagnostic)
 			if err != nil {
@@ -558,7 +558,7 @@ func awaitGone(t *testing.T, target int, failure string) {
 func cliTTY(t *testing.T, args ...string) (*os.File, string) {
 	t.Helper()
 	master, slave := demoTTY(t)
-	diagnostic, err := os.CreateTemp(projectTempDir(t), "diagnostic")
+	diagnostic, err := os.CreateTemp(t.TempDir(), "diagnostic")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -575,7 +575,7 @@ func cliTTY(t *testing.T, args ...string) (*os.File, string) {
 }
 
 func TestExecutePreservesEveryChildArgument(t *testing.T) {
-	output := filepath.Join(projectTempDir(t), "child-argv")
+	output := filepath.Join(t.TempDir(), "child-argv")
 	want := []string{"--help", "word two", "", "--", "-v", "$literal"}
 	args := []string{"--", "sh", "-c", `out=$1; shift; printf '%s\000' "$@" > "$out"`, "sh", output}
 	cliTTY(t, append(args, want...)...)

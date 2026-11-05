@@ -131,7 +131,7 @@ func TestSkillOutputAndWriteFailures(t *testing.T) {
 			}
 		})
 	}
-	f, err := os.CreateTemp(projectTempDir(t), "closed-output")
+	f, err := os.CreateTemp(t.TempDir(), "closed-output")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,19 +150,9 @@ func TestSkillOutputAndWriteFailures(t *testing.T) {
 	}
 }
 
-func projectTempDir(t *testing.T) string {
-	t.Helper()
-	root, err := filepath.Abs("../..")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("TMPDIR", filepath.Join(root, ".tmp"))
-	return t.TempDir()
-}
-
 func TestHelpAndUsageReportActualWriteFailures(t *testing.T) {
 	t.Setenv("AGENT", "1")
-	f, err := os.CreateTemp(projectTempDir(t), "closed-help-output")
+	f, err := os.CreateTemp(t.TempDir(), "closed-help-output")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +263,7 @@ func TestEmbeddedReferenceCoversTheLiveInterface(t *testing.T) {
 }
 
 func TestSkillIsEmbeddedAndWorksWithoutRepositoryFiles(t *testing.T) {
-	dir := projectTempDir(t)
+	dir := t.TempDir()
 	binary := buildExample(t)
 	for _, mode := range []string{"0", "1"} {
 		t.Setenv("AGENT", mode)
@@ -288,7 +278,7 @@ func TestSkillIsEmbeddedAndWorksWithoutRepositoryFiles(t *testing.T) {
 
 func buildExample(t *testing.T) string {
 	t.Helper()
-	binary := filepath.Join(projectTempDir(t), "tui-frame")
+	binary := filepath.Join(t.TempDir(), "tui-frame")
 	args := []string{"build", "-o", binary}
 	if os.Getenv("GOOS") == "linux" || runtime.GOOS == "linux" {
 		args = append(args, "-ldflags=-linkmode=external -extldflags=-static")

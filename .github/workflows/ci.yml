@@ -104,10 +104,10 @@ jobs:
         uses: actions/cache@v6
         with:
           path: |
-            .tmp/native/ghostty
-            .tmp/native/${{ steps.native.outputs.prefix }}
-            .tmp/native/${{ steps.native.outputs.cache }}
-            .tmp/native/zig-global-cache
+            .cache/native/ghostty
+            .cache/native/${{ steps.native.outputs.prefix }}
+            .cache/native/${{ steps.native.outputs.cache }}
+            .cache/native/zig-global-cache
           key: native-${{ runner.os }}-${{ runner.arch }}-zig-${{ matrix.zig_sha }}-script-${{ hashFiles('scripts/native.sh') }}-inputs-${{ steps.native.outputs.digest }}
 
       - name: Verify module hygiene, build, vet, and race tests

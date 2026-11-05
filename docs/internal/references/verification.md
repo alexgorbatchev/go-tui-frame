@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 20:10
-last_modified: 2026-10-07 13:50
+last_modified: 2026-11-05 13:07
 status: current
 ---
 
@@ -24,7 +24,7 @@ Direct Go commands need the native environment that the justfile exports. Run
 macOS:
 
 ```sh
-export CGO_ENABLED=1 PKG_CONFIG_PATH="$PWD/.tmp/native/prefix/share/pkgconfig" TMPDIR="$PWD/.tmp"
+export CGO_ENABLED=1 PKG_CONFIG_PATH="$PWD/.cache/native/prefix/share/pkgconfig"
 ```
 
 The commands below run `go` through `scripts/with-libghostty-cppflags`, as the
@@ -295,8 +295,8 @@ arm64). `just check` runs `go mod tidy -diff`, the native archive build,
 `go test -race ./...`. Both jobs passed at `f674572` (CI run 37510976188),
 so the race suite also ran on Linux x86_64.
 
-Each job restores `.tmp/native/ghostty`, the installed prefix, the Zig cache
-and `.tmp/native/zig-global-cache` with
+Each job restores `.cache/native/ghostty`, the installed prefix, the Zig cache
+and `.cache/native/zig-global-cache` with
 [`actions/cache`](https://github.com/actions/cache) before `just check`. A
 change to any part of the key misses the cache and runs a full native build:
 
@@ -349,7 +349,7 @@ entry saved after it would hold both hosts' cache objects, and each later
 host would add its own. `actions/cache` saves an entry only after
 a successful job and never replaces an existing one. On a hit, Zig re-hashes
 the restored files, whose inodes changed, and reuses its cached outputs when
-their contents match. Locally, a `.tmp/native` restored from a tar of those
+their contents match. In the recorded run, a legacy `.tmp/native` restored from a tar of those
 four directories, without the archive, rebuilt in under two seconds with no
 download and produced the same `libghostty-vt.a`. On CI, four runs have
 reached the restore step: 37660508704 (`608a3b7`), 37663431480 (`11a6de0`),

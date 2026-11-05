@@ -71,7 +71,7 @@ func TestNativeScriptRefusesPathsOutsideRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := filepath.Join(repositoryTempDir(t), "native")
+	root := filepath.Join(t.TempDir(), "native")
 	tests := []struct {
 		name string
 		args []string
