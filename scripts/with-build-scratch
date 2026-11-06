@@ -1,15 +1,136 @@
 #!/usr/bin/env bash
-# Scope build-only temporary files to this invocation. Tests and applications
-# run outside this wrapper so they retain the caller's native temp environment.
+# Build tools own temporary storage; tests and applications keep native defaults.
 set -euo pipefail
+if (($# == 0)); then
+    printf 'usage: with-build-scratch COMMAND [ARG...]\n' >&2
+    exit 1
+fi
 root="$(cd "$(dirname "$0")/.." && pwd)"
+# Bash cannot transfer terminal ownership without blocking in fg. Core Perl's
+# POSIX binding provides tcgetpgrp/tcsetpgrp before any build helper exists.
+terminal_group=$(perl -MPOSIX=tcgetpgrp -MErrno=ENXIO,ENODEV,ENOTTY -e '
+    open my $tty, "+<", "/dev/tty" or do {
+        exit 0 if $! == ENXIO || $! == ENODEV || $! == ENOTTY;
+        die "open controlling terminal: $!\n";
+    };
+    my $group = tcgetpgrp(fileno $tty);
+    die "read terminal foreground group: $!\n" unless defined $group && $group > 0;
+    print $group if $group == getpgrp;
+')
 mkdir -p "$root/.tmp"
 scratch="$(mktemp -d "$root/.tmp/build.XXXXXX")"
-trap 'rm -r "$scratch"' EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 131' QUIT
-trap 'exit 143' TERM
-# Keep the command in the foreground: Bash waits for it before running traps,
-# including a signal sent only to this wrapper, so cleanup follows its exit.
-TMPDIR="$scratch" GOTMPDIR="$scratch" "$@"
+stopped=0
+signal_status=0
+grace=5
+
+cleanup() {
+    local status=$?
+    if [[ -n "$terminal_group" ]]; then
+        perl -MPOSIX=tcsetpgrp -e '
+            open my $tty, "+<", "/dev/tty" or die "open controlling terminal: $!\n";
+            $SIG{TTOU} = "IGNORE";
+            tcsetpgrp(fileno $tty, $ARGV[0]) or die "restore terminal foreground group: $!\n";
+        ' "$terminal_group" || status=1
+    fi
+    if ((stopped)); then
+        rm -r -- "$scratch" || status=1
+    else
+        printf 'Build consumers not confirmed stopped; retained %s\n' "$scratch" >&2
+        status=1
+    fi
+    trap - EXIT
+    exit "$status"
+}
+trap cleanup EXIT
+# Only record signals here: shutdown deadlines are owned by the loop, so
+# repeated signals cannot interrupt cleanup or restart its grace period.
+trap 'if ((signal_status == 0)); then signal_status=129; fi' HUP
+trap 'if ((signal_status == 0)); then signal_status=130; fi' INT
+trap 'if ((signal_status == 0)); then signal_status=131; fi' QUIT
+trap 'if ((signal_status == 0)); then signal_status=143; fi' TERM
+
+# Job control gives this command its own group without depending on setsid
+# (not present on macOS) or a helper that setup would first have to build.
+set -m
+TMPDIR="$scratch" GOTMPDIR="$scratch" perl -MPOSIX=tcsetpgrp -e '
+    if (shift @ARGV) {
+        open my $tty, "+<", "/dev/tty" or die "open controlling terminal: $!\n";
+        {
+            local $SIG{TTOU} = "IGNORE";
+            tcsetpgrp(fileno $tty, getpgrp) or die "give build command terminal foreground: $!\n";
+        }
+    }
+    exec {$ARGV[0]} @ARGV;
+    warn "exec build command: $!\n";
+    exit 127;
+' "$terminal_group" "$@" <&0 &
+child=$!
+set +m
+
+group_exists() {
+    if kill -0 -- "-$child" 2>/dev/null; then return 0; fi
+    # kill's exit status cannot distinguish ESRCH from EPERM. Confirm absence
+    # using POSIX ps; failed or malformed inspection must retain scratch.
+    local groups group
+    groups=$(LC_ALL=C ps -A -o pgid=) || return 2
+    [[ -n "$groups" ]] || return 2
+    while read -r group; do
+        [[ "$group" =~ ^[0-9]+$ ]] || return 2
+        if [[ "$group" = "$child" ]]; then return 0; fi
+    done <<< "$groups"
+    return 1
+}
+
+send_group() {
+    if kill -"$1" -- "-$child" 2>/dev/null; then return; fi
+    local state=0
+    group_exists || state=$?
+    # The last member may have exited between inspection and signalling.
+    [[ "$state" = 1 ]]
+}
+
+status=0
+joined=0
+stage=0
+deadline=0
+while :; do
+    # Running AND stopped jobs remain consumers. Once neither list contains
+    # our only job, wait is nonblocking and preserves its actual exit status.
+    if ((joined == 0)); then
+        if ! active_jobs=$(jobs -pr; jobs -ps); then
+            if ((signal_status != 0)); then continue; fi
+            exit 1
+        fi
+        if [[ -z "$active_jobs" ]]; then
+            wait "$child" || status=$?
+            joined=1
+            if ((deadline == 0)); then deadline=$((SECONDS + grace)); fi
+        fi
+    fi
+    state=0
+    group_exists || state=$?
+    if ((state == 2)); then exit 1; fi
+    if ((state == 1 && joined)); then
+        stopped=1
+        break
+    fi
+    if ((signal_status != 0 && stage == 0)); then
+        send_group TERM || exit 1
+        stage=1
+        deadline=$((SECONDS + grace))
+    fi
+    if ((deadline != 0 && SECONDS >= deadline)); then
+        if ((status == 0)); then status=1; fi
+        case "$stage" in
+            0) send_group TERM || exit 1; stage=1 ;;
+            1) send_group KILL || exit 1; stage=2 ;;
+            2) exit 1 ;;
+        esac
+        deadline=$((SECONDS + grace))
+    fi
+    # A group-directed signal also interrupts this foreground polling sleep.
+    # Do not let errexit bypass the cancellation loop in that case.
+    sleep 0.05 || { if ((signal_status == 0)); then exit 1; fi; }
+done
+if ((signal_status != 0)); then status=$signal_status; fi
+exit "$status"

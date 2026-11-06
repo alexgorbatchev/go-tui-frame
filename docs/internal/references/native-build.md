@@ -1,6 +1,6 @@
 ---
 created_on: 2026-10-01 16:06
-last_modified: 2026-11-05 13:07
+last_modified: 2026-11-05 17:57
 status: current
 ---
 
@@ -32,6 +32,10 @@ provides the `pkg-config` executable.
 
 ## Build and verify this repository
 
+The repository's build wrapper also requires Perl with its core `POSIX` module
+for terminal foreground ownership. It uses Bash job control and POSIX `ps` to
+supervise build process groups on Linux and macOS.
+
 From the repository root:
 
 ```sh
@@ -43,9 +47,16 @@ just run-ai -- nvim
 ```
 
 Build-only recipes use `scripts/with-build-scratch` to allocate a unique
-`.tmp/build.*` directory and remove it after the command exits, including
-failure or a handled signal. The wrapper scopes `TMPDIR` and `GOTMPDIR` to
-that command. Tests retain the caller's native temporary-directory settings
+`.tmp/build.*` directory. The command runs in its own process group and must
+keep its descendants in that group. Scratch is removed only after the direct
+child is joined and the group has no remaining consumers, including on failure
+or a handled signal. After the leader exits, descendants have five seconds to
+finish; cancellation sends TERM immediately. Shutdown allows five seconds after
+TERM before KILL and another five seconds to confirm the group is gone. Failed
+inspection or unconfirmed shutdown retains scratch and reports an error.
+Interactive commands receive the foreground terminal, which is restored to the
+caller on exit. The wrapper scopes `TMPDIR` and `GOTMPDIR` to that command.
+Tests retain the caller's native temporary-directory settings
 and use `t.TempDir()` for fixtures. Example run recipes build first, then run
 `bin/tui-frame` with the caller's environment. Retained native sources, Zig
 caches, and installed archives live under ignored `.cache/native/`.
