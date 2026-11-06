@@ -4,6 +4,7 @@
 # Agent scratch space and isolated Git workspaces.
 /.tmp/
 /.cache/
+/.state/
 /.workspaces/
 
 # Go test binaries, coverage output, and profiling data.
